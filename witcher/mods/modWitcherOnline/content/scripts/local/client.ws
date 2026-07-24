@@ -2942,6 +2942,15 @@ statemachine class r_MultiplayerClient
         {  
             entities[i].Destroy();
         }
+
+        for(i = 0; i < players.Size(); i += 1)
+        {
+            if(players[i])
+            {
+                players[i].horse = NULL;
+                players[i].lastMounted = false;
+            }
+        }
     }
 
     public function getNameColors() : array<r_NameColor>

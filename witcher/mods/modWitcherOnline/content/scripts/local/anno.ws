@@ -1375,3 +1375,27 @@ function WO_WhiteOrchard(self: IScriptable, out groups: array<CO_SpotEntGroup>)
         group.Add(ChillSpot(Vector(58.649, 8.507, 2.353348), EulerAngles(0, -87.870636), CST_Table));
     }
 }
+
+@wrapMethod(CActor)
+function OnSpawned( spawnData : SEntitySpawnData )
+{
+    var tags : array<name>;
+    var i : int;
+    wrappedMethod(spawnData);
+
+    tags = this.GetTags();
+
+
+    for(i = 0; i < tags.Size(); i+=1)
+    {
+        Log("Jarso spawned new");
+        Log(this.GetName() + " " + i + " " +tags[i]);
+    }
+    /*GetWitcherPlayer().DisplayHudMessage("Spawned entity");
+
+    if(this.HasTag('wo_horse') && !this.HasTag('online_horse'))
+    {
+        this.Destroy();
+        GetWitcherPlayer().DisplayHudMessage("Destroyed bad horse");
+    }*/
+}

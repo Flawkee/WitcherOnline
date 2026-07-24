@@ -6061,42 +6061,90 @@ state WO_UpdateCPC in r_RemotePlayer
         }
     }
 
+    private var lastHorseMountRequestAt : float;
+
     latent function spawnHorse()
     {
         var l_aiTree : CAIHorseDoNothingAction;
-        var adjustor : CMovementAdjustor; 
-        var ent_2 : CEntity;
+        var adjustor : CMovementAdjustor;
         var temp_2 : CEntityTemplate;
         var horseTag : array<name>;
+        var now : float;
+
+        if(!parent.ghost)
+        {
+            return;
+        }
 
         if(!parent.horse)
         {
-            temp_2 = (CEntityTemplate)LoadResourceAsync( "dlc\dlc_mpmod\data\entities\horse_vehicle.w2ent", true );
+            temp_2 = (CEntityTemplate)LoadResourceAsync("dlc\dlc_mpmod\data\entities\horse_vehicle.w2ent", true);
+
+            if(!temp_2 || !parent.ghost)
+            {
+                return;
+            }
 
             horseTag.Clear();
             horseTag.PushBack('online_horse');
             horseTag.PushBack('wo_horse');
 
-            parent.horse = (CActor)theGame.CreateEntity(temp_2, parent.ghost.GetWorldPosition(), parent.ghost.GetWorldRotation(), true,false,false,PM_DontPersist,horseTag);
+            parent.horse = (CActor)theGame.CreateEntity(temp_2, parent.ghost.GetWorldPosition(),parent.ghost.GetWorldRotation(), true, false, false, PM_DontPersist,horseTag);
 
-            if(!parent.horse || !temp_2)
+            if(!parent.horse)
+            {
                 return;
+            }
 
-            ((CActor)parent.horse).EnableCollisions(false);
-            ((CActor)parent.horse).EnableCharacterCollisions(false); 
-            ((CActor)parent.horse).SetGameplayVisibility( false );
+            parent.horse.EnableCollisions(false);
+            parent.horse.EnableCharacterCollisions(false);
+            parent.horse.SetGameplayVisibility(false);
 
             updateHorseAppearance();
 
             adjustor = parent.ghost.GetMovingAgentComponent().GetMovementAdjustor();
+
             adjustor.Cancel(adjustor.GetRequest('w3mp_ghost'));
 
             l_aiTree = new CAIHorseDoNothingAction in parent.ghost;
             l_aiTree.OnCreated();
-            ((CActor)parent.ghost).ForceAIBehavior( l_aiTree, BTAP_Emergency, 'AI_Rider_Load_Forced' );
+
+            parent.ghost.ForceAIBehavior(l_aiTree, BTAP_Emergency, 'AI_Rider_Load_Forced');
+
+            SleepOneFrame();
+
+            if(!parent.horse || !parent.ghost)
+            {
+                return;
+            }
+
+            if(!parent.horse.HasTag('wo_horse'))
+            {
+                return;
+            }
         }
 
-        ((CActor)parent.ghost).SignalGameplayEventParamInt( 'RidingManagerMountHorse', MT_instant | MT_fromScript );
+        if(parent.ghost.IsUsingHorse(true))
+        {
+            lastHorseMountRequestAt = 0.0f;
+            return;
+        }
+
+        now = theGame.GetEngineTimeAsSeconds();
+
+        if(lastHorseMountRequestAt > now)
+        {
+            lastHorseMountRequestAt = 0.0f;
+        }
+
+        if(lastHorseMountRequestAt > 0.0f && now - lastHorseMountRequestAt < 0.5f)
+        {
+            return;
+        }
+
+        lastHorseMountRequestAt = now;
+
+        parent.ghost.SignalGameplayEventParamInt('RidingManagerMountHorse', MT_instant | MT_fromScript);
     }
 
     latent function dismountHorse()
@@ -6110,17 +6158,8 @@ state WO_UpdateCPC in r_RemotePlayer
 
     latent function spawnBoat()
     {
-        var l_aiTree : CAIHorseDoNothingAction;
-        var adjustor : CMovementAdjustor; 
-        var ent_2 : CEntity;
         var temp_2 : CEntityTemplate;
         var horseTag : array<name>;
-
-        var bonePosition : Vector;
-        var boneRotation : EulerAngles;
-        var boneIndex : int;
-        var anchor : CEntity;
-        var anchor_temp : CEntityTemplate;
 
         if(parent.boat)
         {
@@ -6492,8 +6531,7 @@ state WO_UpdateCPC in r_RemotePlayer
             if(parent.isMounted)
             {
                 if(!parent.lastMounted || !parent.horse)
-                {                
-                    // mount horse
+                {
                     spawnHorse();
 
                     if(!parent.horse)
@@ -6504,16 +6542,9 @@ state WO_UpdateCPC in r_RemotePlayer
 
                     parent.horse.SetVisibility(true);
                 }
-
-                if(parent.horse && !parent.ghost.IsUsingHorse(true))
+                else if(!parent.ghost.IsUsingHorse(true))
                 {
                     spawnHorse();
-
-                    if(!parent.horse)
-                    {
-                        SleepOneFrame();
-                        continue;
-                    }
                 }
 
                 if(!parent.horse.GetVisibility())
@@ -6521,7 +6552,7 @@ state WO_UpdateCPC in r_RemotePlayer
                     parent.horse.SetVisibility(true);
                 }
 
-                if (parent.horse && (((CAnimatedComponent)parent.horse.GetComponentByClassName('CAnimatedComponent')).HasFrozenPose()))
+                if(((CAnimatedComponent)parent.horse.GetComponentByClassName('CAnimatedComponent')).HasFrozenPose())
                 {
                     ((CAnimatedComponent)parent.horse.GetComponentByClassName('CAnimatedComponent')).UnfreezePose();
                 }
