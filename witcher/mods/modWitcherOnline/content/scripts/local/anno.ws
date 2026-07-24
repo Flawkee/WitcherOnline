@@ -1376,26 +1376,14 @@ function WO_WhiteOrchard(self: IScriptable, out groups: array<CO_SpotEntGroup>)
     }
 }
 
-@wrapMethod(CActor)
-function OnSpawned( spawnData : SEntitySpawnData )
+@wrapMethod(W3GuiBaseInventoryComponent)
+function SetInventoryFlashObjectForItem( item : SItemUniqueId, out flashObject : CScriptedFlashObject) : void
 {
-    var tags : array<name>;
-    var i : int;
-    wrappedMethod(spawnData);
+    wrappedMethod(item, flashObject);
 
-    tags = this.GetTags();
-
-
-    for(i = 0; i < tags.Size(); i+=1)
+    if(thePlayer.IsCiri() && (_inv.ItemHasTag(item, 'TimedGwent') || _inv.ItemHasTag(item, 'NormalGwent') || _inv.ItemHasTag(item, 'Emote') || _inv.ItemHasTag(item, 'Chat')
+     || _inv.ItemHasTag(item, 'Morph') || _inv.ItemHasTag(item, 'PlayerMenu')))
     {
-        Log("Jarso spawned new");
-        Log(this.GetName() + " " + i + " " +tags[i]);
+        flashObject.SetMemberFlashBool( "cantEquip", false );
     }
-    /*GetWitcherPlayer().DisplayHudMessage("Spawned entity");
-
-    if(this.HasTag('wo_horse') && !this.HasTag('online_horse'))
-    {
-        this.Destroy();
-        GetWitcherPlayer().DisplayHudMessage("Destroyed bad horse");
-    }*/
 }
