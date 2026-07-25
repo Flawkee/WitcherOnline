@@ -3259,8 +3259,8 @@ statemachine class r_MultiplayerClient
 
         addChill('geralt_relaxed_sitting_and_resting_2', 8.7);
         addChill('boat_passenger_sit_idle', 2.33);
-        addChill('high_sitting_determined_idle', 18.4);
         addChill('horse_breathing_slow', 2.60);
+        addChill('ep1_shani_sitting_sad_idle', 3.23);
     }
 
     public function findChillDuration(t : name) : float 
@@ -6581,7 +6581,7 @@ function mpghosts_emote(num : int)
     {
         if(cpcPlayerType != ENR_PlayerGeralt && cpcPlayerType != ENR_PlayerWitcher && cpcPlayerType != ENR_PlayerUnknown)
         {
-            anim = 'high_sitting_determined_idle';
+            anim = 'ep1_shani_sitting_sad_idle';
         }
         else
         {

@@ -1946,7 +1946,7 @@ statemachine class r_RemotePlayer
             {
                 if(cpcPlayerType != ENR_PlayerGeralt && cpcPlayerType != ENR_PlayerWitcher && cpcPlayerType != ENR_PlayerUnknown)
                 {
-                    queueAnim('high_sitting_determined_idle', 18.4, 0, 0, 'emote', true, true);
+                    queueAnim('ep1_shani_sitting_sad_idle', 3.23, 0, 0, 'emote', true, true);
                 }
                 else
                 {
@@ -2848,7 +2848,7 @@ statemachine class r_RemotePlayer
             {
                 if(cpcPlayerType != ENR_PlayerGeralt && cpcPlayerType != ENR_PlayerWitcher && cpcPlayerType != ENR_PlayerUnknown)
                 {
-                    queueAnim('combat_locomotion_man_geralt_ex_idle', 5.27, 0.4, 0, 'sword_movement_idle', true);
+                    queueAnim('combat_locomotion_man_geralt_ex_idle', 5.25, 0.4, 0, 'sword_movement_idle', true);
                 }
                 else
                 {
@@ -2901,11 +2901,25 @@ statemachine class r_RemotePlayer
             {
                 if(cpcPlayerType != ENR_PlayerGeralt && cpcPlayerType != ENR_PlayerWitcher && cpcPlayerType != ENR_PlayerUnknown)
                 {
-                    queueAnim('combat_locomotion_man_geralt_ex_idle', 5.27, 0.4, 0, 'sword_movement_idle');
+                    if(lastAnim == 'combat_locomotion_man_geralt_ex_idle')
+                    {
+                        queueAnim('combat_locomotion_man_geralt_ex_idle', 5.25, 0.0, 0, 'sword_movement_idle');
+                    }
+                    else
+                    {
+                        queueAnim('combat_locomotion_man_geralt_ex_idle', 5.25, 0.4, 0, 'sword_movement_idle');
+                    }
                 }
                 else
                 {
-                    queueAnim('combat_locomotion_man_geralt_ex_idle', 2.67, 0.4, 0, 'sword_movement_idle');
+                    if(lastAnim == 'combat_locomotion_man_geralt_ex_idle')
+                    {
+                        queueAnim('combat_locomotion_man_geralt_ex_idle', 2.67, 0, 0, 'sword_movement_idle');
+                    }
+                    else
+                    {
+                        queueAnim('combat_locomotion_man_geralt_ex_idle', 2.67, 0.4, 0, 'sword_movement_idle');
+                    }
                 }
             }
             else
@@ -2940,19 +2954,25 @@ statemachine class r_RemotePlayer
         {
             if(heldItem == "silver" || heldItem == "steel")
             {
-                rand = RandDifferent(lastIdleRand, 3);
+                if(cpcPlayerType != ENR_PlayerGeralt && cpcPlayerType != ENR_PlayerWitcher && cpcPlayerType != ENR_PlayerUnknown)
+                {
+                }
+                else
+                {
+                    rand = RandDifferent(lastIdleRand, 3);
 
-                if(rand == 0)
-                {
-                    queueAnim('inventory_sword_check1', 6.23, 0.4, 0, 'afk', true);
-                }
-                else if(rand == 1)
-                {
-                    queueAnim('inventory_sword_check2', 6.67, 0.4, 0, 'afk', true);
-                }
-                else if(rand == 2)
-                {
-                    queueAnim('inventory_heavy_melee_check1', 5.6, 0.4, 0, 'afk', true);
+                    if(rand == 0)
+                    {
+                        queueAnim('inventory_sword_check1', 6.23, 0.4, 0, 'afk', true);
+                    }
+                    else if(rand == 1)
+                    {
+                        queueAnim('inventory_sword_check2', 6.67, 0.4, 0, 'afk', true);
+                    }
+                    else if(rand == 2)
+                    {
+                        queueAnim('inventory_heavy_melee_check1', 5.6, 0.4, 0, 'afk', true);
+                    }
                 }
             }
             else
@@ -3064,7 +3084,7 @@ statemachine class r_RemotePlayer
                     {
                         if(cpcPlayerType != ENR_PlayerGeralt && cpcPlayerType != ENR_PlayerWitcher && cpcPlayerType != ENR_PlayerUnknown)
                         {
-                            queueAnim('combat_locomotion_man_geralt_ex_idle', 5.27, 0.4, 0, 'sword_movement_idle', true);
+                            queueAnim('combat_locomotion_man_geralt_ex_idle', 5.25, 0.4, 0, 'sword_movement_idle', true);
                         }
                         else
                         {
@@ -3079,7 +3099,7 @@ statemachine class r_RemotePlayer
                     {
                         if(cpcPlayerType != ENR_PlayerGeralt && cpcPlayerType != ENR_PlayerWitcher && cpcPlayerType != ENR_PlayerUnknown)
                         {
-                            queueAnim('combat_locomotion_man_geralt_ex_idle', 5.27, 0.4, 0, 'sword_movement_idle');
+                            queueAnim('combat_locomotion_man_geralt_ex_idle', 5.25, 0.4, 0, 'sword_movement_idle');
                         }
                         else
                         {
@@ -3096,7 +3116,7 @@ statemachine class r_RemotePlayer
                         if(cpcPlayerType != ENR_PlayerGeralt && cpcPlayerType != ENR_PlayerWitcher && cpcPlayerType != ENR_PlayerUnknown)
                         {
                             queueAnim('combat_locomotion_sprint_rightforward_to_idle', 1.9, 0.2, 0, 'none', true);
-                            queueAnim('combat_locomotion_man_geralt_ex_idle', 5.27, 0.7, 0, 'sword_movement_idle');
+                            queueAnim('combat_locomotion_man_geralt_ex_idle', 5.25, 0.7, 0, 'sword_movement_idle');
                         }
                         else
                         {
@@ -3109,7 +3129,7 @@ statemachine class r_RemotePlayer
                         if(cpcPlayerType != ENR_PlayerGeralt && cpcPlayerType != ENR_PlayerWitcher && cpcPlayerType != ENR_PlayerUnknown)
                         {
                             queueAnim('combat_locomotion_walk_rightup_to_idle', 1.5, 0.2, 0, 'none', true);
-                            queueAnim('combat_locomotion_man_geralt_ex_idle', 5.27, 0.7, 0, 'sword_movement_idle');
+                            queueAnim('combat_locomotion_man_geralt_ex_idle', 5.25, 0.7, 0, 'sword_movement_idle');
                         }
                         else
                         {
@@ -3123,7 +3143,7 @@ statemachine class r_RemotePlayer
                         if(cpcPlayerType != ENR_PlayerGeralt && cpcPlayerType != ENR_PlayerWitcher && cpcPlayerType != ENR_PlayerUnknown)
                         {
                             queueAnim('combat_locomotion_run_rightup_to_idle', 1.1, 0.2, 0, 'none', true);
-                            queueAnim('combat_locomotion_man_geralt_ex_idle', 5.27, 0.7, 0, 'sword_movement_idle');
+                            queueAnim('combat_locomotion_man_geralt_ex_idle', 5.25, 0.7, 0, 'sword_movement_idle');
                         }
                         else
                         {
@@ -3136,7 +3156,7 @@ statemachine class r_RemotePlayer
                     {
                         if(cpcPlayerType != ENR_PlayerGeralt && cpcPlayerType != ENR_PlayerWitcher && cpcPlayerType != ENR_PlayerUnknown)
                         {
-                            queueAnim('combat_locomotion_man_geralt_ex_idle', 5.27, 0, 0, 'sword_movement_idle');
+                            queueAnim('combat_locomotion_man_geralt_ex_idle', 5.25, 0, 0, 'sword_movement_idle');
                         }
                         else
                         {
