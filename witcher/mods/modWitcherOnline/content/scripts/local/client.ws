@@ -232,11 +232,6 @@ statemachine class r_MultiplayerClient
     private var lastHideCompanion : bool;
     default lastHideCompanion = true;
 
-    public function getPlayerMap() : MP_SU_HashMap
-    {
-        return playersByServerId;
-    }
-
     public function getPartyMembers() : array<r_RemotePlayer>
     {
         var i : int;
@@ -3838,7 +3833,7 @@ statemachine class r_MultiplayerClient
         }
     }
 
-    private function getPlayerByServerId(serverPlayerId : int) : r_RemotePlayer
+    public function getPlayerByServerId(serverPlayerId : int) : r_RemotePlayer
     {
         ensurePlayerHashMaps();
 
@@ -3872,6 +3867,21 @@ statemachine class r_MultiplayerClient
         MP_SUOL_getManager().deleteRemotePlayerOneliners(p.serverPlayerId);
 
         p.despawn();
+    }
+
+    private function removeGlobalPlayerInternal(gp : r_RemotePlayer)
+    {
+        if(!gp)
+        {
+            return;
+        }
+
+        if(gp.serverPlayerId > 0)
+        {
+            hm_removeRemotePlayer(globalPlayersByServerId, gp.serverPlayerId);
+        }
+
+        globalPlayers.Remove(gp);
     }
 
     public function updatePlayerData(serverPlayerId : int, idName : name, x : float, y : float, z : float, w : float, heading : float, speed : float, 
@@ -3947,7 +3957,7 @@ statemachine class r_MultiplayerClient
 
         if(gp && gp.id != id)
         {
-            hm_removeRemotePlayer(globalPlayersByServerId, serverPlayerId);
+            removeGlobalPlayerInternal(gp);
             gp = NULL;
         }
 
@@ -4021,11 +4031,7 @@ statemachine class r_MultiplayerClient
 
         if(p && p.id != id)
         {
-            hm_removeRemotePlayer(playersByServerId, serverPlayerId);
-
-            cleanupRemotePlayer(p);
-            players.Remove(p);
-
+            disconnectByServerId(serverPlayerId);
             p = NULL;
         }
 

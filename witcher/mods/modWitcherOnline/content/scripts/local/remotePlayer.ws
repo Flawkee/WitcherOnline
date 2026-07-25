@@ -25,7 +25,7 @@ struct r_GwentGame
 
 statemachine class r_RemotePlayer 
 {
-    public var serverPlayerId      : int;
+    protected var serverPlayerId      : int;
     public var id      : string;
     public var lastUpdate : float;
     public var username      : string;
@@ -921,7 +921,8 @@ statemachine class r_RemotePlayer
             return;
         }
 
-        ridingPlayer = hm_getRemotePlayer(theGame.r_getMultiplayerClient().getPlayerMap(), ridingPlayerId);
+        //ridingPlayer = hm_getRemotePlayer(theGame.r_getMultiplayerClient().getPlayerMap(), ridingPlayerId);
+        ridingPlayer = theGame.r_getMultiplayerClient().getPlayerByServerId(ridingPlayerId);
 
         if(isMounted || (ridingPlayer && isRiding && ridingPlayer.isMounted))
         {
@@ -1323,7 +1324,7 @@ statemachine class r_RemotePlayer
             }
             else
             {
-                ridingPlayer = hm_getRemotePlayer(theGame.r_getMultiplayerClient().getPlayerMap(), ridingPlayerId);
+                ridingPlayer = theGame.r_getMultiplayerClient().getPlayerByServerId(ridingPlayerId);
 
                 if(!ridingPlayer || !ridingPlayer.ghost)
                     return;
