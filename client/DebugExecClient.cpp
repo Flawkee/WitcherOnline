@@ -45,6 +45,7 @@ namespace w3mp {
 			std::lock_guard<std::mutex> lk(ff_mu_);
 			ff_q_.clear();
 			ff_latest_.clear();
+			ff_priority_latest_.clear();
 		}
 
 		req_cv_.notify_all();
@@ -126,6 +127,19 @@ namespace w3mp {
 		{
 			std::lock_guard<std::mutex> lk(ff_mu_);
 			ff_latest_[key] = code;
+		}
+		req_cv_.notify_one();
+		return true;
+	}
+
+	bool DebugExecClient::ExecPriorityLatest(const std::string& key, const std::string& code)
+	{
+		if (!running_.load() || !connected_.load())
+			return false;
+
+		{
+			std::lock_guard<std::mutex> lk(ff_mu_);
+			ff_priority_latest_[key] = code;
 		}
 		req_cv_.notify_one();
 		return true;
@@ -355,7 +369,7 @@ namespace w3mp {
 				return false;
 			}
 			return true;
-			};
+		};
 
 		while (running_.load()) {
 			while (running_.load()) {
@@ -376,60 +390,78 @@ namespace w3mp {
 				break;
 
 			while (running_.load() && connected_.load()) {
-
 				bool waiting_for_reply = false;
-				bool have_tag = false;
-				std::string tag_code;
 
 				{
-					std::unique_lock<std::mutex> lk(req_mu_);
-
-					waiting_for_reply = (has_req_ && req_sent_);
-
-					if (!waiting_for_reply) {
-						if (has_req_ && !req_sent_) {
-							have_tag = true;
-							tag_code = req_code_;
-							req_sent_ = true;
-						}
-						else {
-							req_cv_.wait_for(lk, std::chrono::milliseconds(1));
-						}
-					}
+					std::lock_guard<std::mutex> lk(req_mu_);
+					waiting_for_reply = has_req_ && req_sent_;
 				}
 
-				if (have_tag) {
-					if (!send_exec(tag_code))
-						break;
-				}
-				else if (!waiting_for_reply) {
-					std::unordered_map<std::string, std::string> latest;
-					{
-						std::lock_guard<std::mutex> lk(ff_mu_);
-						latest.swap(ff_latest_);
-					}
-
-					for (auto& kv : latest) {
-						if (!send_exec(kv.second)) {
-							break;
-						}
-					}
-					if (!connected_.load())
-						break;
-
+				if (!waiting_for_reply) {
+					static constexpr size_t kNormalBurst = 4;
+					std::vector<std::string> priority;
+					std::vector<std::string> latest;
 					std::string ff;
+
 					{
 						std::lock_guard<std::mutex> lk(ff_mu_);
+
+						priority.reserve(ff_priority_latest_.size());
+						for (auto& kv : ff_priority_latest_)
+							priority.push_back(std::move(kv.second));
+						ff_priority_latest_.clear();
+
+						latest.reserve(kNormalBurst);
+						for (size_t i = 0; i < kNormalBurst && !ff_latest_.empty(); ++i) {
+							auto it = ff_latest_.begin();
+							latest.push_back(std::move(it->second));
+							ff_latest_.erase(it);
+						}
+
 						if (!ff_q_.empty()) {
 							ff = std::move(ff_q_.front());
 							ff_q_.pop_front();
 						}
 					}
-					if (!ff.empty()) {
-						if (!send_exec(ff))
+
+					for (const auto& code : priority) {
+						if (!send_exec(code))
 							break;
 					}
+					if (!connected_.load())
+						break;
+
+					for (const auto& code : latest) {
+						if (!send_exec(code))
+							break;
+					}
+					if (!connected_.load())
+						break;
+
+					if (!ff.empty() && !send_exec(ff))
+						break;
+
+					bool have_tag = false;
+					std::string tag_code;
+					{
+						std::unique_lock<std::mutex> lk(req_mu_);
+						if (has_req_ && !req_sent_) {
+							have_tag = true;
+							tag_code = req_code_;
+							req_sent_ = true;
+						}
+					}
+
+					if (have_tag) {
+						if (!send_exec(tag_code))
+							break;
+					}
+					else if (priority.empty() && latest.empty() && ff.empty()) {
+						std::unique_lock<std::mutex> lk(req_mu_);
+						req_cv_.wait_for(lk, std::chrono::milliseconds(1));
+					}
 				}
+
 
 				uint8_t tmp[32768];
 				int n = recv(sock_, (char*)tmp, sizeof(tmp), 0);

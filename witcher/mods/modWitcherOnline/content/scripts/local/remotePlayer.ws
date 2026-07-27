@@ -25,7 +25,8 @@ struct r_GwentGame
 
 statemachine class r_RemotePlayer 
 {
-    protected var serverPlayerId      : int;
+    public var serverPlayerId      : int;
+    public var lastMovementSequence : int;
     public var id      : string;
     public var lastUpdate : float;
     public var username      : string;
@@ -5898,7 +5899,7 @@ statemachine class r_RemotePlayer
         adjustor.Cancel(adjustor.GetRequest('w3mp_ghost'));
         ticket = adjustor.CreateNewRequest('w3mp_ghost');
 
-        adjustor.AdjustmentDuration(ticket, 1);
+        adjustor.AdjustmentDuration(ticket, 0.5);
         adjustor.AdjustLocationVertically(ticket, true);
         adjustor.ScaleAnimationLocationVertically(ticket, true);
         adjustor.RotateTo(ticket, heading); 
@@ -6239,7 +6240,7 @@ state WO_UpdateCPC in r_RemotePlayer
         adjustor.Cancel(adjustor.GetRequest('w3mp_horsesync'));
         ticket = adjustor.CreateNewRequest('w3mp_horsesync');
 
-        adjustor.AdjustmentDuration(ticket, 1);
+        adjustor.AdjustmentDuration(ticket, 0.5);
         adjustor.AdjustLocationVertically(ticket, true);
         adjustor.ScaleAnimationLocationVertically(ticket, true);
         adjustor.RotateTo(ticket, parent.heading); 
@@ -6318,7 +6319,7 @@ state WO_UpdateCPC in r_RemotePlayer
         adjustor.Cancel(adjustor.GetRequest('w3mp_boatsync'));
         ticket = adjustor.CreateNewRequest('w3mp_boatsync');
 
-        adjustor.AdjustmentDuration(ticket, 1);
+        adjustor.AdjustmentDuration(ticket, 0.5);
         adjustor.AdjustLocationVertically(ticket, true);
         adjustor.ScaleAnimationLocationVertically(ticket, true);
         adjustor.RotateTo(ticket, parent.heading); 
@@ -6460,7 +6461,7 @@ state WO_UpdateCPC in r_RemotePlayer
             adjustor.Cancel(adjustor.GetRequest('w3mp_morphsync'));
             ticket = adjustor.CreateNewRequest('w3mp_morphsync');
 
-            adjustor.AdjustmentDuration(ticket, 1);
+            adjustor.AdjustmentDuration(ticket, 0.5);
             adjustor.AdjustLocationVertically(ticket, true);
             adjustor.ScaleAnimationLocationVertically(ticket, true);
             adjustor.RotateTo(ticket, parent.heading); 

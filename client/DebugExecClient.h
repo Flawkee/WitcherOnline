@@ -28,6 +28,7 @@ namespace w3mp {
 		bool ExecNoWait(const std::string& code);
 
 		bool ExecNoWaitLatest(const std::string& key, const std::string& code);
+		bool ExecPriorityLatest(const std::string& key, const std::string& code);
 
 	private:
 		SOCKET sock_ = INVALID_SOCKET;
@@ -63,6 +64,7 @@ namespace w3mp {
 		std::deque<std::string> ff_q_;
 
 		std::unordered_map<std::string, std::string> ff_latest_;
+		std::unordered_map<std::string, std::string> ff_priority_latest_;
 	};
 
 }

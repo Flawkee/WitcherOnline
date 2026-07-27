@@ -1,6 +1,7 @@
 import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.util.Base64;
@@ -74,7 +75,7 @@ public class WitcherServer
         boolean svgEnabled = readBoolean(serverProperties, "svgEnabled", false);
         int svgPort = DEFAULT_STATUS_PORT;
 
-        if(svgEnabled)
+        if (svgEnabled)
         {
             svgPort = chooseSvgPort(serverProperties);
             loadStatusAssets();
@@ -85,7 +86,7 @@ public class WitcherServer
         dbgNotime("Author: rejuvenate7 - Github: https://github.com/rejuvenate7\n");
         dbg("Starting Witcher Online server on *:%d\n", port);
 
-        if(svgEnabled)
+        if (svgEnabled)
         {
             dbg("Starting Witcher Online status SVG server on *:%d\n", svgPort);
             dbg("Status SVG: http://127.0.0.1:%d/status.svg\n", svgPort);
@@ -243,7 +244,7 @@ public class WitcherServer
 
         width += text.length();
 
-        return (int)Math.ceil(width) + 4;
+        return (int) Math.ceil(width) + 4;
     }
 
     private static String buildStatusSvg()
@@ -491,7 +492,8 @@ public class WitcherServer
 
     private static boolean isUpdateOpcode(String opcode)
     {
-        return "UPDATE1A".equals(opcode)
+        return "MOVE".equals(opcode)
+                || "UPDATE1A".equals(opcode)
                 || "UPDATE1B".equals(opcode)
                 || "UPDATE2A".equals(opcode)
                 || "UPDATE2B".equals(opcode)
@@ -710,6 +712,18 @@ public class WitcherServer
         }
 
         List<String> frozenFields = Collections.unmodifiableList(fields);
+
+        if ("MOVE".equals(opcode))
+        {
+            if (frozenFields.size() < 8)
+            {
+                return;
+            }
+
+            int sent = broadcastChunk(socket, snapshotRecipients(), current, "MOVE", frozenFields);
+            totalPacketsSent.addAndGet(sent);
+            return;
+        }
 
         if ("UPDATE1A".equals(opcode))
         {
@@ -1708,12 +1722,12 @@ public class WitcherServer
 
     private static String getLocation(List<String> fields)
     {
-        if (fields == null || fields.size() < 8)
+        if (fields == null || fields.size() < 9)
         {
             return "";
         }
 
-        String name = trim(fields.get(7));
+        String name = trim(fields.get(8));
 
         if (name.equals("NR_PlayerManager.Init") || name.equals("Player") || name.isEmpty())
         {
@@ -1725,15 +1739,15 @@ public class WitcherServer
 
     private static List<String> getCoords(List<String> fields)
     {
-        if (fields == null || fields.size() < 4)
+        if (fields == null || fields.size() < 5)
         {
             return Collections.emptyList();
         }
 
         List<String> out = new ArrayList<>(3);
-        out.add(trim(fields.get(1)));
         out.add(trim(fields.get(2)));
         out.add(trim(fields.get(3)));
+        out.add(trim(fields.get(4)));
         return out;
     }
 

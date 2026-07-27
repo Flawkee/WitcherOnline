@@ -3884,7 +3884,58 @@ statemachine class r_MultiplayerClient
         globalPlayers.Remove(gp);
     }
 
-    public function updatePlayerData(serverPlayerId : int, idName : name, x : float, y : float, z : float, w : float, heading : float, speed : float, 
+    public function updatePlayerMovement(serverPlayerId : int, idName : name, movementSequence : int, x : float, y : float, z : float, w : float, heading : float, speed : float, area : int)
+    {
+        var p : r_RemotePlayer;
+        var gp : r_RemotePlayer;
+        var position : Vector;
+        var id : string;
+        var now : float;
+        var currentArea : int;
+
+        if(serverPlayerId <= 0 || movementSequence <= 0)
+            return;
+
+        ensurePlayerHashMaps();
+        id = NameToString(idName);
+        now = theGame.GetEngineTimeAsSeconds();
+
+        position.X = x;
+        position.Y = y;
+        position.Z = z;
+        position.W = w;
+
+        gp = hm_getRemotePlayer(globalPlayersByServerId, serverPlayerId);
+        if(gp && gp.id == id && movementSequence > gp.lastMovementSequence)
+        {
+            gp.lastMovementSequence = movementSequence;
+            gp.pos = position;
+            gp.heading = heading;
+            gp.speed = speed;
+            gp.area = area;
+            gp.lastUpdate = now;
+        }
+
+        p = hm_getRemotePlayer(playersByServerId, serverPlayerId);
+        if(!p || p.id != id || movementSequence <= p.lastMovementSequence)
+            return;
+
+        currentArea = theGame.GetCommonMapManager().GetCurrentArea();
+        if(currentArea != area)
+        {
+            disconnectByServerId(serverPlayerId);
+            return;
+        }
+
+        p.lastMovementSequence = movementSequence;
+        p.pos = position;
+        p.heading = heading;
+        p.speed = speed;
+        p.area = area;
+        p.lastUpdate = now;
+    }
+
+    public function updatePlayerData(serverPlayerId : int, idName : name, movementSequence : int, x : float, y : float, z : float, w : float, heading : float, speed : float, 
                                             area : int, clientInGame : bool, heldItem : string, offhandItem : string, inCombat : bool, 
                                             isSwimming : bool, curState : name, lastJumpTime : float, lastJumpType : EJumpType, 
                                             lastClimbType : EClimbHeightType, isDiving : bool, isFalling : bool, lastLightAttackTime : float, 
@@ -3984,12 +4035,19 @@ statemachine class r_MultiplayerClient
 
         if(gp)
         {
-            gp.pos = position;
+            if(movementSequence > gp.lastMovementSequence)
+            {
+                gp.lastMovementSequence = movementSequence;
+                gp.pos = position;
+                gp.heading = heading;
+                gp.speed = speed;
+                gp.area = area;
+            }
+
             gp.username = playerUsername;
             gp.id = id;
             gp.serverPlayerId = serverPlayerId;
             gp.idName = idName;
-            gp.area = area;
             gp.lastUpdate = now;
         }
         else
@@ -4000,7 +4058,10 @@ statemachine class r_MultiplayerClient
             gp.id = id;
             gp.username = playerUsername;
             gp.idName = idName;
+            gp.lastMovementSequence = movementSequence;
             gp.pos = position;
+            gp.heading = heading;
+            gp.speed = speed;
             gp.area = area;
             gp.lastUpdate = now;
 
@@ -4020,7 +4081,7 @@ statemachine class r_MultiplayerClient
 
         currentArea = theGame.GetCommonMapManager().GetCurrentArea();
 
-        if(currentArea != area)
+        if(currentArea != gp.area)
         {
             disconnectByServerId(serverPlayerId);
             disconnect(id);
@@ -4087,10 +4148,16 @@ statemachine class r_MultiplayerClient
         p.username = playerUsername;
         p.idName = idName;
         p.lastUpdate = now;
-        p.pos = position;
-        p.heading = heading;
-        p.speed = speed;
-        p.area = area;
+
+        if(movementSequence > p.lastMovementSequence)
+        {
+            p.lastMovementSequence = movementSequence;
+            p.pos = position;
+            p.heading = heading;
+            p.speed = speed;
+            p.area = area;
+        }
+
         p.heldItem = heldItem;
         p.heldSecondaryItem = offhandItem;
         p.inCombat = inCombat;
@@ -5100,9 +5167,43 @@ statemachine class r_MultiplayerClient
     }
 }
 
-exec function wo_get(playerId : int, username : string)
+function wo_getMovementData() : string
 {
     var pos : Vector;
+    var list : string;
+    var transformedNPC : CActor;
+    var morphMap : NR_Map;
+    var morphActive : int;
+
+    pos = thePlayer.GetWorldPosition();
+    transformedNPC = theGame.GetActorByTag('NR_TRANSFORM_NPC');
+    morphMap = NR_GetMagicManager().GetMap('none');
+    morphActive = morphMap.getI("nr_polymorphysm_active");
+
+    list += pos.X;
+    list += " ";
+    list += pos.Y;
+    list += " ";
+    list += pos.Z;
+    list += " ";
+    list += pos.W;
+    list += " ";
+    list += thePlayer.GetHeading();
+    list += " ";
+
+    if(transformedNPC && morphActive)
+        list += transformedNPC.GetBehaviorVariable('Editor_MovementSpeed');
+    else
+        list += thePlayer.GetMovingAgentComponent().GetRelativeMoveSpeed();
+
+    list += " ";
+    list += theGame.GetCommonMapManager().GetCurrentArea();
+    list += " ";
+    return list;
+}
+
+exec function wo_get(playerId : int, username : string)
+{
     var list : string;
     var inv : CInventoryComponent;
     var steel, silver : SItemUniqueId;
@@ -5149,22 +5250,6 @@ exec function wo_get(playerId : int, username : string)
     theGame.r_getMultiplayerClient().setReceived();
 
     inv = thePlayer.GetInventory();
-    pos = thePlayer.GetWorldPosition();
-
-    list += pos.X;
-    list += " ";
-
-    list += pos.Y;
-    list += " ";
-
-    list += pos.Z;
-    list += " ";
-
-    list += pos.W;
-    list += " ";
-
-    list += thePlayer.GetHeading();
-    list += " ";
 
     transformedNPC = theGame.GetActorByTag('NR_TRANSFORM_NPC');
     morphMap = NR_GetMagicManager().GetMap('none');
@@ -5172,19 +5257,6 @@ exec function wo_get(playerId : int, username : string)
     morphActive = morphMap.getI("nr_polymorphysm_active");
     morphType = morphMap.getN("nr_polymorphysm_type");
     morphAppearance = morphMap.getN("nr_polymorphysm_appearance");
-
-    if(transformedNPC && morphActive)
-    {
-        list += transformedNPC.GetBehaviorVariable('Editor_MovementSpeed');
-    }
-    else
-    {
-        list += thePlayer.GetMovingAgentComponent().GetRelativeMoveSpeed();
-    }
-    list += " ";
-
-    list += theGame.GetCommonMapManager().GetCurrentArea();
-    list += " ";
 
     list += theGame.r_getMultiplayerClient().getInGame();
     list += " ";
@@ -5628,7 +5700,7 @@ exec function wo_get(playerId : int, username : string)
     }
     list += " ";
 
-    Log("wo "+list);
+    Log("wo "+wo_getMovementData()+list);
 }
 
 exec function wo_get2(playerId : int, username : string)
@@ -5796,7 +5868,7 @@ exec function wo_get2(playerId : int, username : string)
     }
     list += " ";
 
-    Log("wo2 "+list);
+    Log("wo2 "+wo_getMovementData()+list);
 }
 
 exec function wo_get3(playerId : int, username : string)
@@ -5866,7 +5938,7 @@ exec function wo_get3(playerId : int, username : string)
         list += " ";
     }
 
-    Log("wo3 "+list);
+    Log("wo3 "+wo_getMovementData()+list);
 }
 
 exec function wo_get4(playerId : int, username : string)
@@ -6052,10 +6124,15 @@ exec function wo_get4(playerId : int, username : string)
     list += thePlayer.GetHealthPercents();
     list += " ";
 
-    Log("wo4 "+list);
+    Log("wo4 "+wo_getMovementData()+list);
 }
 
-exec function wo_update(serverPlayerId : int, id : name, x : float, y : float, z : float, w : float, heading : float, speed : float, area : int, 
+exec function wo_move(serverPlayerId : int, id : name, movementSequence : int, x : float, y : float, z : float, w : float, heading : float, speed : float, area : int)
+{
+    theGame.r_getMultiplayerClient().updatePlayerMovement(serverPlayerId, id, movementSequence, x, y, z, w, heading, speed, area);
+}
+
+exec function wo_update(serverPlayerId : int, id : name, movementSequence : int, x : float, y : float, z : float, w : float, heading : float, speed : float, area : int, 
                                         inGame : bool, heldItem : string, offhandItem : string, inCombat : bool, isSwimming : bool, curState : name, 
                                         lastJumpTime : float, lastJumpType : EJumpType, lastClimbType : EClimbHeightType, isDiving : bool, isFalling : bool,
                                         lastLightAttackTime : float, lastHeavyAttackTime : float, lastDodgeTime : float, lastRollTime : float, isGuarded : bool,
@@ -6067,7 +6144,7 @@ exec function wo_update(serverPlayerId : int, id : name, x : float, y : float, z
                                         isRiding : bool, ridingPlayerId : int, outgoingTradeTo : string, outgoingTradeItem : name, outgoingTradePrice : int, outgoingTradeFlag : int, horseAppearance : string,
                                         morphActive : bool, morphType : name, morphAppearance : name, morphRotation : float) 
 {
-    theGame.r_getMultiplayerClient().updatePlayerData(serverPlayerId, id, x, y, z, w, heading, speed, area, inGame, heldItem, offhandItem, inCombat, isSwimming, 
+    theGame.r_getMultiplayerClient().updatePlayerData(serverPlayerId, id, movementSequence, x, y, z, w, heading, speed, area, inGame, heldItem, offhandItem, inCombat, isSwimming, 
                                                             curState, lastJumpTime, lastJumpType, lastClimbType, isDiving, isFalling, lastLightAttackTime,
                                                             lastHeavyAttackTime, lastDodgeTime, lastRollTime, isGuarded, lastHit, lastParry, lastFinisher, finisherMonster,
                                                             signType, lastSign, isSailing, isMounted, horseSpeed, aimingCrossbow, isLadder, currentState, bombSelected, isAlive,
