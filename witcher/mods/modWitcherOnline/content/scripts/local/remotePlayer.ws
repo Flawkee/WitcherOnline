@@ -1,4 +1,4 @@
-// Witcher Online by rejuvenate
+﻿// Witcher Online by rejuvenate
 // https://www.nexusmods.com/profile/rejuvenate7
 struct r_AnimRequest
 {
@@ -489,7 +489,7 @@ statemachine class r_RemotePlayer
         }
 
         ghost.GetRootAnimatedComponent().PlaySlotAnimationAsync(
-            request.anim, 
+            request.anim,
             'NPC_ANIM_SLOT',
             SAnimatedComponentSlotAnimationSettings(request.fadeIn, request.fadeOut)
         );

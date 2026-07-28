@@ -50,6 +50,28 @@ public class WitcherServer
     private static final long PLAYER_TIMEOUT_NANOS = 5_000_000_000L;
     private static final long USERNAME_HOLD_NANOS = 60_000_000_000L;
     private static final long BROADCAST_HEARTBEAT_NANOS = 60_000_000_000L;
+    private static final long CHUNK_KEEPALIVE_NANOS = 1_000_000_000L;
+
+    private static final double INTEREST_RADIUS = 300.0;
+    private static final double INTEREST_RADIUS_SQUARED = INTEREST_RADIUS * INTEREST_RADIUS;
+
+    private static final int MOVE_POSITION_OFFSET = 1;
+    private static final int UPDATE1A_POSITION_OFFSET = 2;
+
+    private static final int MIN_USERNAME_LENGTH = 2;
+    private static final int MAX_USERNAME_LENGTH = 16;
+    private static final int MAX_PACKET_FIELDS = 256;
+
+    private static final long RATE_LIMIT_WINDOW_NANOS = 1_000_000_000L;
+    private static final int RATE_LIMIT_PACKETS_PER_WINDOW = 240;
+
+    private static final Map<String, RateLimitState> rateLimits = new ConcurrentHashMap<>();
+
+    private static final class RateLimitState
+    {
+        private long windowStartNanos;
+        private int count;
+    }
 
     private static final int DEFAULT_PORT = 40000;
     private static final DateTimeFormatter LOG_TIME = DateTimeFormatter.ofPattern("HH:mm:ss");
@@ -501,6 +523,44 @@ public class WitcherServer
                 || "UPDATE4".equals(opcode);
     }
 
+    private static boolean isValidUsername(String value)
+    {
+        if (value == null || value.length() < MIN_USERNAME_LENGTH || value.length() > MAX_USERNAME_LENGTH)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < value.length(); i++)
+        {
+            char c = value.charAt(i);
+            boolean allowed = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_';
+
+            if (!allowed)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static boolean allowPacket(ClientEndpoint sender, long nowNanos)
+    {
+        RateLimitState state = rateLimits.computeIfAbsent(sender.toString(), key -> new RateLimitState());
+
+        synchronized (state)
+        {
+            if (nowNanos - state.windowStartNanos >= RATE_LIMIT_WINDOW_NANOS)
+            {
+                state.windowStartNanos = nowNanos;
+                state.count = 0;
+            }
+
+            state.count++;
+            return state.count <= RATE_LIMIT_PACKETS_PER_WINDOW;
+        }
+    }
+
     private static boolean isInteger(String value)
     {
         if (value == null || value.isEmpty())
@@ -530,7 +590,7 @@ public class WitcherServer
     {
         String[] parts = msg.split("\t", -1);
 
-        if (parts.length < 2)
+        if (parts.length < 2 || parts.length > MAX_PACKET_FIELDS)
         {
             return;
         }
@@ -538,6 +598,11 @@ public class WitcherServer
         String opcode = parts[0];
 
         if (!isUpdateOpcode(opcode))
+        {
+            return;
+        }
+
+        if (!allowPacket(sender, System.nanoTime()))
         {
             return;
         }
@@ -566,7 +631,7 @@ public class WitcherServer
             fieldsStart = 2;
         }
 
-        if (username.isEmpty())
+        if (!isValidUsername(username))
         {
             safeSend(socket, sender, "ERROR\tINVALID_USERNAME");
             return;
@@ -720,35 +785,112 @@ public class WitcherServer
                 return;
             }
 
-            int sent = broadcastChunk(socket, snapshotRecipients(), current, "MOVE", frozenFields);
+            storePosition(current, frozenFields, MOVE_POSITION_OFFSET);
+
+            int sent = sendChunk(socket, nearbyRecipients(current), current, "MOVE", frozenFields);
             totalPacketsSent.addAndGet(sent);
             return;
         }
 
         if ("UPDATE1A".equals(opcode))
         {
-            current.update1AFields = frozenFields;
+            storePosition(current, frozenFields, UPDATE1A_POSITION_OFFSET);
+            current.update1A.store(frozenFields);
         }
         else if ("UPDATE1B".equals(opcode))
         {
-            current.update1BFields = frozenFields;
+            current.update1B.store(frozenFields);
         }
         else if ("UPDATE2A".equals(opcode))
         {
-            current.update2AFields = frozenFields;
+            current.update2A.store(frozenFields);
         }
         else if ("UPDATE2B".equals(opcode))
         {
-            current.update2BFields = frozenFields;
+            current.update2B.store(frozenFields);
         }
         else if ("UPDATE3".equals(opcode))
         {
-            current.update3Fields = frozenFields;
+            current.update3.store(frozenFields);
         }
         else if ("UPDATE4".equals(opcode))
         {
-            current.update4Fields = frozenFields;
+            current.update4.store(frozenFields);
         }
+    }
+
+    private static void storePosition(PlayerSession session, List<String> fields, int offset)
+    {
+        if (fields.size() < offset + 7)
+        {
+            return;
+        }
+
+        Double x = parseDoubleOrNull(fields.get(offset));
+        Double y = parseDoubleOrNull(fields.get(offset + 1));
+        Double z = parseDoubleOrNull(fields.get(offset + 2));
+        Integer area = parseIntegerOrNull(fields.get(offset + 6));
+
+        if (x == null || y == null || z == null || area == null)
+        {
+            return;
+        }
+
+        session.storePosition(x, y, z, area);
+    }
+
+    private static Double parseDoubleOrNull(String value)
+    {
+        if (value == null || value.isEmpty() || value.length() > 32)
+        {
+            return null;
+        }
+
+        try
+        {
+            double parsed = Double.parseDouble(value);
+
+            if (Double.isNaN(parsed) || Double.isInfinite(parsed))
+            {
+                return null;
+            }
+
+            return parsed;
+        }
+        catch (NumberFormatException e)
+        {
+            return null;
+        }
+    }
+
+    private static Integer parseIntegerOrNull(String value)
+    {
+        if (!isInteger(value))
+        {
+            return null;
+        }
+
+        try
+        {
+            return Integer.parseInt(value);
+        }
+        catch (NumberFormatException e)
+        {
+            return null;
+        }
+    }
+
+    private static void pruneRateLimits(long nowNanos)
+    {
+        rateLimits.entrySet().removeIf(entry ->
+        {
+            RateLimitState state = entry.getValue();
+
+            synchronized (state)
+            {
+                return (nowNanos - state.windowStartNanos) > USERNAME_HOLD_NANOS;
+            }
+        });
     }
 
     private static void cleanupLoop()
@@ -782,6 +924,8 @@ public class WitcherServer
                     }
                 }
 
+                pruneRateLimits(now);
+
                 Thread.sleep(1000);
             }
             catch (InterruptedException e)
@@ -804,17 +948,21 @@ public class WitcherServer
         {
             try
             {
-                List<ClientEndpoint> recipients = snapshotRecipients();
+                List<PlayerSession> sessions = new ArrayList<>(players.values());
+                List<ClientEndpoint> everyone = uniqueEndpoints(sessions);
+                long tickNanos = System.nanoTime();
                 int packetsSentThisTick = 0;
 
-                for (PlayerSession session : players.values())
+                for (PlayerSession session : sessions)
                 {
-                    packetsSentThisTick += broadcastChunk(socket, recipients, session, "UPDATE1A", session.update1AFields);
-                    packetsSentThisTick += broadcastChunk(socket, recipients, session, "UPDATE1B", session.update1BFields);
-                    packetsSentThisTick += broadcastChunk(socket, recipients, session, "UPDATE2A", session.update2AFields);
-                    packetsSentThisTick += broadcastChunk(socket, recipients, session, "UPDATE2B", session.update2BFields);
-                    packetsSentThisTick += broadcastChunk(socket, recipients, session, "UPDATE3", session.update3Fields);
-                    packetsSentThisTick += broadcastChunk(socket, recipients, session, "UPDATE4", session.update4Fields);
+                    List<ClientEndpoint> nearby = nearbyRecipients(sessions, session);
+
+                    packetsSentThisTick += broadcastChunk(socket, everyone, session, "UPDATE1A", session.update1A, tickNanos);
+                    packetsSentThisTick += broadcastChunk(socket, everyone, session, "UPDATE1B", session.update1B, tickNanos);
+                    packetsSentThisTick += broadcastChunk(socket, nearby, session, "UPDATE2A", session.update2A, tickNanos);
+                    packetsSentThisTick += broadcastChunk(socket, nearby, session, "UPDATE2B", session.update2B, tickNanos);
+                    packetsSentThisTick += broadcastChunk(socket, everyone, session, "UPDATE3", session.update3, tickNanos);
+                    packetsSentThisTick += broadcastChunk(socket, everyone, session, "UPDATE4", session.update4, tickNanos);
                 }
 
                 totalPacketsSent.addAndGet(packetsSentThisTick);
@@ -826,7 +974,7 @@ public class WitcherServer
                 {
                     dbg("Broadcast heartbeat: players=%d recipients=%d packetsSent=%d totalPacketsSent=%d totalSendFailures=%d\n",
                             players.size(),
-                            recipients.size(),
+                            everyone.size(),
                             packetsSentThisTick,
                             totalPacketsSent.get(),
                             totalSendFailures.get());
@@ -847,17 +995,90 @@ public class WitcherServer
         }
     }
 
-    private static List<ClientEndpoint> snapshotRecipients()
+    private static List<ClientEndpoint> uniqueEndpoints(List<PlayerSession> sessions)
     {
         Set<ClientEndpoint> unique = new HashSet<>();
-        for (PlayerSession session : players.values())
+        for (PlayerSession session : sessions)
         {
             unique.add(session.endpoint);
         }
         return new ArrayList<>(unique);
     }
 
+    private static List<ClientEndpoint> nearbyRecipients(PlayerSession source)
+    {
+        return nearbyRecipients(new ArrayList<>(players.values()), source);
+    }
+
+    private static List<ClientEndpoint> nearbyRecipients(List<PlayerSession> sessions, PlayerSession source)
+    {
+        Set<ClientEndpoint> unique = new HashSet<>();
+
+        for (PlayerSession session : sessions)
+        {
+            if (isWithinInterest(source, session))
+            {
+                unique.add(session.endpoint);
+            }
+        }
+
+        return new ArrayList<>(unique);
+    }
+
+    private static boolean isWithinInterest(PlayerSession source, PlayerSession target)
+    {
+        if (source == target)
+        {
+            return true;
+        }
+
+        if (!source.hasPosition || !target.hasPosition)
+        {
+            return true;
+        }
+
+        if (source.area != target.area)
+        {
+            return false;
+        }
+
+        double dx = source.posX - target.posX;
+        double dy = source.posY - target.posY;
+        double dz = source.posZ - target.posZ;
+
+        return (dx * dx + dy * dy + dz * dz) <= INTEREST_RADIUS_SQUARED;
+    }
+
     private static int broadcastChunk(
+            DatagramSocket socket,
+            List<ClientEndpoint> recipients,
+            PlayerSession session,
+            String opcode,
+            PlayerSession.ChunkSlot slot,
+            long nowNanos)
+    {
+        List<String> fields = slot.fields;
+
+        if (fields == null || fields.isEmpty())
+        {
+            return 0;
+        }
+
+        boolean changed = slot.revision != slot.sentRevision;
+        boolean keepaliveDue = (nowNanos - slot.sentNanos) >= CHUNK_KEEPALIVE_NANOS;
+
+        if (!changed && !keepaliveDue)
+        {
+            return 0;
+        }
+
+        slot.sentRevision = slot.revision;
+        slot.sentNanos = nowNanos;
+
+        return sendChunk(socket, recipients, session, opcode, fields);
+    }
+
+    private static int sendChunk(
             DatagramSocket socket,
             List<ClientEndpoint> recipients,
             PlayerSession session,
@@ -956,10 +1177,10 @@ public class WitcherServer
             {
                 long secsSinceSeen = Math.max(0L, (now - session.lastSeen) / 1_000_000_000L);
 
-                String locationRaw = getLocation(session.update1AFields);
+                String locationRaw = getLocation(session.update1A.fields);
                 String region = getRegion(locationRaw);
 
-                List<String> coords = getCoords(session.update1AFields);
+                List<String> coords = getCoords(session.update1A.fields);
                 String coordsStr = "?";
                 if (coords.size() == 3)
                 {
@@ -1146,7 +1367,7 @@ public class WitcherServer
             }
             else
             {
-                dbg("IP '%s' is already in whitelist.\n\n");
+                dbg("IP '%s' is already in whitelist.\n\n", ip);
             }
             return;
         }

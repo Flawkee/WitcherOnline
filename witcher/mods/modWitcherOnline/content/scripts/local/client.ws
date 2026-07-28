@@ -1,4 +1,4 @@
-// Witcher Online by rejuvenate
+﻿// Witcher Online by rejuvenate
 // https://www.nexusmods.com/profile/rejuvenate7
 struct r_ChillDef 
 { 
@@ -179,6 +179,9 @@ statemachine class r_MultiplayerClient
     private var joinedParty : string;
     private var nextWeatherSyncAt : float;
     default nextWeatherSyncAt = -999;
+
+    private var entityClassifier : r_EntityClassifier;
+
 
     private var dialogChoices : array<SSceneChoice>;
     private var dialogChoicesActive : bool;
@@ -850,6 +853,11 @@ statemachine class r_MultiplayerClient
         if(!isGameTimeCloseEnough(newTime, 90))
         {
             theGame.SetGameTime( newTime, true );
+        }
+
+        if(nextWeatherSyncAt > theGame.GetEngineTimeAsSeconds() + 6)
+        {
+            nextWeatherSyncAt = -999;
         }
 
         if(theGame.GetEngineTimeAsSeconds() >= nextWeatherSyncAt)
@@ -2926,6 +2934,12 @@ statemachine class r_MultiplayerClient
         }
     }
 
+    public function restartTick()
+    {
+        this.GotoState('WO_ClientIdle');
+        this.GotoState('WO_Tick');
+    }
+
     public function clearOnlineVehicles()
     {
         var entities : array<CEntity>;
@@ -3755,6 +3769,69 @@ statemachine class r_MultiplayerClient
         return inGame;
     }
 
+    public function getEntityClassifier() : r_EntityClassifier
+    {
+        if(!entityClassifier)
+        {
+            entityClassifier = new r_EntityClassifier in this;
+        }
+
+        return entityClassifier;
+    }
+
+    public function pumpTransport()
+    {
+        var gather : int;
+
+        if(!thePlayer)
+        {
+            return;
+        }
+
+        if(!inGame && thePlayer.IsAlive())
+        {
+            setInGame(true);
+        }
+
+        WO_PumpInbound(64);
+        WO_PumpStatus();
+        setReceived();
+
+        gather = WO_Tick();
+
+        switch(gather)
+        {
+            case 1:
+                wo_get(WO_LocalId(), WO_Username());
+                break;
+
+            case 2:
+                wo_get2(WO_LocalId(), WO_Username());
+                break;
+
+            case 3:
+                wo_get3(WO_LocalId(), WO_Username());
+                break;
+
+            case 4:
+                wo_get4(WO_LocalId(), WO_Username());
+                break;
+
+            default:
+                break;
+        }
+    }
+
+    public function updateEntityClassifier()
+    {
+        if(!entityClassifier || !entityClassifier.isEnabled())
+        {
+            return;
+        }
+
+        entityClassifier.update();
+    }
+
     public function getPlayers() : array<r_RemotePlayer>
     {
         return players;
@@ -3935,7 +4012,27 @@ statemachine class r_MultiplayerClient
         p.lastUpdate = now;
     }
 
-    public function updatePlayerData(serverPlayerId : int, idName : name, movementSequence : int, x : float, y : float, z : float, w : float, heading : float, speed : float, 
+    public function updatePlayerPose(serverPlayerId : int, idName : name, movementSequence : int, x : float, y : float, z : float, w : float, heading : float, speed : float, area : int, yaw : float)
+    {
+        var p : r_RemotePlayer;
+        var gp : r_RemotePlayer;
+
+        updatePlayerMovement(serverPlayerId, idName, movementSequence, x, y, z, w, heading, speed, area);
+
+        gp = hm_getRemotePlayer(globalPlayersByServerId, serverPlayerId);
+        if(gp)
+        {
+            gp.yaw = yaw;
+        }
+
+        p = hm_getRemotePlayer(playersByServerId, serverPlayerId);
+        if(p)
+        {
+            p.yaw = yaw;
+        }
+    }
+
+    public function updatePlayerData(serverPlayerId : int, idName : name, movementSequence : int, x : float, y : float, z : float, w : float, heading : float, speed : float,
                                             area : int, clientInGame : bool, heldItem : string, offhandItem : string, inCombat : bool, 
                                             isSwimming : bool, curState : name, lastJumpTime : float, lastJumpType : EJumpType, 
                                             lastClimbType : EClimbHeightType, isDiving : bool, isFalling : bool, lastLightAttackTime : float, 
@@ -5202,7 +5299,7 @@ function wo_getMovementData() : string
     return list;
 }
 
-exec function wo_get(playerId : int, username : string)
+function wo_get(playerId : int, username : string)
 {
     var list : string;
     var inv : CInventoryComponent;
@@ -5318,10 +5415,10 @@ exec function wo_get(playerId : int, username : string)
     list += theGame.r_getMultiplayerClient().getLastJumpTime();
     list += " ";
 
-    list += thePlayer.substateManager.m_SharedDataO.m_JumpTypeE;
+    list += (int)thePlayer.substateManager.m_SharedDataO.m_JumpTypeE;
     list += " ";
 
-    list += ((EClimbHeightType)((int)thePlayer.GetBehaviorVariable('ClimbHeightType')));
+    list += ((int)thePlayer.GetBehaviorVariable('ClimbHeightType'));
     list += " ";
 
     list += thePlayer.IsDiving();
@@ -5359,7 +5456,7 @@ exec function wo_get(playerId : int, username : string)
     list += theGame.r_getMultiplayerClient().getFinisherMonster();
     list += " ";
 
-    list += thePlayer.GetCurrentlyCastSign();
+    list += (int)thePlayer.GetCurrentlyCastSign();
     list += " ";
     
     list += theGame.r_getMultiplayerClient().getLastSignTime();
@@ -5481,7 +5578,7 @@ exec function wo_get(playerId : int, username : string)
     list += theGame.r_getMultiplayerClient().getLastActionTime();
     list += " ";
 
-    list += theGame.r_getMultiplayerClient().getLastAction();
+    list += (int)theGame.r_getMultiplayerClient().getLastAction();
     list += " ";
 
     // armor/items
@@ -5700,10 +5797,10 @@ exec function wo_get(playerId : int, username : string)
     }
     list += " ";
 
-    Log("wo "+wo_getMovementData()+list);
+    WO_Send("wo "+wo_getMovementData()+list);
 }
 
-exec function wo_get2(playerId : int, username : string)
+function wo_get2(playerId : int, username : string)
 {
     var pos : Vector;
     var list : string;
@@ -5732,7 +5829,7 @@ exec function wo_get2(playerId : int, username : string)
 
     curType = NR_GetPlayerManager().GetCurrentPlayerType();
 
-    list += curType;
+    list += (int)curType;
     list += " ";
 
     if(heads[curType] != '')
@@ -5868,10 +5965,10 @@ exec function wo_get2(playerId : int, username : string)
     }
     list += " ";
 
-    Log("wo2 "+wo_getMovementData()+list);
+    WO_Send("wo2 "+wo_getMovementData()+list);
 }
 
-exec function wo_get3(playerId : int, username : string)
+function wo_get3(playerId : int, username : string)
 {
     var manager : CR4GwintManager;
     var selectedFaction : eGwintFaction;
@@ -5900,7 +5997,7 @@ exec function wo_get3(playerId : int, username : string)
     }
     list += " ";
 
-    list += theGame.r_getMultiplayerClient().getOutgoingGwentRequest();
+    list += (int)theGame.r_getMultiplayerClient().getOutgoingGwentRequest();
     list += " ";
 
     list += theGame.r_getMultiplayerClient().getOutgoingGwentBet();
@@ -5938,10 +6035,10 @@ exec function wo_get3(playerId : int, username : string)
         list += " ";
     }
 
-    Log("wo3 "+wo_getMovementData()+list);
+    WO_Send("wo3 "+wo_getMovementData()+list);
 }
 
-exec function wo_get4(playerId : int, username : string)
+function wo_get4(playerId : int, username : string)
 {
     var list : string;
     var joinedParty : string;
@@ -6124,55 +6221,9 @@ exec function wo_get4(playerId : int, username : string)
     list += thePlayer.GetHealthPercents();
     list += " ";
 
-    Log("wo4 "+wo_getMovementData()+list);
+    WO_Send("wo4 "+wo_getMovementData()+list);
 }
 
-exec function wo_move(serverPlayerId : int, id : name, movementSequence : int, x : float, y : float, z : float, w : float, heading : float, speed : float, area : int)
-{
-    theGame.r_getMultiplayerClient().updatePlayerMovement(serverPlayerId, id, movementSequence, x, y, z, w, heading, speed, area);
-}
-
-exec function wo_update(serverPlayerId : int, id : name, movementSequence : int, x : float, y : float, z : float, w : float, heading : float, speed : float, area : int, 
-                                        inGame : bool, heldItem : string, offhandItem : string, inCombat : bool, isSwimming : bool, curState : name, 
-                                        lastJumpTime : float, lastJumpType : EJumpType, lastClimbType : EClimbHeightType, isDiving : bool, isFalling : bool,
-                                        lastLightAttackTime : float, lastHeavyAttackTime : float, lastDodgeTime : float, lastRollTime : float, isGuarded : bool,
-                                        lastHit : float, lastParry : float, lastFinisher : float, finisherMonster : bool, signType : ESignType, lastSign : float, isSailing : bool, isMounted : bool,
-                                        horseSpeed : float, aimingCrossbow : bool, isLadder : bool, currentState : name, bombSelected : bool, isAlive : bool,
-                                        lastEmote : int, lastEmoteTime : float, lastChatTime : float, lastChat : string, chillOutAnim : name, yaw : float, stamina : float, swirling : bool, rend : bool,
-                                        channeling : bool, menuName : string, lastActionTime : float, lastAction : EPlayerExplorationAction,
-                                        steel : name, silver : name, armor : name, gloves : name, pants : name, boots : name, head : name, hair : name, steelScab : name, silverScab : name, crossbow : name, mask : name,
-                                        isRiding : bool, ridingPlayerId : int, outgoingTradeTo : string, outgoingTradeItem : name, outgoingTradePrice : int, outgoingTradeFlag : int, horseAppearance : string,
-                                        morphActive : bool, morphType : name, morphAppearance : name, morphRotation : float) 
-{
-    theGame.r_getMultiplayerClient().updatePlayerData(serverPlayerId, id, movementSequence, x, y, z, w, heading, speed, area, inGame, heldItem, offhandItem, inCombat, isSwimming, 
-                                                            curState, lastJumpTime, lastJumpType, lastClimbType, isDiving, isFalling, lastLightAttackTime,
-                                                            lastHeavyAttackTime, lastDodgeTime, lastRollTime, isGuarded, lastHit, lastParry, lastFinisher, finisherMonster,
-                                                            signType, lastSign, isSailing, isMounted, horseSpeed, aimingCrossbow, isLadder, currentState, bombSelected, isAlive,
-                                                            lastEmote, lastEmoteTime, lastChatTime, lastChat, chillOutAnim, yaw, stamina, swirling, rend,
-                                                            channeling, menuName, lastActionTime, lastAction,
-                                                            steel, silver, armor, gloves, pants, boots, head, hair, steelScab, silverScab, crossbow, mask,
-                                                            isRiding, ridingPlayerId, outgoingTradeTo, outgoingTradeItem, outgoingTradePrice, outgoingTradeFlag, horseAppearance,
-                                                            morphActive, morphType, morphAppearance, morphRotation);
-}
-
-exec function wo_update2(serverPlayerId : int, id : name, cpcPlayerType : ENR_PlayerType, cpcHead : name, cpcHair : string, cpcBody : string, cpcTorso : string, cpcArms : string, cpcGloves : string, cpcDress : string, cpcLegs : string, 
-                         cpcShoes : string, cpcMisc : string, cpcItem1 : string, cpcItem2 : string, cpcItem3 : string, cpcItem4 : string, cpcItem5 : string, cpcItem6 : string, cpcItem7 : string, cpcItem8 : string, 
-                         cpcItem9 : string, cpcItem10 : string)
-{
-    theGame.r_getMultiplayerClient().updatePlayerData2(serverPlayerId, id, cpcPlayerType, cpcHead, cpcHair, cpcBody, cpcTorso, cpcArms, cpcGloves, cpcDress, cpcLegs, cpcShoes, cpcMisc,
-                                                       cpcItem1, cpcItem2, cpcItem3, cpcItem4, cpcItem5, cpcItem6, cpcItem7, cpcItem8, cpcItem9, cpcItem10);
-}
-
-exec function wo_update3(serverPlayerId : int, id : name, outgoingGwentTo : string, outgoingGwentRequest : E_GwentRequest, outgoingGwentBet : int, outgoingGwentSeed : int, lastGwentAction : string, lastGwentActionTime : float, gwentData : string)
-{
-    theGame.r_getMultiplayerClient().updatePlayerData3(serverPlayerId, id, outgoingGwentTo, outgoingGwentRequest, outgoingGwentBet, outgoingGwentSeed, lastGwentAction, lastGwentActionTime, gwentData);
-}
-
-exec function wo_update4(serverPlayerId : int, id : name, inParty : bool, joinedParty : string, weather : name, day : int, hour : int, minute : int, second : int, lastDialogIndex : int, lastDialogCount : int, dialogChoices : string, 
-                         dialogChoicesActive : bool, armorDye : int, gloveDye : int, pantDye : int, bootDye : int, health : float)
-{
-    theGame.r_getMultiplayerClient().updatePlayerData4(serverPlayerId, id, inParty, joinedParty, weather, day, hour, minute, second, lastDialogIndex , lastDialogCount, dialogChoices, dialogChoicesActive, armorDye, gloveDye, pantDye, bootDye, health);
-}
 
 exec function mpghosts_disconnect(id :string)
 {
@@ -7156,6 +7207,7 @@ state WO_Tick in r_MultiplayerClient
         while(true)
         {
             parent.updateCompanionIcons();
+            parent.pumpTransport();
 
             if (!parent.getInGame())
             {
@@ -7193,31 +7245,12 @@ state WO_Tick in r_MultiplayerClient
             parent.checkPlayerChange();
             parent.updateWorldSync();
             parent.updateLeaderDialogReadyPopup();
+            parent.updateEntityClassifier();
             MP_SU_moveMinimapPins();
 
             SleepOneFrame();
         }
     }
-}
-
-exec function usernameTaken(username : string)
-{
-    theGame.r_getMultiplayerClient().setUsernameTaken(username);
-}
-
-exec function kickedMsg()
-{
-    theGame.r_getMultiplayerClient().setKicked();
-}
-
-exec function bannedMsg()
-{
-    theGame.r_getMultiplayerClient().setBanned();
-}
-
-exec function notWhitelistedMsg()
-{
-    theGame.r_getMultiplayerClient().setNotWhitelisted();
 }
 
 exec function unlockmagic()

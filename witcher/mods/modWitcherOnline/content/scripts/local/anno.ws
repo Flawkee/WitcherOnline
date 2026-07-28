@@ -1,4 +1,4 @@
-// Witcher Online by rejuvenate
+﻿// Witcher Online by rejuvenate
 // https://www.nexusmods.com/profile/rejuvenate7
 @addField(CR4Game) 
 var r_multiplayerClient: r_MultiplayerClient;
@@ -15,13 +15,22 @@ public function r_getMultiplayerClient(): r_MultiplayerClient
 }
 
 @wrapMethod(CR4Player)
-function OnSpawned(spawnData: SEntitySpawnData) 
-{    
+function OnSpawned(spawnData: SEntitySpawnData)
+{
     theGame.r_getMultiplayerClient().setInGame(true);
     theGame.r_getMultiplayerClient().setSpawnTime(theGame.GetEngineTimeAsSeconds());
     theGame.r_getMultiplayerClient().startTick();
 
+    this.RemoveTimer('wo_transportTick');
+    this.AddTimer('wo_transportTick', 0.03, true);
+
     wrappedMethod(spawnData);
+}
+
+@addMethod(CR4Player)
+timer function wo_transportTick(dt : float, id : int)
+{
+    theGame.r_getMultiplayerClient().pumpTransport();
 }
 
 @addMethod(CR4Player) 
@@ -29,6 +38,11 @@ timer function r_showConnectionAlert(dt : float, id : int)
 {
     var wo_messagetitle : string;
     var wo_messagebody  : string;
+
+    if(theGame.r_getMultiplayerClient().getReceived())
+    {
+        return;
+    }
 
     wo_messagetitle = GetLocStringById(2111114266);
 
@@ -212,6 +226,11 @@ function OnAfterLoadingScreenGameStart()
 {
     wrappedMethod();
     theGame.r_getMultiplayerClient().setInGame(true);
+    theGame.r_getMultiplayerClient().restartTick();
+
+    thePlayer.RemoveTimer('wo_transportTick');
+    thePlayer.AddTimer('wo_transportTick', 0.03, true);
+
     theGame.r_getMultiplayerClient().setSpawnTime(theGame.GetEngineTimeAsSeconds());
     theGame.r_getMultiplayerClient().setEmote(-1);
 

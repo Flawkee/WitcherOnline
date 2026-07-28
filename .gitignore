@@ -398,3 +398,4 @@ bin/
 .DS_Store
 
 .idea/
+/server/build/
