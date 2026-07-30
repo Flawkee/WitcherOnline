@@ -19,6 +19,37 @@ namespace w3mp {
 	static unsigned long long g_lastSummaryMs = 0;
 	static unsigned long long g_lastReportedAccepted = 0;
 
+	static long long QueryFrequency()
+	{
+		static long long frequency = 0;
+
+		if (frequency == 0)
+		{
+			LARGE_INTEGER value{};
+			QueryPerformanceFrequency(&value);
+			frequency = value.QuadPart;
+		}
+
+		return frequency;
+	}
+
+	long long Profiler::Now()
+	{
+		LARGE_INTEGER value{};
+		QueryPerformanceCounter(&value);
+		return value.QuadPart;
+	}
+
+	double Profiler::MicrosSince(long long start)
+	{
+		const long long frequency = QueryFrequency();
+
+		if (frequency == 0)
+			return 0.0;
+
+		return static_cast<double>(Now() - start) * 1000000.0 / static_cast<double>(frequency);
+	}
+
 	const char* Diagnostics::ReasonName(RejectReason reason)
 	{
 		switch (reason)

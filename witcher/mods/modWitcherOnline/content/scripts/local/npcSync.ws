@@ -1,0 +1,2058 @@
+class r_TrackedNpc
+{
+    public var npcId      : int;
+    public var actor      : CNewNPC;
+    public var typeCode   : string;
+    public var appearance : name;
+    public var lastSeenAt : float;
+    public var lastHp     : int;
+    public var lastTargetId : int;
+    public var offerLocalCount : int;
+    public var actionSeq  : int;
+    public var actionCode : int;
+    public var actionType : int;
+    public var actionDir  : int;
+    public var lastAttackType : int;
+    public var lastPerform : int;
+
+    default lastAttackType = -1;
+    default lastPerform = -1;
+    default lastHp = -1;
+    default lastTargetId = 0;
+    default offerLocalCount = 1;
+    default actionSeq = 0;
+    default actionCode = 0;
+    default actionType = 0;
+    default actionDir = 0;
+}
+
+class r_Replica
+{
+    public var canonicalId  : int;
+    public var localGuid    : int;
+    public var actor        : CNewNPC;
+    public var appearance   : name;
+    public var typeCode     : string;
+    public var aiForceId    : int;
+    public var appliedTarget : int;
+    public var lastLocalHp  : int;
+    public var lastPredictAt : float;
+    public var nextDriveAt  : float;
+    public var prepared     : bool;
+    public var lastActionSeq : int;
+    public var lastActionAt  : float;
+    public var pendingActionAt : float;
+    public var pendingType   : int;
+    public var pendingDir    : int;
+
+    default lastActionSeq = -1;
+    default lastActionAt = 0.0;
+    default pendingActionAt = -1.0;
+    default pendingType = 0;
+    default pendingDir = 0;
+    default aiForceId = -1;
+    default appliedTarget = -1;
+    default lastLocalHp = -1;
+    default lastPredictAt = 0.0;
+    default nextDriveAt = 0.0;
+    default prepared = false;
+}
+
+class r_NpcSync
+{
+    private var enabled       : bool;
+    private var debugLogging  : bool;
+    private var suspended     : bool;
+
+    private var tracked       : array<r_TrackedNpc>;
+    private var replicas      : array<r_Replica>;
+
+    private var rejectedGuids : array<int>;
+    private var rejectedAt    : array<float>;
+
+    private var templates     : r_NpcTemplates;
+    private var aggro         : r_NpcAggro;
+    private var actions       : r_NpcActions;
+
+    private var nextScanAt    : float;
+    private var nextPushAt    : float;
+    private var nextAggroAt   : float;
+    private var nextDebugAt   : float;
+    private var offerWindowAt : float;
+    private var offerCount    : int;
+    private var nextSkipLogAt : float;
+
+    private var statRegistered : int;
+    private var statSpawned    : int;
+    private var statDespawned  : int;
+    private var statKilled     : int;
+    private var statPrefiltered : int;
+    private var statDropped    : int;
+    private var statTargets    : int;
+    private var statHitsSent   : int;
+    private var statHitsApplied : int;
+    private var statAcks       : int;
+    private var statRejected   : int;
+    private var statHealthSync : int;
+    private var statTeleports  : int;
+    private var statNoTemplate : int;
+    private var statPromoted   : int;
+    private var statLocalDamage : int;
+    private var statSuspends   : int;
+    private var statActionSent : int;
+    private var statActionApplied : int;
+    private var statActionForced : int;
+    private var statActionRejected : int;
+    private var statActionUnknown : int;
+    private var statActionProbes : int;
+    private var statActionSuppressed : int;
+    private var statActionAllowed : int;
+
+    private var actionLogging : bool;
+    private var actionForceMode : int;
+
+    private var reportedAway : bool;
+
+    default reportedAway = false;
+    default actionLogging = false;
+    default actionForceMode = 1;
+
+    default enabled = true;
+    default debugLogging = false;
+    default suspended = false;
+    default nextScanAt = 0.0;
+    default nextPushAt = 0.0;
+    default nextAggroAt = 0.0;
+    default nextDebugAt = 0.0;
+    default offerWindowAt = 0.0;
+    default offerCount = 0;
+    default nextSkipLogAt = 0.0;
+
+    private var SCAN_RADIUS    : float;
+    private var KEEP_RADIUS    : float;
+    private var TRACK_GRACE    : float;
+    private var PUSH_INTERVAL  : float;
+    private var SCAN_INTERVAL  : float;
+    private var DRIVE_INTERVAL : float;
+    private var AGGRO_INTERVAL : float;
+    private var DEBUG_INTERVAL : float;
+    private var HARD_SNAP      : float;
+    private var FREE_RADIUS    : float;
+    private var ACTION_FREE_RADIUS : float;
+    private var ACTION_FREE_WINDOW : float;
+    private var ACTION_COMMAND_WINDOW : float;
+    private var SLIDE_WINDOW   : float;
+    private var HEALTH_TOLERANCE : float;
+    private var PREDICT_GRACE  : float;
+    private var RESERVATION_RADIUS : float;
+    private var DAMAGE_CREDIT_RANGE : float;
+    private var HIT_REPORT_RANGE : float;
+    private var REJECT_MEMORY  : float;
+    private var OFFERS_PER_SECOND : int;
+    private var MAX_TRACKED    : int;
+    private var MAX_REPLICAS   : int;
+
+    default SCAN_RADIUS = 110.0;
+    default KEEP_RADIUS = 150.0;
+    default TRACK_GRACE = 3.0;
+    default PUSH_INTERVAL = 0.05;
+    default SCAN_INTERVAL = 0.25;
+    default DRIVE_INTERVAL = 0.1;
+    default AGGRO_INTERVAL = 0.4;
+    default DEBUG_INTERVAL = 2.0;
+    default HARD_SNAP = 15.0;
+    default FREE_RADIUS = 2.0;
+    default ACTION_FREE_RADIUS = 6.0;
+    default ACTION_FREE_WINDOW = 1.5;
+    default ACTION_COMMAND_WINDOW = 1.2;
+    default SLIDE_WINDOW = 0.3;
+    default HEALTH_TOLERANCE = 0.05;
+    default PREDICT_GRACE = 1.5;
+    default RESERVATION_RADIUS = 30.0;
+    default DAMAGE_CREDIT_RANGE = 25.0;
+    default HIT_REPORT_RANGE = 12.0;
+    default REJECT_MEMORY = 60.0;
+    default OFFERS_PER_SECOND = 12;
+    default MAX_TRACKED = 250;
+    default MAX_REPLICAS = 250;
+
+    public function isEnabled() : bool
+    {
+        return enabled;
+    }
+
+    public function setEnabled(value : bool)
+    {
+        if(enabled == value)
+        {
+            return;
+        }
+
+        enabled = value;
+
+        if(!enabled)
+        {
+            releaseAll();
+        }
+    }
+
+    public function setDebugLogging(value : bool)
+    {
+        debugLogging = value;
+        nextDebugAt = 0.0;
+
+        getAggro().setDebugLogging(value);
+
+        WO_Note("[npc_debug] logging=" + value
+            + " (tags: npc_stats npc_net npc_spawn npc_kill npc_hit npc_target npc_offer npc_handover npc_suspend)");
+    }
+
+    private function dbg(tag : string, line : string)
+    {
+        if(!debugLogging)
+        {
+            return;
+        }
+
+        WO_Note("[" + tag + "] " + line);
+    }
+
+    public function getAggro() : r_NpcAggro
+    {
+        if(!aggro)
+        {
+            aggro = new r_NpcAggro in this;
+        }
+
+        return aggro;
+    }
+
+    private function getTemplates() : r_NpcTemplates
+    {
+        if(!templates)
+        {
+            templates = new r_NpcTemplates in this;
+        }
+
+        return templates;
+    }
+
+    private function getActions() : r_NpcActions
+    {
+        if(!actions)
+        {
+            actions = new r_NpcActions in this;
+        }
+
+        return actions;
+    }
+
+    public function setActionLogging(value : bool)
+    {
+        actionLogging = value;
+
+        WO_Note("[npc_action] logging=" + value
+            + " forceMode=" + actionForceMode
+            + " tableSize=" + getActions().count());
+    }
+
+    public function setActionForceMode(value : int)
+    {
+        if(value < 0)
+        {
+            value = 0;
+        }
+
+        if(value > 2)
+        {
+            value = 2;
+        }
+
+        actionForceMode = value;
+
+        WO_Note("[npc_action] forceMode=" + actionForceMode
+            + " (0=never force, 1=force after reject, 2=always force)");
+    }
+
+    private function dbgAction(line : string)
+    {
+        if(!actionLogging && !debugLogging)
+        {
+            return;
+        }
+
+        WO_Note("[npc_action] " + line);
+    }
+
+    public function shouldSuppressAction(actor : CNewNPC) : bool
+    {
+        if(!actor)
+        {
+            return false;
+        }
+
+        return actor.HasTag('WOReplica');
+    }
+
+    public function probeAction(actor : CNewNPC, source : name)
+    {
+        var index : int;
+
+        if(!actor || (!actionLogging && !debugLogging))
+        {
+            return;
+        }
+
+        index = findTrackedByActor(actor);
+
+        statActionProbes += 1;
+
+        WO_Note("[npc_probe] source=" + NameToString(source)
+            + " owned=" + (index >= 0)
+            + " replica=" + actor.HasTag('WOReplica')
+            + " app=" + NameToString(actor.GetAppearance())
+            + " attackType=" + (int)actor.GetBehaviorVariable('AttackType')
+            + " performAttack=" + actor.GetBehaviorVariable('PerformAttack')
+            + " dir=" + (int)actor.GetBehaviorVariable('targetDirection'));
+    }
+
+    private function pollOwnedAttackVars(now : float)
+    {
+        var i : int;
+        var attackType : int;
+        var perform : int;
+        var npc : CNewNPC;
+
+        if(!actionLogging && !debugLogging)
+        {
+            return;
+        }
+
+        for(i = 0; i < tracked.Size(); i += 1)
+        {
+            npc = tracked[i].actor;
+
+            if(!npc)
+            {
+                continue;
+            }
+
+            attackType = (int)npc.GetBehaviorVariable('AttackType');
+            perform = (int)npc.GetBehaviorVariable('PerformAttack');
+
+            if(attackType == tracked[i].lastAttackType && perform == tracked[i].lastPerform)
+            {
+                continue;
+            }
+
+            tracked[i].lastAttackType = attackType;
+            tracked[i].lastPerform = perform;
+
+            statActionProbes += 1;
+
+            WO_Note("[npc_probe] var guid=" + tracked[i].npcId
+                + " app=" + NameToString(tracked[i].appearance)
+                + " attackType=" + attackType
+                + " performAttack=" + perform
+                + " alive=" + npc.IsAlive());
+        }
+    }
+
+    public function reportOwnedAction(actor : CNewNPC, eventName : name)
+    {
+        var index : int;
+        var code : int;
+
+        if(!actor || !enabled || suspended)
+        {
+            return;
+        }
+
+        index = findTrackedByActor(actor);
+
+        if(index < 0)
+        {
+            return;
+        }
+
+        code = getActions().codeFor(eventName);
+
+        tracked[index].actionSeq = (tracked[index].actionSeq + 1) & 63;
+        tracked[index].actionCode = code;
+        tracked[index].actionType = (int)actor.GetBehaviorVariable('AttackType');
+        tracked[index].actionDir = (int)actor.GetBehaviorVariable('targetDirection');
+
+        statActionSent += 1;
+
+        if(code == 8191)
+        {
+            statActionUnknown += 1;
+
+            WO_Note("[npc_action] UNKNOWN event=" + NameToString(eventName)
+                + " app=" + NameToString(tracked[index].appearance)
+                + " code=" + tracked[index].typeCode);
+        }
+
+        dbgAction("send guid=" + tracked[index].npcId
+            + " event=" + NameToString(eventName)
+            + " code=" + code
+            + " type=" + tracked[index].actionType
+            + " dir=" + tracked[index].actionDir
+            + " seq=" + tracked[index].actionSeq
+            + " app=" + NameToString(tracked[index].appearance));
+    }
+
+    private function applyReplicaAction(record : r_Replica, npc : CNewNPC, flags : int)
+    {
+        var seq : int;
+        var code : int;
+        var attackType : int;
+        var dir : int;
+        var eventName : name;
+        var raised : bool;
+        var forced : bool;
+
+        seq = (flags / 8) & 63;
+
+        if(seq == record.lastActionSeq)
+        {
+            return;
+        }
+
+        if(record.lastActionSeq < 0)
+        {
+            record.lastActionSeq = seq;
+            return;
+        }
+
+        record.lastActionSeq = seq;
+
+        code = (flags / 262144) & 8191;
+        attackType = (flags / 512) & 63;
+        dir = (flags / 32768) & 7;
+
+        eventName = getActions().nameFor(code);
+
+        record.pendingActionAt = theGame.GetEngineTimeAsSeconds();
+        record.pendingType = attackType;
+        record.pendingDir = dir;
+
+        raised = false;
+        forced = false;
+
+        if(actionForceMode == 2)
+        {
+            if(attackType > 0)
+            {
+                npc.SetBehaviorVariable('AttackType', (float)attackType, true);
+            }
+
+            raised = npc.RaiseForceEvent(eventName);
+            forced = true;
+
+            if(raised)
+            {
+                statActionForced += 1;
+                record.pendingActionAt = -1.0;
+            }
+        }
+
+        statActionApplied += 1;
+        record.lastActionAt = record.pendingActionAt;
+
+        dbgAction("cmd canonical=" + record.canonicalId
+            + " event=" + NameToString(eventName)
+            + " code=" + code
+            + " type=" + attackType
+            + " dir=" + dir
+            + " seq=" + seq
+            + " forcedRaise=" + raised
+            + " app=" + NameToString(record.appearance));
+    }
+
+    public function gateAction(actor : CNewNPC) : bool
+    {
+        var index : int;
+        var now : float;
+
+        if(!actor)
+        {
+            return true;
+        }
+
+        if(!actor.HasTag('WOReplica'))
+        {
+            reportOwnedAction(actor, 'Attack');
+            return true;
+        }
+
+        index = findReplicaByActor(actor);
+
+        if(index < 0)
+        {
+            return true;
+        }
+
+        now = theGame.GetEngineTimeAsSeconds();
+
+        if(replicas[index].pendingActionAt < 0.0
+            || (now - replicas[index].pendingActionAt) > ACTION_COMMAND_WINDOW)
+        {
+            statActionSuppressed += 1;
+
+            dbgAction("suppress canonical=" + replicas[index].canonicalId
+                + " app=" + NameToString(replicas[index].appearance));
+
+            return false;
+        }
+
+        if(replicas[index].pendingType > 0)
+        {
+            actor.SetBehaviorVariable('AttackType', (float)replicas[index].pendingType, true);
+        }
+
+        if(replicas[index].pendingDir > 0)
+        {
+            actor.SetBehaviorVariable('targetDirection', (float)replicas[index].pendingDir, true);
+        }
+
+        replicas[index].pendingActionAt = -1.0;
+        replicas[index].lastActionAt = now;
+        statActionAllowed += 1;
+
+        dbgAction("allow canonical=" + replicas[index].canonicalId
+            + " type=" + replicas[index].pendingType
+            + " app=" + NameToString(replicas[index].appearance));
+
+        return true;
+    }
+
+    private function findReplicaByActor(actor : CNewNPC) : int
+    {
+        var i : int;
+
+        for(i = 0; i < replicas.Size(); i += 1)
+        {
+            if(replicas[i].actor == actor)
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
+    public function releaseAll()
+    {
+        var i : int;
+
+        for(i = 0; i < replicas.Size(); i += 1)
+        {
+            destroyReplica(replicas[i]);
+        }
+
+        replicas.Clear();
+        tracked.Clear();
+        rejectedGuids.Clear();
+        rejectedAt.Clear();
+        getAggro().reset();
+    }
+
+    private function currentArea() : int
+    {
+        return (int)theGame.GetCommonMapManager().GetCurrentArea();
+    }
+
+    public function update()
+    {
+        var now : float;
+
+        if(!enabled || !thePlayer)
+        {
+            return;
+        }
+
+        now = theGame.GetEngineTimeAsSeconds();
+
+        if(updateSuspension(now))
+        {
+            return;
+        }
+
+        if(nextScanAt > now + 5.0)
+        {
+            nextScanAt = 0.0;
+            nextPushAt = 0.0;
+        }
+
+        if(now >= nextScanAt)
+        {
+            nextScanAt = now + SCAN_INTERVAL;
+            scanOwned(now);
+        }
+
+        if(now >= nextAggroAt)
+        {
+            nextAggroAt = now + AGGRO_INTERVAL;
+            getAggro().update(now, tracked);
+        }
+
+        if(now >= nextPushAt)
+        {
+            nextPushAt = now + PUSH_INTERVAL;
+            pushOwned(now);
+        }
+
+        applyDrops();
+        applyKillOrders();
+        driveReplicas(now);
+        applyInboundHits(now);
+        applyAcks();
+        pruneRejected(now);
+
+        if(debugLogging && now >= nextDebugAt)
+        {
+            nextDebugAt = now + DEBUG_INTERVAL;
+            writeDebug(now);
+        }
+    }
+
+    private function updateSuspension(now : float) : bool
+    {
+        var shouldSuspend : bool;
+        var awayNow : bool;
+        var i : int;
+
+        awayNow = theGame.IsPaused() || !theGame.IsActive();
+
+        if(awayNow != reportedAway)
+        {
+            reportedAway = awayNow;
+            WO_SetPaused(awayNow);
+        }
+
+        shouldSuspend = !thePlayer.IsAlive() || theGame.IsBlackscreen()
+            || theGame.IsLoadingScreenVideoPlaying() || awayNow;
+
+        if(shouldSuspend == suspended)
+        {
+            return suspended;
+        }
+
+        suspended = shouldSuspend;
+        WO_NpcSuspend(suspended);
+
+        if(suspended)
+        {
+            tracked.Clear();
+            statSuspends += 1;
+
+            dbg("npc_suspend", "suspended: ownership released, "
+                + replicas.Size() + " replicas kept alive");
+        }
+        else
+        {
+            nextScanAt = 0.0;
+            nextPushAt = 0.0;
+
+            dbg("npc_suspend", "resumed");
+        }
+
+        return suspended;
+    }
+
+    private function isRejected(guid : int) : bool
+    {
+        var i : int;
+
+        for(i = 0; i < rejectedGuids.Size(); i += 1)
+        {
+            if(rejectedGuids[i] == guid)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function rememberRejected(guid : int, now : float)
+    {
+        if(isRejected(guid))
+        {
+            return;
+        }
+
+        rejectedGuids.PushBack(guid);
+        rejectedAt.PushBack(now);
+    }
+
+    private function pruneRejected(now : float)
+    {
+        var i : int;
+
+        for(i = rejectedGuids.Size() - 1; i >= 0; i -= 1)
+        {
+            if(rejectedAt[i] > now || (now - rejectedAt[i]) > REJECT_MEMORY)
+            {
+                rejectedGuids.Erase(i);
+                rejectedAt.Erase(i);
+            }
+        }
+    }
+
+    private function allowOffer(now : float) : bool
+    {
+        if(now >= offerWindowAt)
+        {
+            offerWindowAt = now + 1.0;
+            offerCount = 0;
+        }
+
+        if(offerCount >= OFFERS_PER_SECOND)
+        {
+            return false;
+        }
+
+        offerCount += 1;
+        return true;
+    }
+
+    private function healthPermille(npc : CNewNPC) : int
+    {
+        var current : float;
+        var maximum : float;
+
+        current = npc.GetHealth();
+        maximum = npc.GetMaxHealth();
+
+        if(current < 0.0 || maximum <= 0.0)
+        {
+            return -1;
+        }
+
+        return (int)((current / maximum) * 1000.0);
+    }
+
+    private function buildFlags(npc : CNewNPC, record : r_TrackedNpc) : int
+    {
+        var flags : int;
+
+        flags = 0;
+
+        if(npc.IsAlive())
+        {
+            flags += 1;
+        }
+
+        if(npc.GetAttitude(thePlayer) == AIA_Hostile)
+        {
+            flags += 2;
+        }
+
+        if(npc.IsMonster())
+        {
+            flags += 4;
+        }
+
+        flags += (record.actionSeq & 63) * 8;
+        flags += (record.actionType & 63) * 512;
+        flags += (record.actionDir & 7) * 32768;
+        flags += (record.actionCode & 8191) * 262144;
+
+        return flags;
+    }
+
+    private function isReplicaActor(npc : CNewNPC) : bool
+    {
+        return npc.HasTag('WOReplica');
+    }
+
+    private function isSyncable(npc : CNewNPC, classifier : r_EntityClassifier) : bool
+    {
+        if(!npc || npc == thePlayer)
+        {
+            return false;
+        }
+
+        if(npc.HasTag('MPEntity') || npc.HasTag('online_horse') || npc.HasTag('wo_horse'))
+        {
+            return false;
+        }
+
+        if(isReplicaActor(npc))
+        {
+            return false;
+        }
+
+        return classifier.isSyncEligible(npc);
+    }
+
+    private function findTrackedByActor(actor : CNewNPC) : int
+    {
+        var i : int;
+
+        for(i = 0; i < tracked.Size(); i += 1)
+        {
+            if(tracked[i].actor == actor)
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
+    private function findTrackedById(npcId : int) : int
+    {
+        var i : int;
+
+        for(i = 0; i < tracked.Size(); i += 1)
+        {
+            if(tracked[i].npcId == npcId)
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
+    private function countReplicasOfSpecies(typeCode : string, pos : Vector) : int
+    {
+        var replicaPos : Vector;
+        var count : int;
+        var i : int;
+
+        for(i = 0; i < replicas.Size(); i += 1)
+        {
+            if(!replicas[i].actor || replicas[i].typeCode != typeCode)
+            {
+                continue;
+            }
+
+            if(!replicas[i].actor.IsAlive())
+            {
+                continue;
+            }
+
+            replicaPos = replicas[i].actor.GetWorldPosition();
+
+            if(VecDistance(replicaPos, pos) <= RESERVATION_RADIUS)
+            {
+                count += 1;
+            }
+        }
+
+        return count;
+    }
+
+    private function countLocalOfSpecies(typeCode : string, pos : Vector, out entities : array<CGameplayEntity>, classifier : r_EntityClassifier) : int
+    {
+        var npc : CNewNPC;
+        var otherPos : Vector;
+        var count : int;
+        var i : int;
+        var index : int;
+
+        for(i = 0; i < entities.Size(); i += 1)
+        {
+            npc = (CNewNPC)entities[i];
+
+            if(!isSyncable(npc, classifier) || !npc.IsAlive())
+            {
+                continue;
+            }
+
+            otherPos = npc.GetWorldPosition();
+
+            if(VecDistance(otherPos, pos) > RESERVATION_RADIUS)
+            {
+                continue;
+            }
+
+            index = findTrackedByActor(npc);
+
+            if(index >= 0)
+            {
+                if(tracked[index].typeCode == typeCode)
+                {
+                    count += 1;
+                }
+
+                continue;
+            }
+
+            if(classifyType(npc) == typeCode)
+            {
+                count += 1;
+            }
+        }
+
+        return count;
+    }
+
+    private function noteSkipped(npc : CNewNPC, classifier : r_EntityClassifier, now : float)
+    {
+        var sample : r_SEntityClassSample;
+        var playerPos : Vector;
+        var npcPos : Vector;
+
+        if(!debugLogging || !npc || npc == thePlayer || now < nextSkipLogAt)
+        {
+            return;
+        }
+
+        if(npc.HasTag('MPEntity') || npc.HasTag('WOReplica') || npc.HasTag('online_horse') || npc.HasTag('wo_horse'))
+        {
+            return;
+        }
+
+        playerPos = thePlayer.GetWorldPosition();
+        npcPos = npc.GetWorldPosition();
+
+        if(VecDistance(playerPos, npcPos) > 40.0)
+        {
+            return;
+        }
+
+        classifier.classify(npc, sample);
+
+        nextSkipLogAt = now + 1.0;
+
+        dbg("npc_skip", "app=" + NameToString(npc.GetAppearance())
+            + " class=" + (int)sample.entityClass
+            + " reason=" + sample.reason
+            + " tags=" + sample.tags
+            + " monster=" + npc.IsMonster()
+            + " human=" + npc.IsHuman()
+            + " maxHp=" + npc.GetMaxHealth()
+            + " alive=" + npc.IsAlive());
+    }
+
+    private function scanOwned(now : float)
+    {
+        var entities : array<CGameplayEntity>;
+        var npc : CNewNPC;
+        var classifier : r_EntityClassifier;
+        var record : r_TrackedNpc;
+        var pos : Vector;
+        var playerPos : Vector;
+        var typeCode : string;
+        var guid : int;
+        var localCount : int;
+        var replicaCount : int;
+        var index : int;
+        var i : int;
+
+        for(i = tracked.Size() - 1; i >= 0; i -= 1)
+        {
+            if(!tracked[i].actor || (now - tracked[i].lastSeenAt) > TRACK_GRACE)
+            {
+                tracked.Erase(i);
+            }
+        }
+
+        classifier = theGame.r_getMultiplayerClient().getEntityClassifier();
+        playerPos = thePlayer.GetWorldPosition();
+
+        FindGameplayEntitiesInSphere(entities, playerPos, KEEP_RADIUS, 512,,,,'CNewNPC');
+
+        for(i = 0; i < entities.Size(); i += 1)
+        {
+            npc = (CNewNPC)entities[i];
+
+            if(!isSyncable(npc, classifier))
+            {
+                noteSkipped(npc, classifier, now);
+                continue;
+            }
+
+            index = findTrackedByActor(npc);
+
+            if(index >= 0)
+            {
+                tracked[index].lastSeenAt = now;
+                continue;
+            }
+
+            pos = npc.GetWorldPosition();
+            guid = npc.GetGuidHash();
+
+            if(guid == 0 || tracked.Size() >= MAX_TRACKED)
+            {
+                continue;
+            }
+
+            if(VecDistance(playerPos, pos) > SCAN_RADIUS)
+            {
+                continue;
+            }
+
+            if(isRejected(guid))
+            {
+                continue;
+            }
+
+            typeCode = classifyType(npc);
+            replicaCount = countReplicasOfSpecies(typeCode, pos);
+
+            if(replicaCount > 0)
+            {
+                localCount = countLocalOfSpecies(typeCode, pos, entities, classifier);
+
+                if(replicaCount >= localCount)
+                {
+                    dbg("npc_offer", "prefiltered duplicate app=" + NameToString(npc.GetAppearance())
+                        + " code=" + typeCode
+                        + " replicas=" + replicaCount
+                        + " local=" + localCount);
+
+                    npc.Destroy();
+                    statPrefiltered += 1;
+                    continue;
+                }
+            }
+            else
+            {
+                localCount = 1;
+            }
+
+            if(!allowOffer(now))
+            {
+                continue;
+            }
+
+            record = new r_TrackedNpc in this;
+            record.npcId = guid;
+            record.actor = npc;
+            record.appearance = npc.GetAppearance();
+            record.typeCode = typeCode;
+            record.lastSeenAt = now;
+            record.lastHp = -1;
+            record.offerLocalCount = localCount;
+
+            tracked.PushBack(record);
+            statRegistered += 1;
+
+            dbg("npc_offer", "offered guid=" + guid
+                + " code=" + typeCode
+                + " app=" + NameToString(record.appearance)
+                + " localCount=" + localCount);
+        }
+    }
+
+    private function classifyType(npc : CNewNPC) : string
+    {
+        var category : EMonsterCategory;
+        var soundName : name;
+        var isTeleporting : bool;
+        var canBeTargeted : bool;
+        var canBeHitByFists : bool;
+        var code : name;
+        var resolved : string;
+
+        theGame.GetMonsterParamsForActor(npc, category, soundName, isTeleporting, canBeTargeted, canBeHitByFists);
+
+        resolved = getTemplates().resolveSpecies(npc.GetAppearance(), soundName);
+
+        if(resolved != "")
+        {
+            return resolved;
+        }
+
+        code = getTemplates().codeFromAppearance(npc.GetAppearance());
+
+        if(code != '' && getTemplates().pathForToken(NameToString(code)) != "")
+        {
+            return NameToString(code);
+        }
+
+        dbg("npc_species", "unresolved app=" + NameToString(npc.GetAppearance())
+            + " sound=" + NameToString(soundName)
+            + " category=" + (int)category
+            + " monster=" + npc.IsMonster());
+
+        return StrLower(NameToString(npc.GetAppearance()));
+    }
+
+    public function creditOwnedDamage(actor : CNewNPC, dealt : float)
+    {
+        var localId : int;
+        var index : int;
+
+        if(!actor || dealt <= 0.0)
+        {
+            return;
+        }
+
+        index = findTrackedByActor(actor);
+
+        if(index < 0)
+        {
+            return;
+        }
+
+        localId = theGame.r_getMultiplayerClient().getServerId();
+
+        if(localId <= 0)
+        {
+            return;
+        }
+
+        getAggro().noteDamage(tracked[index].npcId, localId, dealt, theGame.GetEngineTimeAsSeconds());
+        statLocalDamage += 1;
+    }
+
+    private function pushOwned(now : float)
+    {
+        var npc : CNewNPC;
+        var pos : Vector;
+        var area : int;
+        var forced : int;
+        var targetId : int;
+        var hp : int;
+        var i : int;
+
+        area = currentArea();
+
+        WO_NpcBeginOwned();
+
+        for(i = 0; i < tracked.Size(); i += 1)
+        {
+            npc = tracked[i].actor;
+
+            if(!npc)
+            {
+                continue;
+            }
+
+            pos = npc.GetWorldPosition();
+            hp = healthPermille(npc);
+
+            forced = getAggro().forcedTargetOf(tracked[i].npcId);
+
+            if(forced > 0)
+            {
+                targetId = forced;
+            }
+            else
+            {
+                targetId = theGame.r_getMultiplayerClient().encodeTargetPlayerId(npc.GetTarget());
+            }
+
+            WO_NpcPushOwned(
+                tracked[i].npcId,
+                area,
+                tracked[i].offerLocalCount,
+                tracked[i].typeCode,
+                NameToString(tracked[i].appearance),
+                pos.X, pos.Y, pos.Z,
+                npc.GetHeading(),
+                hp,
+                buildFlags(npc, tracked[i]),
+                targetId);
+
+            tracked[i].lastHp = hp;
+            tracked[i].lastTargetId = targetId;
+        }
+
+        WO_NpcEndOwned();
+
+        pollOwnedAttackVars(now);
+    }
+
+    public function reportReplicaDamage(actor : CNewNPC, dealt : float, maximum : float)
+    {
+        var permille : int;
+        var i : int;
+
+        if(!actor || dealt <= 0.0 || maximum <= 0.0)
+        {
+            return;
+        }
+
+        permille = (int)((dealt / maximum) * 1000.0);
+
+        if(permille <= 0)
+        {
+            return;
+        }
+
+        if(permille > 1000)
+        {
+            permille = 1000;
+        }
+
+        for(i = 0; i < replicas.Size(); i += 1)
+        {
+            if(replicas[i].actor != actor)
+            {
+                continue;
+            }
+
+            if(WO_NpcReportHit(replicas[i].canonicalId, permille) != 0)
+            {
+                replicas[i].lastPredictAt = theGame.GetEngineTimeAsSeconds();
+                replicas[i].lastLocalHp = healthPermille(actor);
+                statHitsSent += 1;
+
+                dbg("npc_hit", "sent (exact) canonical=" + replicas[i].canonicalId
+                    + " permille=" + permille
+                    + " dealt=" + dealt);
+            }
+
+            return;
+        }
+    }
+
+    private function findReplica(canonicalId : int) : int
+    {
+        var i : int;
+
+        for(i = 0; i < replicas.Size(); i += 1)
+        {
+            if(replicas[i].canonicalId == canonicalId)
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
+    private function applyDrops()
+    {
+        var count : int;
+        var guid : int;
+        var index : int;
+        var now : float;
+        var i : int;
+
+        count = WO_NpcDropCount();
+
+        if(count <= 0)
+        {
+            return;
+        }
+
+        now = theGame.GetEngineTimeAsSeconds();
+
+        for(i = 0; i < count; i += 1)
+        {
+            guid = WO_NpcDropGuid(i);
+            index = findTrackedById(guid);
+
+            rememberRejected(guid, now);
+
+            if(index < 0)
+            {
+                continue;
+            }
+
+            if(tracked[index].actor)
+            {
+                tracked[index].actor.Destroy();
+            }
+
+            tracked.Erase(index);
+            statDropped += 1;
+
+            dbg("npc_handover", "dropped local guid=" + guid);
+        }
+
+        WO_NpcDropsDone();
+    }
+
+    private function applyKillOrders()
+    {
+        var count : int;
+        var guid : int;
+        var index : int;
+        var i : int;
+
+        count = WO_NpcKillCount();
+
+        if(count <= 0)
+        {
+            return;
+        }
+
+        for(i = 0; i < count; i += 1)
+        {
+            guid = WO_NpcKillGuid(i);
+            index = findTrackedById(guid);
+
+            if(index < 0)
+            {
+                continue;
+            }
+
+            if(tracked[index].actor && tracked[index].actor.IsAlive())
+            {
+                tracked[index].actor.Kill('WitcherOnline', true, NULL);
+                statKilled += 1;
+
+                dbg("npc_kill", "server-confirmed kill of owned guid=" + guid);
+            }
+        }
+
+        WO_NpcKillsDone();
+    }
+
+    private function driveReplicas(now : float)
+    {
+        var count : int;
+        var op : int;
+        var canonicalId : int;
+        var index : int;
+        var i : int;
+
+        count = WO_NpcPull();
+
+        for(i = 0; i < count; i += 1)
+        {
+            canonicalId = WO_NpcId(i);
+            op = WO_NpcOp(i);
+            index = findReplica(canonicalId);
+
+            if(op == 1)
+            {
+                if(index < 0)
+                {
+                    spawnReplica(i, canonicalId, now);
+                }
+
+                continue;
+            }
+
+            if(op == 2)
+            {
+                if(index >= 0)
+                {
+                    destroyReplica(replicas[index]);
+                    replicas.Erase(index);
+                    statDespawned += 1;
+                }
+
+                continue;
+            }
+
+            if(index < 0)
+            {
+                WO_NpcForget(canonicalId);
+                continue;
+            }
+
+            if(op == 3)
+            {
+                killReplica(replicas[index]);
+                continue;
+            }
+
+            if(op == 4)
+            {
+                promoteReplica(replicas[index], now);
+                replicas.Erase(index);
+                continue;
+            }
+
+            driveReplica(replicas[index], i, now);
+        }
+    }
+
+    private function spawnReplica(commandIndex : int, canonicalId : int, now : float)
+    {
+        var record : r_Replica;
+        var template : CEntityTemplate;
+        var npc : CNewNPC;
+        var rot : EulerAngles;
+        var pos : Vector;
+        var path : string;
+        var typeCode : string;
+        var appearance : name;
+
+        if(replicas.Size() >= MAX_REPLICAS)
+        {
+            return;
+        }
+
+        typeCode = WO_NpcType(commandIndex);
+        appearance = WO_NpcAppearance(commandIndex);
+        path = getTemplates().pathForToken(typeCode);
+
+        if(path == "")
+        {
+            statNoTemplate += 1;
+            WO_Note("[npc_spawn] no template canonical=" + canonicalId
+                + " code=" + typeCode
+                + " app=" + NameToString(appearance));
+            WO_NpcUnspawnable(canonicalId);
+            return;
+        }
+
+        template = (CEntityTemplate)LoadResource(path, true);
+
+        if(!template)
+        {
+            statNoTemplate += 1;
+            WO_Note("[npc_spawn] template load failed canonical=" + canonicalId + " path=" + path);
+            WO_NpcUnspawnable(canonicalId);
+            return;
+        }
+
+        pos = Vector(WO_NpcX(commandIndex), WO_NpcY(commandIndex), WO_NpcZ(commandIndex));
+        rot.Pitch = 0.0;
+        rot.Yaw = WO_NpcHeading(commandIndex);
+        rot.Roll = 0.0;
+
+        npc = (CNewNPC)theGame.CreateEntity(template, pos, rot, true, false, false, PM_DontPersist);
+
+        if(!npc)
+        {
+            dbg("npc_spawn", "create failed canonical=" + canonicalId + " path=" + path);
+            return;
+        }
+
+        record = new r_Replica in this;
+        record.canonicalId = canonicalId;
+        record.actor = npc;
+        record.localGuid = npc.GetGuidHash();
+        record.appearance = appearance;
+        record.typeCode = typeCode;
+
+        replicas.PushBack(record);
+
+        WO_NpcBind(commandIndex, record.localGuid);
+        prepareReplica(record);
+
+        statSpawned += 1;
+
+        dbg("npc_spawn", "canonical=" + canonicalId
+            + " code=" + typeCode
+            + " app=" + NameToString(appearance)
+            + " guid=" + record.localGuid);
+    }
+
+    private function prepareReplica(record : r_Replica)
+    {
+        var npc : CNewNPC;
+
+        npc = record.actor;
+
+        if(!npc || record.prepared)
+        {
+            return;
+        }
+
+        npc.AddTag('WOReplica');
+
+        if(record.appearance != '' && npc.GetAppearance() != record.appearance)
+        {
+            npc.ApplyAppearance(NameToString(record.appearance));
+        }
+
+        npc.SetImmortalityMode(AIM_Immortal, AIC_Default, true);
+        npc.SetAttackableByPlayerRuntime(true);
+        npc.SetCanPlayHitAnim(true);
+
+        record.lastLocalHp = healthPermille(npc);
+        record.prepared = true;
+    }
+
+    private function destroyReplica(record : r_Replica)
+    {
+        if(!record)
+        {
+            return;
+        }
+
+        if(record.actor)
+        {
+            if(record.aiForceId >= 0)
+            {
+                record.actor.CancelAIBehavior(record.aiForceId);
+            }
+
+            record.actor.Destroy();
+        }
+
+        record.actor = NULL;
+    }
+
+    private function killReplica(record : r_Replica)
+    {
+        if(!record.actor)
+        {
+            return;
+        }
+
+        record.actor.SetImmortalityMode(AIM_None, AIC_Default, true);
+
+        if(record.actor.IsAlive())
+        {
+            record.actor.Kill('WitcherOnline', true, NULL);
+            statKilled += 1;
+
+            dbg("npc_kill", "canonical=" + record.canonicalId
+                + " app=" + NameToString(record.appearance));
+        }
+    }
+
+    private function promoteReplica(record : r_Replica, now : float)
+    {
+        var npc : CNewNPC;
+        var owned : r_TrackedNpc;
+
+        npc = record.actor;
+
+        if(!npc)
+        {
+            WO_NpcForget(record.canonicalId);
+            return;
+        }
+
+        if(record.aiForceId >= 0)
+        {
+            npc.CancelAIBehavior(record.aiForceId);
+            record.aiForceId = -1;
+        }
+
+        npc.SetImmortalityMode(AIM_None, AIC_Default, true);
+        npc.RemoveTag('WOReplica');
+
+        owned = new r_TrackedNpc in this;
+        owned.npcId = npc.GetGuidHash();
+        owned.actor = npc;
+        owned.appearance = npc.GetAppearance();
+        owned.typeCode = record.typeCode;
+        owned.lastSeenAt = now;
+        owned.lastHp = -1;
+
+        tracked.PushBack(owned);
+        statPromoted += 1;
+
+        WO_NpcTake(record.canonicalId, owned.npcId);
+
+        dbg("npc_handover", "promoted canonical=" + record.canonicalId
+            + " guid=" + owned.npcId
+            + " app=" + NameToString(owned.appearance));
+    }
+
+    private function driveReplica(record : r_Replica, commandIndex : int, now : float)
+    {
+        var npc : CNewNPC;
+        var target : Vector;
+        var current : Vector;
+        var rot : EulerAngles;
+        var adjustor : CMovementAdjustor;
+        var ticket : SMovementAdjustmentRequestTicket;
+        var agent : CMovingAgentComponent;
+        var heading : float;
+        var speed : float;
+        var distance : float;
+        var hp : int;
+
+        npc = record.actor;
+
+        if(!npc)
+        {
+            return;
+        }
+
+        if(!record.prepared)
+        {
+            prepareReplica(record);
+        }
+
+        target = Vector(WO_NpcX(commandIndex), WO_NpcY(commandIndex), WO_NpcZ(commandIndex));
+        heading = WO_NpcHeading(commandIndex);
+        speed = WO_NpcSpeed(commandIndex);
+        hp = WO_NpcHp(commandIndex);
+
+        applyReplicaTarget(record, npc, WO_NpcTarget(commandIndex));
+        applyReplicaAction(record, npc, WO_NpcFlags(commandIndex));
+        reconcileReplicaHealth(record, npc, hp, now);
+
+        if(!npc.IsAlive())
+        {
+            return;
+        }
+
+        current = npc.GetWorldPosition();
+        distance = VecDistance(current, target);
+
+        if(distance > HARD_SNAP)
+        {
+            rot.Pitch = 0.0;
+            rot.Yaw = heading;
+            rot.Roll = 0.0;
+
+            npc.TeleportWithRotation(target, rot);
+            record.nextDriveAt = now + DRIVE_INTERVAL;
+            statTeleports += 1;
+            return;
+        }
+
+        if(now < record.nextDriveAt)
+        {
+            return;
+        }
+
+        record.nextDriveAt = now + DRIVE_INTERVAL;
+
+        agent = npc.GetMovingAgentComponent();
+
+        if(!agent)
+        {
+            return;
+        }
+
+        adjustor = agent.GetMovementAdjustor();
+
+        if(adjustor)
+        {
+            adjustor.Cancel(adjustor.GetRequest('wo_replica'));
+        }
+
+        if(distance < FREE_RADIUS)
+        {
+            return;
+        }
+
+        if((now - record.lastActionAt) < ACTION_FREE_WINDOW && distance < ACTION_FREE_RADIUS)
+        {
+            return;
+        }
+
+        if(distance > 0.15)
+        {
+            agent.SetGameplayMoveDirection(VecHeading(target - current));
+        }
+
+        if(speed > 3.0)
+        {
+            agent.SetMoveType(MT_Run);
+        }
+        else
+        {
+            agent.SetMoveType(MT_Walk);
+        }
+
+        if(!adjustor)
+        {
+            return;
+        }
+
+        ticket = adjustor.CreateNewRequest('wo_replica');
+
+        adjustor.AdjustmentDuration(ticket, SLIDE_WINDOW);
+        adjustor.AdjustLocationVertically(ticket, true);
+        adjustor.ScaleAnimationLocationVertically(ticket, true);
+        adjustor.RotateTo(ticket, heading);
+        adjustor.SlideTo(ticket, target);
+    }
+
+    private function applyReplicaTarget(record : r_Replica, npc : CNewNPC, targetPlayerId : int)
+    {
+        var resolved : CActor;
+
+        if(record.appliedTarget == targetPlayerId)
+        {
+            return;
+        }
+
+        if(targetPlayerId <= 0)
+        {
+            wo_releaseNpcTarget(npc);
+            record.appliedTarget = targetPlayerId;
+            return;
+        }
+
+        resolved = theGame.r_getMultiplayerClient().resolveTargetActor(targetPlayerId);
+
+        if(!resolved)
+        {
+            return;
+        }
+
+        wo_forceNpcTarget(npc, resolved);
+        record.appliedTarget = targetPlayerId;
+        statTargets += 1;
+
+        dbg("npc_target", "canonical=" + record.canonicalId + " player=" + targetPlayerId);
+    }
+
+    private function reconcileReplicaHealth(record : r_Replica, npc : CNewNPC, authorityPermille : int, now : float)
+    {
+        var localPermille : int;
+        var drop : int;
+        var targetFraction : float;
+        var localFraction : float;
+
+        localPermille = healthPermille(npc);
+
+        if(localPermille < 0)
+        {
+            return;
+        }
+
+        record.lastLocalHp = localPermille;
+
+        if(authorityPermille < 0)
+        {
+            return;
+        }
+
+        targetFraction = (float)authorityPermille / 1000.0;
+        localFraction = (float)localPermille / 1000.0;
+
+        if(AbsF(localFraction - targetFraction) < HEALTH_TOLERANCE)
+        {
+            return;
+        }
+
+        if(targetFraction > localFraction && (now - record.lastPredictAt) < PREDICT_GRACE)
+        {
+            return;
+        }
+
+        if(targetFraction <= 0.0)
+        {
+            return;
+        }
+
+        npc.SetHealthPerc(targetFraction);
+        record.lastLocalHp = healthPermille(npc);
+        statHealthSync += 1;
+    }
+
+    private function applyInboundHits(now : float)
+    {
+        var count : int;
+        var index : int;
+        var guid : int;
+        var attackerId : int;
+        var permille : int;
+        var applied : float;
+        var resulting : int;
+        var i : int;
+
+        count = WO_NpcHitCount();
+
+        if(count <= 0)
+        {
+            return;
+        }
+
+        for(i = 0; i < count; i += 1)
+        {
+            guid = WO_NpcHitGuid(i);
+            attackerId = WO_NpcHitAttacker(i);
+            permille = WO_NpcHitPermille(i);
+            index = findTrackedById(guid);
+
+            if(index < 0)
+            {
+                WO_NpcHitAck(i, -1, false);
+                statRejected += 1;
+                continue;
+            }
+
+            applied = inflictRemoteDamage(tracked[index], attackerId, permille, now);
+            resulting = healthPermille(tracked[index].actor);
+
+            WO_NpcHitAck(i, resulting, applied > 0.0);
+
+            if(applied > 0.0)
+            {
+                statHitsApplied += 1;
+
+                dbg("npc_hit", "applied npc=" + guid
+                    + " attacker=" + attackerId
+                    + " permille=" + permille
+                    + " damage=" + applied
+                    + " hp=" + resulting);
+            }
+            else
+            {
+                statRejected += 1;
+            }
+        }
+
+        WO_NpcHitsDone();
+    }
+
+    private function inflictRemoteDamage(record : r_TrackedNpc, attackerId : int, permille : int, now : float) : float
+    {
+        var action : W3DamageAction;
+        var attacker : CActor;
+        var npc : CNewNPC;
+        var maximum : float;
+        var amount : float;
+
+        npc = record.actor;
+
+        if(!npc || !npc.IsAlive() || permille <= 0)
+        {
+            return 0.0;
+        }
+
+        if(permille > 1000)
+        {
+            permille = 1000;
+        }
+
+        maximum = npc.GetMaxHealth();
+
+        if(maximum <= 0.0)
+        {
+            return 0.0;
+        }
+
+        amount = (((float)permille) / 1000.0) * maximum;
+
+        if(amount <= 0.0)
+        {
+            return 0.0;
+        }
+
+        attacker = theGame.r_getMultiplayerClient().resolveTargetActor(attackerId);
+
+        action = new W3DamageAction in this;
+        action.Initialize(attacker, npc, NULL, "WitcherOnline", EHRT_None, CPS_Undefined, false, false, false, true);
+        action.SetIgnoreArmor(true);
+        action.AddDamage(theGame.params.DAMAGE_NAME_DIRECT, amount);
+
+        theGame.damageMgr.ProcessAction(action);
+
+        delete action;
+
+        getAggro().noteDamage(record.npcId, attackerId, amount, now);
+
+        return amount;
+    }
+
+    private function applyAcks()
+    {
+        var count : int;
+        var canonicalId : int;
+        var hp : int;
+        var index : int;
+        var i : int;
+
+        count = WO_NpcAckCount();
+
+        if(count <= 0)
+        {
+            return;
+        }
+
+        for(i = 0; i < count; i += 1)
+        {
+            canonicalId = WO_NpcAckId(i);
+            hp = WO_NpcAckHp(i);
+            index = findReplica(canonicalId);
+            statAcks += 1;
+
+            if(index < 0 || hp < 0)
+            {
+                continue;
+            }
+
+            if(!replicas[index].actor)
+            {
+                continue;
+            }
+
+            if(!WO_NpcAckOk(i))
+            {
+                statRejected += 1;
+            }
+
+            if(hp > 1000)
+            {
+                hp = 1000;
+            }
+
+            replicas[index].actor.SetHealthPerc((float)hp / 1000.0);
+            replicas[index].lastLocalHp = hp;
+            replicas[index].lastPredictAt = 0.0;
+        }
+
+        WO_NpcAcksDone();
+    }
+
+    private function writeDebug(now : float)
+    {
+        var i : int;
+
+        dbg("npc_stats", "tracked=" + tracked.Size()
+            + " replicas=" + replicas.Size()
+            + " offered=" + statRegistered
+            + " prefiltered=" + statPrefiltered
+            + " dropped=" + statDropped
+            + " spawned=" + statSpawned
+            + " despawned=" + statDespawned
+            + " killed=" + statKilled
+            + " promoted=" + statPromoted
+            + " teleports=" + statTeleports
+            + " targets=" + statTargets
+            + " hitsSent=" + statHitsSent
+            + " hitsApplied=" + statHitsApplied
+            + " acks=" + statAcks
+            + " rejected=" + statRejected
+            + " healthSync=" + statHealthSync
+            + " localDamage=" + statLocalDamage
+            + " noTemplate=" + statNoTemplate
+            + " suspends=" + statSuspends
+            + " rejectMemory=" + rejectedGuids.Size());
+
+        dbg("npc_stats", "actionsSent=" + statActionSent
+            + " applied=" + statActionApplied
+            + " forced=" + statActionForced
+            + " rejected=" + statActionRejected
+            + " unknown=" + statActionUnknown
+            + " probes=" + statActionProbes
+            + " allowed=" + statActionAllowed
+            + " suppressed=" + statActionSuppressed
+            + " forceMode=" + actionForceMode);
+
+        dbg("npc_net", WO_NpcReport() + " latencyMs=" + WO_NpcLatency());
+
+        for(i = 0; i < replicas.Size(); i += 1)
+        {
+            if(i >= 6)
+            {
+                dbg("npc_net", "... " + (replicas.Size() - i) + " more replicas");
+                break;
+            }
+
+            dbg("npc_net", "replica canonical=" + replicas[i].canonicalId
+                + " code=" + replicas[i].typeCode
+                + " guid=" + replicas[i].localGuid
+                + " hp=" + replicas[i].lastLocalHp
+                + " target=" + replicas[i].appliedTarget);
+        }
+
+        getAggro().writeDebug(debugLogging);
+    }
+
+    public function reportStats()
+    {
+        var previous : bool;
+
+        previous = debugLogging;
+        debugLogging = true;
+        writeDebug(theGame.GetEngineTimeAsSeconds());
+        debugLogging = previous;
+    }
+}
+
+exec function wo_npc(enable : bool)
+{
+    theGame.r_getMultiplayerClient().getNpcSync().setEnabled(enable);
+}
+
+exec function wo_npc_debug(enable : bool)
+{
+    theGame.r_getMultiplayerClient().getNpcSync().setDebugLogging(enable);
+}
+
+exec function wo_npc_action_debug(enable : bool)
+{
+    theGame.r_getMultiplayerClient().getNpcSync().setActionLogging(enable);
+}
+
+exec function wo_npc_action_force(mode : int)
+{
+    theGame.r_getMultiplayerClient().getNpcSync().setActionForceMode(mode);
+}
+
+function wo_npcActionSuppress(npc : CNewNPC) : bool
+{
+    var client : r_MultiplayerClient;
+
+    if(!npc)
+    {
+        return false;
+    }
+
+    client = theGame.r_getMultiplayerClient();
+
+    if(!client)
+    {
+        return false;
+    }
+
+    return client.getNpcSync().shouldSuppressAction(npc);
+}
+
+function wo_npcActionGate(npc : CNewNPC) : bool
+{
+    var client : r_MultiplayerClient;
+
+    if(!npc)
+    {
+        return true;
+    }
+
+    client = theGame.r_getMultiplayerClient();
+
+    if(!client)
+    {
+        return true;
+    }
+
+    return client.getNpcSync().gateAction(npc);
+}
+
+function wo_npcActionReport(npc : CNewNPC, eventName : name)
+{
+    var client : r_MultiplayerClient;
+
+    if(!npc)
+    {
+        return;
+    }
+
+    client = theGame.r_getMultiplayerClient();
+
+    if(!client)
+    {
+        return;
+    }
+
+    client.getNpcSync().reportOwnedAction(npc, eventName);
+}
+
+exec function wo_npc_stats()
+{
+    theGame.r_getMultiplayerClient().getNpcSync().reportStats();
+}
+
+exec function wo_npc_tune(interpDelayMs : int, snapshotHz : int)
+{
+    WO_NpcTune(interpDelayMs, snapshotHz);
+    WO_Note("[npc_debug] interpDelayMs=" + interpDelayMs + " snapshotHz=" + snapshotHz);
+}
+
+function wo_creditOwnedDamage(victim : CNewNPC, dealt : float)
+{
+    if(!victim || dealt <= 0.0)
+    {
+        return;
+    }
+
+    theGame.r_getMultiplayerClient().getNpcSync().creditOwnedDamage(victim, dealt);
+}
+
+function wo_reportReplicaDamage(victim : CNewNPC, dealt : float, maximum : float)
+{
+    if(!victim || dealt <= 0.0)
+    {
+        return;
+    }
+
+    theGame.r_getMultiplayerClient().getNpcSync().reportReplicaDamage(victim, dealt, maximum);
+}

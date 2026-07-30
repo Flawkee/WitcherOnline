@@ -1,5 +1,6 @@
-﻿#include "pch.h"
+#include "pch.h"
 #include "ScriptBinding.h"
+#include "NpcNet.h"
 #include "Diagnostics.h"
 #include "GameModule.h"
 #include "InlineHook.h"
@@ -331,6 +332,8 @@ namespace w3mp {
 
 	static std::atomic<unsigned long long> g_pollCount{ 0 };
 	static std::atomic<unsigned long long> g_tickCount{ 0 };
+	static std::atomic<unsigned long long> g_lastScriptTickMs{ 0 };
+	static std::atomic<bool> g_scriptPaused{ false };
 	static std::atomic<unsigned long long> g_sendCount{ 0 };
 	static std::atomic<unsigned long long> g_recvCount{ 0 };
 	static std::atomic<unsigned long long> g_dropCount{ 0 };
@@ -427,6 +430,38 @@ namespace w3mp {
 		__except (EXCEPTION_EXECUTE_HANDLER)
 		{
 			return 0;
+		}
+
+		return value;
+	}
+
+	static float ReadFloatParameter(void* frame)
+	{
+		float value = 0.0f;
+
+		__try
+		{
+			ReadParameter(frame, &value);
+		}
+		__except (EXCEPTION_EXECUTE_HANDLER)
+		{
+			return 0.0f;
+		}
+
+		return value;
+	}
+
+	static bool ReadBoolParameter(void* frame)
+	{
+		bool value = false;
+
+		__try
+		{
+			ReadParameter(frame, &value);
+		}
+		__except (EXCEPTION_EXECUTE_HANDLER)
+		{
+			return false;
 		}
 
 		return value;
@@ -798,6 +833,25 @@ namespace w3mp {
 		WriteNameResult(result, g_current.sender);
 	}
 
+	static std::atomic<unsigned long long> g_accessorNanos{ 0 };
+	static std::atomic<unsigned long long> g_accessorCalls{ 0 };
+
+	struct AccessorTimer
+	{
+		long long start;
+		AccessorTimer() : start(Profiler::Now()) { g_accessorCalls.fetch_add(1); }
+		~AccessorTimer() { g_accessorNanos.fetch_add(static_cast<unsigned long long>(Profiler::MicrosSince(start) * 1000.0)); }
+	};
+
+	std::string ScriptBinding::AccessorReport()
+	{
+		const unsigned long long calls = g_accessorCalls.load();
+		const unsigned long long micros = g_accessorNanos.load() / 1000;
+
+		return "accessors calls=" + std::to_string(calls)
+			+ " totalUs=" + std::to_string(micros)
+			+ " avgNs=" + std::to_string(calls ? g_accessorNanos.load() / calls : 0);
+	}
 	static const std::string& CurrentField(int index)
 	{
 		static const std::string empty;
@@ -810,6 +864,7 @@ namespace w3mp {
 
 	static void WO_Str(void* context, void* frame, void* result)
 	{
+		AccessorTimer timer;
 		const int index = ReadIntParameter(frame);
 		AdvanceFrame(frame);
 		WriteStringResult(result, CurrentField(index));
@@ -817,6 +872,7 @@ namespace w3mp {
 
 	static void WO_NameAt(void* context, void* frame, void* result)
 	{
+		AccessorTimer timer;
 		const int index = ReadIntParameter(frame);
 		AdvanceFrame(frame);
 		WriteNameResult(result, CurrentField(index));
@@ -824,6 +880,7 @@ namespace w3mp {
 
 	static void WO_Int(void* context, void* frame, void* result)
 	{
+		AccessorTimer timer;
 		const int index = ReadIntParameter(frame);
 		AdvanceFrame(frame);
 
@@ -846,6 +903,7 @@ namespace w3mp {
 
 	static void WO_Float(void* context, void* frame, void* result)
 	{
+		AccessorTimer timer;
 		const int index = ReadIntParameter(frame);
 		AdvanceFrame(frame);
 
@@ -868,6 +926,7 @@ namespace w3mp {
 
 	static void WO_Bool(void* context, void* frame, void* result)
 	{
+		AccessorTimer timer;
 		const int index = ReadIntParameter(frame);
 		AdvanceFrame(frame);
 
@@ -876,6 +935,23 @@ namespace w3mp {
 
 		if (result)
 			*static_cast<bool*>(result) = value;
+	}
+
+	static void WO_SetPaused(void* context, void* frame, void* result)
+	{
+		const bool paused = ReadBoolParameter(frame);
+		AdvanceFrame(frame);
+
+		g_scriptPaused.store(paused);
+	}
+
+	static void WO_IsPlayerPaused(void* context, void* frame, void* result)
+	{
+		const int playerId = ReadIntParameter(frame);
+		AdvanceFrame(frame);
+
+		if (result)
+			*static_cast<bool*>(result) = NpcNet::IsPlayerPaused(playerId);
 	}
 
 	static void WO_LocalId(void* context, void* frame, void* result)
@@ -916,11 +992,656 @@ namespace w3mp {
 	static unsigned long long g_nextGatherMs = 0;
 	static size_t g_tickSlot = 0;
 
+	static std::mutex g_frameMutex;
+	static long long g_lastTickStamp = 0;
+	static double g_frameTotalMs = 0.0;
+	static double g_frameMaxMs = 0.0;
+	static unsigned long long g_frameSamples = 0;
+	static unsigned long long g_frameOver20 = 0;
+
+	static void RecordFrameInterval()
+	{
+		const long long now = Profiler::Now();
+
+		std::lock_guard<std::mutex> lock(g_frameMutex);
+
+		if (g_lastTickStamp != 0)
+		{
+			const double ms = Profiler::MicrosSince(g_lastTickStamp) / 1000.0;
+
+			if (ms > 0.0 && ms < 500.0)
+			{
+				g_frameTotalMs += ms;
+				g_frameSamples++;
+
+				if (ms > g_frameMaxMs)
+					g_frameMaxMs = ms;
+
+				if (ms > 20.0)
+					g_frameOver20++;
+			}
+		}
+
+		g_lastTickStamp = now;
+	}
+
+	struct MatchRecord
+	{
+		int id = 0;
+		std::string appearance;
+		float x = 0.0f;
+		float y = 0.0f;
+		float z = 0.0f;
+		bool taken = false;
+	};
+
+	static bool NextRecordField(const std::string& text, size_t& pos, std::string& out)
+	{
+		if (pos >= text.size())
+			return false;
+
+		const size_t start = pos;
+
+		while (pos < text.size() && text[pos] != ':' && text[pos] != ';')
+			++pos;
+
+		out.assign(text, start, pos - start);
+
+		if (pos < text.size() && text[pos] == ':')
+			++pos;
+
+		return true;
+	}
+
+	static void ParseMatchRecords(const std::string& text, std::vector<MatchRecord>& out)
+	{
+		size_t pos = 0;
+
+		while (pos < text.size())
+		{
+			MatchRecord record;
+			std::string field;
+
+			if (!NextRecordField(text, pos, field))
+				break;
+
+			record.id = atoi(field.c_str());
+
+			NextRecordField(text, pos, record.appearance);
+
+			NextRecordField(text, pos, field);
+			record.x = static_cast<float>(atof(field.c_str()));
+
+			NextRecordField(text, pos, field);
+			record.y = static_cast<float>(atof(field.c_str()));
+
+			NextRecordField(text, pos, field);
+			record.z = static_cast<float>(atof(field.c_str()));
+
+			if (pos < text.size() && text[pos] == ';')
+				++pos;
+
+			if (record.id != 0 && !record.appearance.empty())
+				out.push_back(record);
+		}
+	}
+
+	struct MatchOp
+	{
+		int kind = 0;
+		int a = 0;
+		int b = 0;
+	};
+
+	static std::vector<MatchOp> g_matchOps;
+
+	static const float kMatchRadius = 60.0f;
+
+	static void WO_Match(void* context, void* frame, void* result)
+	{
+		RedString canonicalText{};
+		ReadStringParameter(frame, canonicalText);
+
+		RedString localText{};
+		ReadStringParameter(frame, localText);
+
+		AdvanceFrame(frame);
+
+		std::vector<MatchRecord> canonical;
+		std::vector<MatchRecord> local;
+
+		ParseMatchRecords(NarrowPayload(canonicalText), canonical);
+		ParseMatchRecords(NarrowPayload(localText), local);
+
+		g_matchOps.clear();
+
+		const float radiusSquared = kMatchRadius * kMatchRadius;
+
+		for (size_t c = 0; c < canonical.size(); ++c)
+		{
+			int bestIndex = -1;
+			float bestDistance = radiusSquared;
+
+			for (size_t l = 0; l < local.size(); ++l)
+			{
+				if (local[l].taken || local[l].appearance != canonical[c].appearance)
+					continue;
+
+				const float dx = local[l].x - canonical[c].x;
+				const float dy = local[l].y - canonical[c].y;
+				const float dz = local[l].z - canonical[c].z;
+				const float distance = dx * dx + dy * dy + dz * dz;
+
+				if (distance <= bestDistance)
+				{
+					bestDistance = distance;
+					bestIndex = static_cast<int>(l);
+				}
+			}
+
+			MatchOp op;
+			op.a = canonical[c].id;
+
+			if (bestIndex >= 0)
+			{
+				local[bestIndex].taken = true;
+				op.kind = 0;
+				op.b = local[bestIndex].id;
+			}
+			else
+			{
+				op.kind = 1;
+				op.b = 0;
+			}
+
+			g_matchOps.push_back(op);
+		}
+
+		for (size_t l = 0; l < local.size(); ++l)
+		{
+			if (local[l].taken)
+				continue;
+
+			MatchOp op;
+			op.kind = 2;
+			op.a = local[l].id;
+			op.b = 0;
+			g_matchOps.push_back(op);
+		}
+
+		if (result)
+			*static_cast<int*>(result) = static_cast<int>(g_matchOps.size());
+	}
+
+	static void WO_MatchOp(void* context, void* frame, void* result)
+	{
+		const int index = ReadIntParameter(frame);
+		AdvanceFrame(frame);
+
+		if (result)
+			*static_cast<int*>(result) = (index >= 0 && index < static_cast<int>(g_matchOps.size())) ? g_matchOps[index].kind : -1;
+	}
+
+	static void WO_MatchA(void* context, void* frame, void* result)
+	{
+		const int index = ReadIntParameter(frame);
+		AdvanceFrame(frame);
+
+		if (result)
+			*static_cast<int*>(result) = (index >= 0 && index < static_cast<int>(g_matchOps.size())) ? g_matchOps[index].a : 0;
+	}
+
+	static void WO_MatchB(void* context, void* frame, void* result)
+	{
+		const int index = ReadIntParameter(frame);
+		AdvanceFrame(frame);
+
+		if (result)
+			*static_cast<int*>(result) = (index >= 0 && index < static_cast<int>(g_matchOps.size())) ? g_matchOps[index].b : 0;
+	}
+
+	static void WO_NpcBeginOwned(void* context, void* frame, void* result)
+	{
+		AdvanceFrame(frame);
+		NpcNet::BeginOwned();
+	}
+
+	static void WO_NpcPushOwned(void* context, void* frame, void* result)
+	{
+		const int guid = ReadIntParameter(frame);
+		const int area = ReadIntParameter(frame);
+		const int localCount = ReadIntParameter(frame);
+
+		RedString typeText{};
+		ReadStringParameter(frame, typeText);
+
+		RedString appearanceText{};
+		ReadStringParameter(frame, appearanceText);
+
+		const float x = ReadFloatParameter(frame);
+		const float y = ReadFloatParameter(frame);
+		const float z = ReadFloatParameter(frame);
+		const float heading = ReadFloatParameter(frame);
+		const int hpPermille = ReadIntParameter(frame);
+		const int flags = ReadIntParameter(frame);
+		const int targetPlayerId = ReadIntParameter(frame);
+
+		AdvanceFrame(frame);
+
+		const bool stored = NpcNet::PushOwned(
+			guid,
+			area,
+			localCount,
+			NarrowPayload(typeText),
+			NarrowPayload(appearanceText),
+			x, y, z, heading,
+			hpPermille,
+			flags,
+			targetPlayerId);
+
+		if (result)
+			*static_cast<bool*>(result) = stored;
+	}
+
+	static void WO_NpcEndOwned(void* context, void* frame, void* result)
+	{
+		AdvanceFrame(frame);
+		NpcNet::EndOwned();
+	}
+
+	static void WO_NpcPull(void* context, void* frame, void* result)
+	{
+		AdvanceFrame(frame);
+
+		const int count = NpcNet::Pull();
+
+		if (result)
+			*static_cast<int*>(result) = count;
+	}
+
+	static const ReplicaCommand* CommandAt(void* frame)
+	{
+		const int index = ReadIntParameter(frame);
+		AdvanceFrame(frame);
+		return NpcNet::Command(index);
+	}
+
+	static void WO_NpcId(void* context, void* frame, void* result)
+	{
+		const ReplicaCommand* command = CommandAt(frame);
+
+		if (result)
+			*static_cast<int*>(result) = command ? command->canonicalId : 0;
+	}
+
+	static void WO_NpcOp(void* context, void* frame, void* result)
+	{
+		const ReplicaCommand* command = CommandAt(frame);
+
+		if (result)
+			*static_cast<int*>(result) = command ? command->op : -1;
+	}
+
+	static void WO_NpcGuid(void* context, void* frame, void* result)
+	{
+		const ReplicaCommand* command = CommandAt(frame);
+
+		if (result)
+			*static_cast<int*>(result) = command ? command->localGuid : 0;
+	}
+
+	static void WO_NpcX(void* context, void* frame, void* result)
+	{
+		const ReplicaCommand* command = CommandAt(frame);
+
+		if (result)
+			*static_cast<float*>(result) = command ? command->x : 0.0f;
+	}
+
+	static void WO_NpcY(void* context, void* frame, void* result)
+	{
+		const ReplicaCommand* command = CommandAt(frame);
+
+		if (result)
+			*static_cast<float*>(result) = command ? command->y : 0.0f;
+	}
+
+	static void WO_NpcZ(void* context, void* frame, void* result)
+	{
+		const ReplicaCommand* command = CommandAt(frame);
+
+		if (result)
+			*static_cast<float*>(result) = command ? command->z : 0.0f;
+	}
+
+	static void WO_NpcHeading(void* context, void* frame, void* result)
+	{
+		const ReplicaCommand* command = CommandAt(frame);
+
+		if (result)
+			*static_cast<float*>(result) = command ? command->heading : 0.0f;
+	}
+
+	static void WO_NpcSpeed(void* context, void* frame, void* result)
+	{
+		const ReplicaCommand* command = CommandAt(frame);
+
+		if (result)
+			*static_cast<float*>(result) = command ? command->speed : 0.0f;
+	}
+
+	static void WO_NpcHp(void* context, void* frame, void* result)
+	{
+		const ReplicaCommand* command = CommandAt(frame);
+
+		if (result)
+			*static_cast<int*>(result) = command ? command->hpPermille : -1;
+	}
+
+	static void WO_NpcFlags(void* context, void* frame, void* result)
+	{
+		const ReplicaCommand* command = CommandAt(frame);
+
+		if (result)
+			*static_cast<int*>(result) = command ? command->flags : 0;
+	}
+
+	static void WO_NpcTarget(void* context, void* frame, void* result)
+	{
+		const ReplicaCommand* command = CommandAt(frame);
+
+		if (result)
+			*static_cast<int*>(result) = command ? command->targetPlayerId : 0;
+	}
+
+	static void WO_NpcType(void* context, void* frame, void* result)
+	{
+		const ReplicaCommand* command = CommandAt(frame);
+		WriteStringResult(result, command ? command->typeCode : std::string());
+	}
+
+	static void WO_NpcAppearance(void* context, void* frame, void* result)
+	{
+		const ReplicaCommand* command = CommandAt(frame);
+		WriteNameResult(result, command ? command->appearance : std::string());
+	}
+
+	static void WO_NpcBind(void* context, void* frame, void* result)
+	{
+		const int index = ReadIntParameter(frame);
+		const int localGuid = ReadIntParameter(frame);
+		AdvanceFrame(frame);
+
+		NpcNet::Bind(index, localGuid);
+	}
+
+	static void WO_NpcForget(void* context, void* frame, void* result)
+	{
+		const int canonicalId = ReadIntParameter(frame);
+		AdvanceFrame(frame);
+
+		NpcNet::Forget(canonicalId);
+	}
+
+	static void WO_NpcTake(void* context, void* frame, void* result)
+	{
+		const int canonicalId = ReadIntParameter(frame);
+		const int localGuid = ReadIntParameter(frame);
+		AdvanceFrame(frame);
+
+		NpcNet::Take(canonicalId, localGuid);
+	}
+
+	static void WO_NpcUnspawnable(void* context, void* frame, void* result)
+	{
+		const int canonicalId = ReadIntParameter(frame);
+		AdvanceFrame(frame);
+
+		NpcNet::MarkUnspawnable(canonicalId);
+	}
+
+	static void WO_NpcSuspend(void* context, void* frame, void* result)
+	{
+		const bool suspended = ReadBoolParameter(frame);
+		AdvanceFrame(frame);
+
+		NpcNet::SetSuspended(suspended);
+	}
+
+	static void WO_NpcDropCount(void* context, void* frame, void* result)
+	{
+		AdvanceFrame(frame);
+
+		if (result)
+			*static_cast<int*>(result) = NpcNet::PullDrops();
+	}
+
+	static void WO_NpcDropGuid(void* context, void* frame, void* result)
+	{
+		const int index = ReadIntParameter(frame);
+		AdvanceFrame(frame);
+
+		if (result)
+			*static_cast<int*>(result) = NpcNet::Drop(index);
+	}
+
+	static void WO_NpcDropsDone(void* context, void* frame, void* result)
+	{
+		AdvanceFrame(frame);
+		NpcNet::ClearDrops();
+	}
+
+	static void WO_NpcKillCount(void* context, void* frame, void* result)
+	{
+		AdvanceFrame(frame);
+
+		if (result)
+			*static_cast<int*>(result) = NpcNet::PullKills();
+	}
+
+	static void WO_NpcKillGuid(void* context, void* frame, void* result)
+	{
+		const int index = ReadIntParameter(frame);
+		AdvanceFrame(frame);
+
+		if (result)
+			*static_cast<int*>(result) = NpcNet::KillGuid(index);
+	}
+
+	static void WO_NpcKillsDone(void* context, void* frame, void* result)
+	{
+		AdvanceFrame(frame);
+		NpcNet::ClearKills();
+	}
+
+	static void WO_NpcReportHit(void* context, void* frame, void* result)
+	{
+		const int canonicalId = ReadIntParameter(frame);
+		const int permille = ReadIntParameter(frame);
+		AdvanceFrame(frame);
+
+		const int eventId = NpcNet::ReportHit(canonicalId, permille);
+
+		if (result)
+			*static_cast<int*>(result) = eventId;
+	}
+
+	static void WO_NpcHitCount(void* context, void* frame, void* result)
+	{
+		AdvanceFrame(frame);
+
+		if (result)
+			*static_cast<int*>(result) = NpcNet::PullHits();
+	}
+
+	static void WO_NpcHitGuid(void* context, void* frame, void* result)
+	{
+		const int index = ReadIntParameter(frame);
+		AdvanceFrame(frame);
+
+		const InboundHit* hit = NpcNet::Hit(index);
+
+		if (result)
+			*static_cast<int*>(result) = hit ? hit->ownerGuid : 0;
+	}
+
+	static void WO_NpcHitAttacker(void* context, void* frame, void* result)
+	{
+		const int index = ReadIntParameter(frame);
+		AdvanceFrame(frame);
+
+		const InboundHit* hit = NpcNet::Hit(index);
+
+		if (result)
+			*static_cast<int*>(result) = hit ? hit->attackerPlayerId : 0;
+	}
+
+	static void WO_NpcHitPermille(void* context, void* frame, void* result)
+	{
+		const int index = ReadIntParameter(frame);
+		AdvanceFrame(frame);
+
+		const InboundHit* hit = NpcNet::Hit(index);
+
+		if (result)
+			*static_cast<int*>(result) = hit ? hit->permille : 0;
+	}
+
+	static void WO_NpcHitAck(void* context, void* frame, void* result)
+	{
+		const int index = ReadIntParameter(frame);
+		const int resultPermille = ReadIntParameter(frame);
+		const bool accepted = ReadBoolParameter(frame);
+		AdvanceFrame(frame);
+
+		NpcNet::AckHit(index, resultPermille, accepted);
+	}
+
+	static void WO_NpcHitsDone(void* context, void* frame, void* result)
+	{
+		AdvanceFrame(frame);
+		NpcNet::ClearHits();
+	}
+
+	static void WO_NpcAckCount(void* context, void* frame, void* result)
+	{
+		AdvanceFrame(frame);
+
+		if (result)
+			*static_cast<int*>(result) = NpcNet::PullAcks();
+	}
+
+	static void WO_NpcAckId(void* context, void* frame, void* result)
+	{
+		const int index = ReadIntParameter(frame);
+		AdvanceFrame(frame);
+
+		const HitAck* ack = NpcNet::Ack(index);
+
+		if (result)
+			*static_cast<int*>(result) = ack ? ack->canonicalId : 0;
+	}
+
+	static void WO_NpcAckHp(void* context, void* frame, void* result)
+	{
+		const int index = ReadIntParameter(frame);
+		AdvanceFrame(frame);
+
+		const HitAck* ack = NpcNet::Ack(index);
+
+		if (result)
+			*static_cast<int*>(result) = ack ? ack->resultPermille : -1;
+	}
+
+	static void WO_NpcAckOk(void* context, void* frame, void* result)
+	{
+		const int index = ReadIntParameter(frame);
+		AdvanceFrame(frame);
+
+		const HitAck* ack = NpcNet::Ack(index);
+
+		if (result)
+			*static_cast<bool*>(result) = ack ? ack->accepted : false;
+	}
+
+	static void WO_NpcAcksDone(void* context, void* frame, void* result)
+	{
+		AdvanceFrame(frame);
+		NpcNet::ClearAcks();
+	}
+
+	static void WO_NpcReport(void* context, void* frame, void* result)
+	{
+		AdvanceFrame(frame);
+		WriteStringResult(result, NpcNet::Report());
+	}
+
+	static void WO_NpcLatency(void* context, void* frame, void* result)
+	{
+		AdvanceFrame(frame);
+
+		if (result)
+			*static_cast<int*>(result) = NpcNet::LatencyMs();
+	}
+
+	static void WO_NpcTune(void* context, void* frame, void* result)
+	{
+		const int interpDelayMs = ReadIntParameter(frame);
+		const int snapshotHz = ReadIntParameter(frame);
+		AdvanceFrame(frame);
+
+		NpcNet::SetTuning(interpDelayMs, snapshotHz);
+	}
+
+	static void WO_Note(void* context, void* frame, void* result)
+	{
+		RedString text{};
+		const int size = ReadStringParameter(frame, text);
+
+		AdvanceFrame(frame);
+
+		if (size > 0)
+			Diagnostics::Log("NOTE " + NarrowPayload(text));
+	}
+
+	static void WO_FrameReport(void* context, void* frame, void* result)
+	{
+		AdvanceFrame(frame);
+
+		double avg = 0.0;
+		double worst = 0.0;
+		unsigned long long samples = 0;
+		unsigned long long slow = 0;
+
+		{
+			std::lock_guard<std::mutex> lock(g_frameMutex);
+
+			samples = g_frameSamples;
+			slow = g_frameOver20;
+			worst = g_frameMaxMs;
+			avg = samples ? g_frameTotalMs / static_cast<double>(samples) : 0.0;
+
+			g_frameTotalMs = 0.0;
+			g_frameMaxMs = 0.0;
+			g_frameSamples = 0;
+			g_frameOver20 = 0;
+		}
+
+		char buffer[192]{};
+		sprintf_s(buffer, sizeof(buffer),
+			"FRAME samples=%llu avgMs=%.2f fps=%.1f maxMs=%.2f over20ms=%llu",
+			samples, avg, avg > 0.0 ? 1000.0 / avg : 0.0, worst, slow);
+
+		Diagnostics::Log(buffer);
+	}
+
 	static void WO_Tick(void* context, void* frame, void* result)
 	{
 		AdvanceFrame(frame);
 
+		RecordFrameInterval();
 		g_tickCount.fetch_add(1);
+		g_lastScriptTickMs.store(GetTickCount64());
 
 		int gather = 0;
 
@@ -1038,6 +1759,57 @@ namespace w3mp {
 		RegisterOne(L"WO_Connected", reinterpret_cast<void*>(&WO_Connected), "WO_Connected");
 		RegisterOne(L"WO_Status", reinterpret_cast<void*>(&WO_Status), "WO_Status");
 		RegisterOne(L"WO_Tick", reinterpret_cast<void*>(&WO_Tick), "WO_Tick");
+		RegisterOne(L"WO_IsPlayerPaused", reinterpret_cast<void*>(&WO_IsPlayerPaused), "WO_IsPlayerPaused");
+		RegisterOne(L"WO_SetPaused", reinterpret_cast<void*>(&WO_SetPaused), "WO_SetPaused");
+		RegisterOne(L"WO_FrameReport", reinterpret_cast<void*>(&WO_FrameReport), "WO_FrameReport");
+		RegisterOne(L"WO_Note", reinterpret_cast<void*>(&WO_Note), "WO_Note");
+		RegisterOne(L"WO_Match", reinterpret_cast<void*>(&WO_Match), "WO_Match");
+		RegisterOne(L"WO_MatchOp", reinterpret_cast<void*>(&WO_MatchOp), "WO_MatchOp");
+		RegisterOne(L"WO_MatchA", reinterpret_cast<void*>(&WO_MatchA), "WO_MatchA");
+		RegisterOne(L"WO_MatchB", reinterpret_cast<void*>(&WO_MatchB), "WO_MatchB");
+		RegisterOne(L"WO_NpcBeginOwned", reinterpret_cast<void*>(&WO_NpcBeginOwned), "WO_NpcBeginOwned");
+		RegisterOne(L"WO_NpcPushOwned", reinterpret_cast<void*>(&WO_NpcPushOwned), "WO_NpcPushOwned");
+		RegisterOne(L"WO_NpcEndOwned", reinterpret_cast<void*>(&WO_NpcEndOwned), "WO_NpcEndOwned");
+		RegisterOne(L"WO_NpcPull", reinterpret_cast<void*>(&WO_NpcPull), "WO_NpcPull");
+		RegisterOne(L"WO_NpcId", reinterpret_cast<void*>(&WO_NpcId), "WO_NpcId");
+		RegisterOne(L"WO_NpcOp", reinterpret_cast<void*>(&WO_NpcOp), "WO_NpcOp");
+		RegisterOne(L"WO_NpcGuid", reinterpret_cast<void*>(&WO_NpcGuid), "WO_NpcGuid");
+		RegisterOne(L"WO_NpcX", reinterpret_cast<void*>(&WO_NpcX), "WO_NpcX");
+		RegisterOne(L"WO_NpcY", reinterpret_cast<void*>(&WO_NpcY), "WO_NpcY");
+		RegisterOne(L"WO_NpcZ", reinterpret_cast<void*>(&WO_NpcZ), "WO_NpcZ");
+		RegisterOne(L"WO_NpcHeading", reinterpret_cast<void*>(&WO_NpcHeading), "WO_NpcHeading");
+		RegisterOne(L"WO_NpcSpeed", reinterpret_cast<void*>(&WO_NpcSpeed), "WO_NpcSpeed");
+		RegisterOne(L"WO_NpcHp", reinterpret_cast<void*>(&WO_NpcHp), "WO_NpcHp");
+		RegisterOne(L"WO_NpcFlags", reinterpret_cast<void*>(&WO_NpcFlags), "WO_NpcFlags");
+		RegisterOne(L"WO_NpcTarget", reinterpret_cast<void*>(&WO_NpcTarget), "WO_NpcTarget");
+		RegisterOne(L"WO_NpcType", reinterpret_cast<void*>(&WO_NpcType), "WO_NpcType");
+		RegisterOne(L"WO_NpcAppearance", reinterpret_cast<void*>(&WO_NpcAppearance), "WO_NpcAppearance");
+		RegisterOne(L"WO_NpcBind", reinterpret_cast<void*>(&WO_NpcBind), "WO_NpcBind");
+		RegisterOne(L"WO_NpcForget", reinterpret_cast<void*>(&WO_NpcForget), "WO_NpcForget");
+		RegisterOne(L"WO_NpcTake", reinterpret_cast<void*>(&WO_NpcTake), "WO_NpcTake");
+		RegisterOne(L"WO_NpcUnspawnable", reinterpret_cast<void*>(&WO_NpcUnspawnable), "WO_NpcUnspawnable");
+		RegisterOne(L"WO_NpcSuspend", reinterpret_cast<void*>(&WO_NpcSuspend), "WO_NpcSuspend");
+		RegisterOne(L"WO_NpcDropCount", reinterpret_cast<void*>(&WO_NpcDropCount), "WO_NpcDropCount");
+		RegisterOne(L"WO_NpcDropGuid", reinterpret_cast<void*>(&WO_NpcDropGuid), "WO_NpcDropGuid");
+		RegisterOne(L"WO_NpcDropsDone", reinterpret_cast<void*>(&WO_NpcDropsDone), "WO_NpcDropsDone");
+		RegisterOne(L"WO_NpcKillCount", reinterpret_cast<void*>(&WO_NpcKillCount), "WO_NpcKillCount");
+		RegisterOne(L"WO_NpcKillGuid", reinterpret_cast<void*>(&WO_NpcKillGuid), "WO_NpcKillGuid");
+		RegisterOne(L"WO_NpcKillsDone", reinterpret_cast<void*>(&WO_NpcKillsDone), "WO_NpcKillsDone");
+		RegisterOne(L"WO_NpcReportHit", reinterpret_cast<void*>(&WO_NpcReportHit), "WO_NpcReportHit");
+		RegisterOne(L"WO_NpcHitCount", reinterpret_cast<void*>(&WO_NpcHitCount), "WO_NpcHitCount");
+		RegisterOne(L"WO_NpcHitGuid", reinterpret_cast<void*>(&WO_NpcHitGuid), "WO_NpcHitGuid");
+		RegisterOne(L"WO_NpcHitAttacker", reinterpret_cast<void*>(&WO_NpcHitAttacker), "WO_NpcHitAttacker");
+		RegisterOne(L"WO_NpcHitPermille", reinterpret_cast<void*>(&WO_NpcHitPermille), "WO_NpcHitPermille");
+		RegisterOne(L"WO_NpcHitAck", reinterpret_cast<void*>(&WO_NpcHitAck), "WO_NpcHitAck");
+		RegisterOne(L"WO_NpcHitsDone", reinterpret_cast<void*>(&WO_NpcHitsDone), "WO_NpcHitsDone");
+		RegisterOne(L"WO_NpcAckCount", reinterpret_cast<void*>(&WO_NpcAckCount), "WO_NpcAckCount");
+		RegisterOne(L"WO_NpcAckId", reinterpret_cast<void*>(&WO_NpcAckId), "WO_NpcAckId");
+		RegisterOne(L"WO_NpcAckHp", reinterpret_cast<void*>(&WO_NpcAckHp), "WO_NpcAckHp");
+		RegisterOne(L"WO_NpcAckOk", reinterpret_cast<void*>(&WO_NpcAckOk), "WO_NpcAckOk");
+		RegisterOne(L"WO_NpcAcksDone", reinterpret_cast<void*>(&WO_NpcAcksDone), "WO_NpcAcksDone");
+		RegisterOne(L"WO_NpcReport", reinterpret_cast<void*>(&WO_NpcReport), "WO_NpcReport");
+		RegisterOne(L"WO_NpcLatency", reinterpret_cast<void*>(&WO_NpcLatency), "WO_NpcLatency");
+		RegisterOne(L"WO_NpcTune", reinterpret_cast<void*>(&WO_NpcTune), "WO_NpcTune");
 
 		Diagnostics::Log("ScriptBinding: registered=" + std::to_string(g_registeredCount.load())
 			+ (g_registrationError.empty() ? "" : " failed:" + g_registrationError));
@@ -1089,6 +1861,16 @@ namespace w3mp {
 	bool ScriptBinding::NativesRegistered()
 	{
 		return g_registeredCount.load() > 0;
+	}
+
+	unsigned long long ScriptBinding::LastScriptTickMs()
+	{
+		return g_lastScriptTickMs.load();
+	}
+
+	bool ScriptBinding::ScriptPaused()
+	{
+		return g_scriptPaused.load();
 	}
 
 	std::string ScriptBinding::RegistrationReport()

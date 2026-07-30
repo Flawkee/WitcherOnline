@@ -14,6 +14,12 @@ namespace w3mp {
 		StaleSequence
 	};
 
+	class Profiler {
+	public:
+		static long long Now();
+		static double MicrosSince(long long start);
+	};
+
 	class Diagnostics {
 	public:
 		static void Init(const std::string& path);

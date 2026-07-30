@@ -1,4 +1,4 @@
-﻿import function WO_Send(payload : string) : bool;
+import function WO_Send(payload : string) : bool;
 import function WO_Poll() : int;
 import function WO_Opcode() : int;
 import function WO_PlayerId() : int;
@@ -16,6 +16,53 @@ import function WO_FieldCount() : int;
 import function WO_SenderName() : name;
 import function WO_NameAt(index : int) : name;
 import function WO_Tick() : int;
+import function WO_IsPlayerPaused(playerId : int) : bool;
+import function WO_SetPaused(paused : bool);
+import function WO_NpcBeginOwned();
+import function WO_NpcPushOwned(guid : int, area : int, localCount : int, typeCode : string, appearance : string,
+    x : float, y : float, z : float, heading : float,
+    hpPermille : int, flags : int, targetPlayerId : int) : bool;
+import function WO_NpcEndOwned();
+import function WO_NpcPull() : int;
+import function WO_NpcId(index : int) : int;
+import function WO_NpcOp(index : int) : int;
+import function WO_NpcGuid(index : int) : int;
+import function WO_NpcX(index : int) : float;
+import function WO_NpcY(index : int) : float;
+import function WO_NpcZ(index : int) : float;
+import function WO_NpcHeading(index : int) : float;
+import function WO_NpcSpeed(index : int) : float;
+import function WO_NpcHp(index : int) : int;
+import function WO_NpcFlags(index : int) : int;
+import function WO_NpcTarget(index : int) : int;
+import function WO_NpcType(index : int) : string;
+import function WO_NpcAppearance(index : int) : name;
+import function WO_NpcBind(index : int, localGuid : int);
+import function WO_NpcForget(canonicalId : int);
+import function WO_NpcTake(canonicalId : int, localGuid : int);
+import function WO_NpcUnspawnable(canonicalId : int);
+import function WO_NpcSuspend(suspended : bool);
+import function WO_NpcDropCount() : int;
+import function WO_NpcDropGuid(index : int) : int;
+import function WO_NpcDropsDone();
+import function WO_NpcKillCount() : int;
+import function WO_NpcKillGuid(index : int) : int;
+import function WO_NpcKillsDone();
+import function WO_NpcReportHit(canonicalId : int, permille : int) : int;
+import function WO_NpcHitCount() : int;
+import function WO_NpcHitGuid(index : int) : int;
+import function WO_NpcHitAttacker(index : int) : int;
+import function WO_NpcHitPermille(index : int) : int;
+import function WO_NpcHitAck(index : int, resultPermille : int, accepted : bool);
+import function WO_NpcHitsDone();
+import function WO_NpcAckCount() : int;
+import function WO_NpcAckId(index : int) : int;
+import function WO_NpcAckHp(index : int) : int;
+import function WO_NpcAckOk(index : int) : bool;
+import function WO_NpcAcksDone();
+import function WO_NpcReport() : string;
+import function WO_NpcLatency() : int;
+import function WO_NpcTune(interpDelayMs : int, snapshotHz : int);
 
 function WO_ApplyMovement()
 {
@@ -156,6 +203,8 @@ function WO_PumpInbound(maxMessages : int)
             case 6:
                 WO_ApplyPose();
                 break;
+
+
 
             default:
                 break;

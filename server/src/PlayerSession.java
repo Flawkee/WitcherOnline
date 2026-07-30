@@ -1,5 +1,7 @@
 import java.util.Collections;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class PlayerSession
 {
@@ -29,6 +31,17 @@ public class PlayerSession
     public final ChunkSlot update3 = new ChunkSlot();
     public final ChunkSlot update4 = new ChunkSlot();
 
+    public volatile Set<Integer> claimedCells = Collections.emptySet();
+    public volatile long lastClaimNanos = 0L;
+    public final Set<Integer> knownNpcs = ConcurrentHashMap.newKeySet();
+    public final Set<Integer> goneGuids = ConcurrentHashMap.newKeySet();
+    public volatile boolean paused = false;
+    public volatile boolean pausedBroadcast = false;
+    public final java.util.Queue<String[]> pendingHits = new java.util.concurrent.ConcurrentLinkedQueue<>();
+    public final java.util.Queue<Object[]> pendingOutbound = new java.util.concurrent.ConcurrentLinkedQueue<>();
+    public volatile String ownedCellsSignature = "";
+    public volatile long ownedCellsSentNanos = 0L;
+
     public volatile boolean hasPosition = false;
     public volatile double posX = 0.0;
     public volatile double posY = 0.0;
@@ -43,6 +56,33 @@ public class PlayerSession
         this.lastSeen = lastSeen;
     }
 
+    public static final class Sample
+    {
+        public final long timeMs;
+        public final double x;
+        public final double y;
+        public final double z;
+
+        Sample(long timeMs, double x, double y, double z)
+        {
+            this.timeMs = timeMs;
+            this.x = x;
+            this.y = y;
+            this.z = z;
+        }
+    }
+
+    private static final int HISTORY_SAMPLES = 40;
+    private static final long HISTORY_WINDOW_MS = 2000L;
+    private static final long HIT_WINDOW_MS = 1000L;
+    private static final int MAX_HITS_PER_WINDOW = 24;
+
+    private final java.util.ArrayDeque<Sample> history = new java.util.ArrayDeque<>();
+    private final java.util.ArrayDeque<Long> hitTimes = new java.util.ArrayDeque<>();
+
+    public volatile long lastTimeSyncMs = 0L;
+    public volatile int lastHandoverLogged = -1;
+
     public void storePosition(double x, double y, double z, int area)
     {
         this.posX = x;
@@ -50,5 +90,77 @@ public class PlayerSession
         this.posZ = z;
         this.area = area;
         this.hasPosition = true;
+
+        recordPosition(WitcherServer.serverMs(), x, y, z);
+    }
+
+    public synchronized void recordPosition(long timeMs, double x, double y, double z)
+    {
+        history.addLast(new Sample(timeMs, x, y, z));
+
+        while (history.size() > HISTORY_SAMPLES)
+        {
+            history.removeFirst();
+        }
+
+        while (!history.isEmpty() && (timeMs - history.peekFirst().timeMs) > HISTORY_WINDOW_MS)
+        {
+            history.removeFirst();
+        }
+    }
+
+    public synchronized Sample rewind(long atMs)
+    {
+        if (history.isEmpty())
+        {
+            return new Sample(atMs, posX, posY, posZ);
+        }
+
+        Sample previous = null;
+
+        for (Sample sample : history)
+        {
+            if (sample.timeMs >= atMs)
+            {
+                if (previous == null)
+                {
+                    return sample;
+                }
+
+                long span = sample.timeMs - previous.timeMs;
+
+                if (span <= 0)
+                {
+                    return sample;
+                }
+
+                double alpha = (double) (atMs - previous.timeMs) / (double) span;
+
+                return new Sample(atMs,
+                        previous.x + (sample.x - previous.x) * alpha,
+                        previous.y + (sample.y - previous.y) * alpha,
+                        previous.z + (sample.z - previous.z) * alpha);
+            }
+
+            previous = sample;
+        }
+
+        return history.peekLast();
+    }
+
+    public synchronized boolean allowHit(long nowMs)
+    {
+        while (!hitTimes.isEmpty() && (nowMs - hitTimes.peekFirst()) > HIT_WINDOW_MS)
+        {
+            hitTimes.removeFirst();
+        }
+
+        if (hitTimes.size() >= MAX_HITS_PER_WINDOW)
+        {
+            return false;
+        }
+
+        hitTimes.addLast(nowMs);
+        return true;
     }
 }

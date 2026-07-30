@@ -166,6 +166,38 @@ class r_EntityClassifier
         return prefixes;
     }
 
+    private function looksLikeQuestTag(text : string, prefix : string) : bool
+    {
+        var rest : string;
+        var head : string;
+
+        rest = StrAfterFirst(text, prefix);
+
+        if(rest == "")
+        {
+            return false;
+        }
+
+        head = StrLeft(rest, 1);
+
+        return head == "0" || head == "1" || head == "2" || head == "3" || head == "4"
+            || head == "5" || head == "6" || head == "7" || head == "8" || head == "9";
+    }
+
+    public function isFightCapable(npc : CNewNPC) : bool
+    {
+        var maximum : float;
+
+        maximum = npc.GetMaxHealth();
+
+        if(maximum > 5.0)
+        {
+            return true;
+        }
+
+        return npc.GetAttitude(thePlayer) == AIA_Hostile;
+    }
+
     private function hasQuestTag(tags : array<name>, out matched : string) : bool
     {
         var prefixes : array<string>;
@@ -181,11 +213,18 @@ class r_EntityClassifier
 
             for(p = 0; p < prefixes.Size(); p += 1)
             {
-                if(StrBeginsWith(text, prefixes[p]))
+                if(!StrBeginsWith(text, prefixes[p]))
                 {
-                    matched = text;
-                    return true;
+                    continue;
                 }
+
+                if(!looksLikeQuestTag(text, prefixes[p]))
+                {
+                    continue;
+                }
+
+                matched = text;
+                return true;
             }
         }
 
@@ -219,7 +258,7 @@ class r_EntityClassifier
             return;
         }
 
-        if(npc.HasTag('MPEntity'))
+        if(npc.HasTag('MPEntity') || npc.HasTag('WOReplica') || npc.HasTag('online_horse') || npc.HasTag('wo_horse'))
         {
             sample.entityClass = REC_Multiplayer;
             sample.reason = "mp entity";
@@ -230,7 +269,6 @@ class r_EntityClassifier
         {
             sample.entityClass = REC_Vehicle;
             sample.reason = "mount or vehicle";
-            sample.syncEligible = true;
             return;
         }
 
@@ -271,9 +309,16 @@ class r_EntityClassifier
             return;
         }
 
+        if(isFightCapable(npc))
+        {
+            sample.entityClass = REC_Ambient;
+            sample.reason = "human combatant hp=" + npc.GetMaxHealth();
+            sample.syncEligible = true;
+            return;
+        }
+
         sample.entityClass = REC_Ambient;
-        sample.reason = "human";
-        sample.syncEligible = true;
+        sample.reason = "human cosmetic hp=" + npc.GetMaxHealth();
     }
 
     public function isSyncEligible(npc : CNewNPC) : bool

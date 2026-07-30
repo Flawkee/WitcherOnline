@@ -3769,6 +3769,47 @@ statemachine class r_MultiplayerClient
         return inGame;
     }
 
+    private var benchmark : r_Benchmark;
+
+    public function getBenchmark() : r_Benchmark
+    {
+        if(!benchmark)
+        {
+            benchmark = new r_Benchmark in this;
+        }
+
+        return benchmark;
+    }
+
+    public function updateBenchmark()
+    {
+        if(benchmark && benchmark.isActive())
+        {
+            benchmark.update();
+        }
+    }
+
+    public function addBenchmarkPlayer(p : r_RemotePlayer)
+    {
+        players.PushBack(p);
+        hm_insertRemotePlayer(playersByServerId, p.serverPlayerId, p);
+    }
+
+    public function removeBenchmarkPlayers()
+    {
+        var i : int;
+
+        for(i = players.Size() - 1; i >= 0; i -= 1)
+        {
+            if(players[i] && players[i].serverPlayerId <= -1000)
+            {
+                players[i].despawn();
+                hm_removeRemotePlayer(playersByServerId, players[i].serverPlayerId);
+                players.Erase(i);
+            }
+        }
+    }
+
     public function getEntityClassifier() : r_EntityClassifier
     {
         if(!entityClassifier)
@@ -3777,6 +3818,217 @@ statemachine class r_MultiplayerClient
         }
 
         return entityClassifier;
+    }
+
+    private var pvpPolicy : r_PvpPolicy;
+
+    public function getPvpPolicy() : r_PvpPolicy
+    {
+        if(!pvpPolicy)
+        {
+            pvpPolicy = new r_PvpPolicy in this;
+        }
+
+        return pvpPolicy;
+    }
+
+    public function resolveTargetActor(targetPlayerId : int) : CActor
+    {
+        var remote : r_RemotePlayer;
+
+        if(targetPlayerId <= 0)
+        {
+            return NULL;
+        }
+
+        if(targetPlayerId == getServerId())
+        {
+            return thePlayer;
+        }
+
+        remote = getPlayerByServerId(targetPlayerId);
+
+        if(!remote)
+        {
+            return NULL;
+        }
+
+        return remote.ghost;
+    }
+
+    public function encodeTargetPlayerId(target : CActor) : int
+    {
+        var remote : r_RemotePlayer;
+
+        if(!target)
+        {
+            return 0;
+        }
+
+        if(target == thePlayer)
+        {
+            return getServerId();
+        }
+
+        remote = findRemoteByActor(target);
+
+        if(!remote)
+        {
+            return 0;
+        }
+
+        return remote.serverPlayerId;
+    }
+
+    public function findRemoteByActor(actor : CActor) : r_RemotePlayer
+    {
+        var i : int;
+
+        if(!actor)
+        {
+            return NULL;
+        }
+
+        for(i = 0; i < players.Size(); i += 1)
+        {
+            if(players[i] && players[i].ghost == actor)
+            {
+                return players[i];
+            }
+        }
+
+        return NULL;
+    }
+
+    public function refreshGhostHostility()
+    {
+        var i : int;
+
+        for(i = 0; i < players.Size(); i += 1)
+        {
+            if(players[i])
+            {
+                players[i].applyPvpMode(getPvpPolicy().resolve(players[i]), true);
+            }
+        }
+    }
+
+    private var ghostRebuildWasDead : bool;
+    private var ghostRebuildArea    : int;
+    private var ghostRebuildAt      : float;
+
+    default ghostRebuildWasDead = false;
+    default ghostRebuildArea = -999;
+    default ghostRebuildAt = 0.0;
+
+    public function updateGhostRebuild()
+    {
+        var players : array<r_RemotePlayer>;
+        var area : int;
+        var dead : bool;
+        var now : float;
+        var rebuild : bool;
+        var i : int;
+
+        if(!thePlayer)
+        {
+            return;
+        }
+
+        now = theGame.GetEngineTimeAsSeconds();
+        dead = !thePlayer.IsAlive();
+        area = (int)theGame.GetCommonMapManager().GetCurrentArea();
+
+        if(ghostRebuildArea == -999)
+        {
+            ghostRebuildArea = area;
+            ghostRebuildWasDead = dead;
+            return;
+        }
+
+        rebuild = false;
+
+        if(ghostRebuildWasDead && !dead)
+        {
+            rebuild = true;
+        }
+
+        if(area != ghostRebuildArea)
+        {
+            rebuild = true;
+            ghostRebuildArea = area;
+        }
+
+        ghostRebuildWasDead = dead;
+
+        if(!rebuild || theGame.IsBlackscreen() || theGame.IsFading())
+        {
+            return;
+        }
+
+        if(now - ghostRebuildAt < 3.0)
+        {
+            return;
+        }
+
+        ghostRebuildAt = now;
+        players = getPlayers();
+
+        for(i = 0; i < players.Size(); i += 1)
+        {
+            if(players[i])
+            {
+                players[i].despawn();
+            }
+        }
+
+        WO_Note("[ghost] rebuild triggered (respawn or area change), ghosts=" + players.Size());
+    }
+
+    public function updateGhostHostility()
+    {
+        var mode : r_EPvpMode;
+        var intact : bool;
+        var i : int;
+
+        for(i = 0; i < players.Size(); i += 1)
+        {
+            if(!players[i] || !players[i].ghost)
+            {
+                continue;
+            }
+
+            mode = getPvpPolicy().resolve(players[i]);
+            intact = wo_ghostProtectionIntact(players[i].ghost, mode);
+
+            if(!intact && players[i].pvpEverApplied)
+            {
+                WO_Note("[pvp] protection lost player=" + players[i].serverPlayerId
+                    + " mode=" + (int)mode
+                    + " invulnerable=" + players[i].ghost.IsInvulnerable()
+                    + " attackable=" + players[i].ghost.IsAttackableByPlayer()
+                    + " -> reapplying");
+            }
+
+            players[i].applyPvpMode(mode, false);
+        }
+    }
+
+    private var npcSync : r_NpcSync;
+
+    public function getNpcSync() : r_NpcSync
+    {
+        if(!npcSync)
+        {
+            npcSync = new r_NpcSync in this;
+        }
+
+        return npcSync;
+    }
+
+    public function updateNpcSync()
+    {
+        getNpcSync().update();
     }
 
     public function pumpTransport()
@@ -3793,7 +4045,7 @@ statemachine class r_MultiplayerClient
             setInGame(true);
         }
 
-        WO_PumpInbound(64);
+        WO_PumpInbound(128);
         WO_PumpStatus();
         setReceived();
 
@@ -4792,6 +5044,11 @@ statemachine class r_MultiplayerClient
         }
 
         destroyAllRiderHorseAnchors();
+
+        if(npcSync)
+        {
+            npcSync.releaseAll();
+        }
 
         playersByServerId = (new MP_SU_HashMap in this).init();
 
@@ -7246,6 +7503,10 @@ state WO_Tick in r_MultiplayerClient
             parent.updateWorldSync();
             parent.updateLeaderDialogReadyPopup();
             parent.updateEntityClassifier();
+            parent.updateGhostRebuild();
+            parent.updateGhostHostility();
+            parent.updateNpcSync();
+            parent.updateBenchmark();
             MP_SU_moveMinimapPins();
 
             SleepOneFrame();

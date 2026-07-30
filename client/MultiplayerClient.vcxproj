@@ -70,17 +70,23 @@
   <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
-  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup Label="UserMacros">
+    <GameDir>C:\Program Files (x86)\GOG Galaxy\Games\The Witcher 3 Wild Hunt GOTY\</GameDir>
+  </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <TargetExt>.asi</TargetExt>
-    <OutDir>C:\Program Files (x86)\GOG Galaxy\Games\The Witcher 3 Wild Hunt GOTY\bin\x64\scripts</OutDir>
+    <OutDir>$(GameDir)bin\x64\</OutDir>
     <TargetName>WitcherOnlineClient</TargetName>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <TargetExt>.asi</TargetExt>
     <TargetName>WitcherOnlineClient</TargetName>
-    <OutDir>C:\Program Files (x86)\GOG Galaxy\Games\The Witcher 3 Wild Hunt GOTY\bin\x64\scripts</OutDir>
+    <OutDir>$(GameDir)bin\x64\</OutDir>
   </PropertyGroup>
+  <Target Name="DeployToDx12" AfterTargets="Build" Condition="'$(Platform)'=='x64'">
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(GameDir)bin\x64_dx12\" ContinueOnError="false" />
+    <Message Importance="high" Text="Deployed $(TargetFileName) to bin\x64 and bin\x64_dx12" />
+  </Target>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
@@ -160,6 +166,7 @@
     <ClInclude Include="framework.h" />
     <ClInclude Include="GameModule.h" />
     <ClInclude Include="InlineHook.h" />
+    <ClInclude Include="NpcNet.h" />
     <ClInclude Include="pch.h" />
     <ClInclude Include="ScriptBinding.h" />
     <ClInclude Include="SignatureScanner.h" />
@@ -168,6 +175,7 @@
     <ClCompile Include="Diagnostics.cpp" />
     <ClCompile Include="dllmain.cpp" />
     <ClCompile Include="GameModule.cpp" />
+    <ClCompile Include="NpcNet.cpp" />
     <ClCompile Include="InlineHook.cpp" />
     <ClCompile Include="pch.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Create</PrecompiledHeader>

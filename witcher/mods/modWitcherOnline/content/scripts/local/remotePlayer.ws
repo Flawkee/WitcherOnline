@@ -1,4 +1,4 @@
-﻿// Witcher Online by rejuvenate
+// Witcher Online by rejuvenate
 // https://www.nexusmods.com/profile/rejuvenate7
 struct r_AnimRequest
 {
@@ -23,8 +23,38 @@ struct r_GwentGame
     var faction : eGwintFaction;
 }
 
-statemachine class r_RemotePlayer 
+statemachine class r_RemotePlayer
 {
+    public var pvpApplied     : r_EPvpMode;
+    public var pvpEverApplied : bool;
+    public var pvpGhost       : CActor;
+    public var stuckSince     : float;
+
+    default stuckSince = 0.0;
+
+    default pvpApplied = PVP_Off;
+    default pvpEverApplied = false;
+
+    public function applyPvpMode(mode : r_EPvpMode, force : bool)
+    {
+        if(!ghost)
+        {
+            return;
+        }
+
+        if(!force && pvpEverApplied && pvpApplied == mode && pvpGhost == ghost
+            && wo_ghostProtectionIntact(ghost, mode))
+        {
+            return;
+        }
+
+        wo_applyGhostHostility(ghost, mode);
+
+        pvpApplied = mode;
+        pvpEverApplied = true;
+        pvpGhost = ghost;
+    }
+
     public var serverPlayerId      : int;
     public var lastMovementSequence : int;
     public var id      : string;
@@ -1134,14 +1164,11 @@ statemachine class r_RemotePlayer
         }
 
         ghost.AddTag('MPEntity');
-        ghost.EnableCollisions(false);
-        ghost.EnableCharacterCollisions(false); 
-        ghost.SetGameplayVisibility( false );
         ghost.SetCanPlayHitAnim(false);
-        ghost.SetImmortalityMode( AIM_Invulnerable, AIC_Default, true );
 
-        ghost.SetTemporaryAttitudeGroup( 'friendly_to_player', AGP_Default );	
-        ghost.SetAttitude(thePlayer, AIA_Friendly);
+        pvpApplied = PVP_Off;
+        pvpEverApplied = false;
+        applyPvpMode(theGame.r_getMultiplayerClient().getPvpPolicy().resolve(this), true);
 
         if(!ghost.HasAbility('IsNotScaredOfMonsters')) ghost.AddAbility('IsNotScaredOfMonsters', true); 
 
@@ -5902,11 +5929,46 @@ statemachine class r_RemotePlayer
         adjustor.AdjustmentDuration(ticket, 0.5);
         adjustor.AdjustLocationVertically(ticket, true);
         adjustor.ScaleAnimationLocationVertically(ticket, true);
-        adjustor.RotateTo(ticket, heading); 
+        adjustor.RotateTo(ticket, heading);
         adjustor.SlideTo(ticket, targpos);
-        
-        if(!lastDiving && dist > 200) 
+
+        recoverIfStuck(entity, targpos, dist);
+    }
+
+    private function recoverIfStuck(entity : CActor, targpos : Vector, dist : float)
+    {
+        var now : float;
+
+        now = theGame.GetEngineTimeAsSeconds();
+
+        if(dist > 25.0)
+        {
+            stuckSince = 0.0;
             teleport(entity, targpos);
+            return;
+        }
+
+        if(dist < 3.0)
+        {
+            stuckSince = 0.0;
+            return;
+        }
+
+        if(stuckSince == 0.0 || stuckSince > now)
+        {
+            stuckSince = now;
+            return;
+        }
+
+        if((now - stuckSince) < 0.75)
+        {
+            return;
+        }
+
+        stuckSince = 0.0;
+        teleport(entity, targpos);
+
+        WO_Note("[ghost] unstuck player=" + serverPlayerId + " error=" + dist);
     }
 
     private function setHeading(entity:CActor , targpos:Vector)
@@ -6173,9 +6235,7 @@ state WO_UpdateCPC in r_RemotePlayer
     {
         ((CActor)parent.ghost).SignalGameplayEventParamInt( 'RidingManagerDismountHorse', DT_instant | DT_fromScript );
 
-        parent.ghost.EnableCollisions(false);
-        parent.ghost.EnableCharacterCollisions(false); 
-        parent.ghost.SetGameplayVisibility( false );
+        parent.applyPvpMode(theGame.r_getMultiplayerClient().getPvpPolicy().resolve(parent), true);
     }
 
     latent function spawnBoat()

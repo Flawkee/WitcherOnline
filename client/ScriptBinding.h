@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -13,7 +13,12 @@ namespace w3mp {
 		Update2 = 3,
 		Update3 = 4,
 		Update4 = 5,
-		Pose = 6
+		Pose = 6,
+		NpcOwn = 7,
+		NpcNew = 8,
+		NpcMove = 9,
+		NpcEnd = 10,
+		NpcHit = 11
 	};
 
 	enum class ClientStatus
@@ -77,6 +82,8 @@ namespace w3mp {
 		static bool NativesRegistered();
 		static std::string Report();
 		static std::string RegistrationReport();
+	static unsigned long long LastScriptTickMs();
+	static bool ScriptPaused();
 
 		static bool PopOutbound(std::string& payload);
 		static void PushInbound(InboundMessage&& message);
@@ -91,6 +98,7 @@ namespace w3mp {
 		static void CountDowngraded();
 		static void CountFieldChange(int index);
 		static std::string ChurnReport();
+		static std::string AccessorReport();
 		static void ReportIdle();
 
 	private:

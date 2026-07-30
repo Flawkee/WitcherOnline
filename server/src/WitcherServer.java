@@ -55,12 +55,66 @@ public class WitcherServer
     private static final double INTEREST_RADIUS = 300.0;
     private static final double INTEREST_RADIUS_SQUARED = INTEREST_RADIUS * INTEREST_RADIUS;
 
+    public static final double CELL_SIZE = 128.0;
+
+    private static final double NPC_INTEREST_RADIUS = 140.0;
+    private static final double NPC_INTEREST_RADIUS_SQUARED = NPC_INTEREST_RADIUS * NPC_INTEREST_RADIUS;
+    private static final long NPC_OWNERSHIP_REFRESH_NANOS = 2_000_000_000L;
+    private static final int NPC_SPAWN_BATCH = 14;
+    private static final int NPC_MOVE_BATCH = 20;
+    private static final int NPC_REMOVE_BATCH = 16;
+    private static final int NPC_HIT_BATCH = 10;
+    private static final int NPC_TARGET_LOG_LIMIT = 12;
+
+    private static final long SERVER_START_NANOS = System.nanoTime();
+
+    private static final AtomicLong npcHitsAccepted = new AtomicLong();
+    private static final AtomicLong npcHitsRejected = new AtomicLong();
+    private static final AtomicLong npcAcksRejected = new AtomicLong();
+    private static final AtomicLong npcResends = new AtomicLong();
+
+    private static final int MAX_PENDING_ACKS = 4096;
+    private static final Map<Integer, int[]> pendingAcks = new ConcurrentHashMap<>();
+
+    static long serverMs()
+    {
+        return (System.nanoTime() - SERVER_START_NANOS) / 1_000_000L;
+    }
+
+    private static Long parseLongOrNull(String value)
+    {
+        if (value == null)
+        {
+            return null;
+        }
+
+        try
+        {
+            return Long.parseLong(value.trim());
+        }
+        catch (Exception e)
+        {
+            return null;
+        }
+    }
+    private static final int MAX_PENDING_HITS = 64;
+    private static final int NPC_SPAWN_PACKETS_PER_TICK = 6;
+    private static final int NPC_MOVE_PACKETS_PER_TICK = 6;
+
+    private static final long NPC_HEARTBEAT_NANOS = 30_000_000_000L;
+
+    private static final AtomicLong totalNpcPacketsSent = new AtomicLong(0);
+    private static final AtomicLong npcSpawnPacketsSent = new AtomicLong(0);
+    private static final AtomicLong npcMovePacketsSent = new AtomicLong(0);
+    private static final AtomicLong npcEndPacketsSent = new AtomicLong(0);
+    private static final AtomicLong npcOwnPacketsSent = new AtomicLong(0);
+
     private static final int MOVE_POSITION_OFFSET = 1;
     private static final int UPDATE1A_POSITION_OFFSET = 2;
 
     private static final int MIN_USERNAME_LENGTH = 2;
     private static final int MAX_USERNAME_LENGTH = 16;
-    private static final int MAX_PACKET_FIELDS = 256;
+    private static final int MAX_PACKET_FIELDS = 512;
 
     private static final long RATE_LIMIT_WINDOW_NANOS = 1_000_000_000L;
     private static final int RATE_LIMIT_PACKETS_PER_WINDOW = 240;
@@ -119,11 +173,13 @@ public class WitcherServer
         Thread recvThread = startThread("udp-recv", () -> receiveLoop(socket));
         Thread sendThread = startThread("udp-broadcast", () -> broadcastLoop(socket));
         Thread cleanupThread = startThread("udp-cleanup", WitcherServer::cleanupLoop);
+        Thread npcThread = startThread("npc-sync", () -> npcLoop(socket));
         Thread consoleThread = startThread("console", () -> consoleLoop(socket));
 
         recvThread.join();
         sendThread.join();
         cleanupThread.join();
+        npcThread.join();
         consoleThread.join();
     }
 
@@ -512,7 +568,9 @@ public class WitcherServer
         }
     }
 
-    private static boolean isUpdateOpcode(String opcode)
+    private static final Set<String> unroutedOpcodes = ConcurrentHashMap.newKeySet();
+
+    private static boolean isPlayerStateOpcode(String opcode)
     {
         return "MOVE".equals(opcode)
                 || "UPDATE1A".equals(opcode)
@@ -521,6 +579,27 @@ public class WitcherServer
                 || "UPDATE2B".equals(opcode)
                 || "UPDATE3".equals(opcode)
                 || "UPDATE4".equals(opcode);
+    }
+
+    private static boolean isUpdateOpcode(String opcode)
+    {
+        return "MOVE".equals(opcode)
+                || "UPDATE1A".equals(opcode)
+                || "UPDATE1B".equals(opcode)
+                || "UPDATE2A".equals(opcode)
+                || "UPDATE2B".equals(opcode)
+                || "UPDATE3".equals(opcode)
+                || "UPDATE4".equals(opcode)
+                                || "NPCADD".equals(opcode)
+                || "NPCUPD".equals(opcode)
+                || "NPCDEL".equals(opcode)
+                || "NPCHIT".equals(opcode)
+                || "NPCACK".equals(opcode)
+                || "NPCTAKE".equals(opcode)
+                || "NPCNOPE".equals(opcode)
+                || "PSTATE".equals(opcode)
+                || "NPCWANT".equals(opcode)
+                || "TSYNC".equals(opcode);
     }
 
     private static boolean isValidUsername(String value)
@@ -778,6 +857,12 @@ public class WitcherServer
 
         List<String> frozenFields = Collections.unmodifiableList(fields);
 
+        if (!isPlayerStateOpcode(opcode))
+        {
+            handleNpcMessage(opcode, current, frozenFields, now);
+            return;
+        }
+
         if ("MOVE".equals(opcode))
         {
             if (frozenFields.size() < 8)
@@ -816,6 +901,1101 @@ public class WitcherServer
         else if ("UPDATE4".equals(opcode))
         {
             current.update4.store(frozenFields);
+        }
+    }
+
+    private static void handleNpcMessage(String opcode, PlayerSession session, List<String> fields, long now)
+    {
+        if (fields.isEmpty())
+        {
+            return;
+        }
+
+        if ("TSYNC".equals(opcode))
+        {
+            Long clientMs = parseLongOrNull(fields.get(0));
+
+            if (clientMs == null)
+            {
+                return;
+            }
+
+            List<String> reply = new ArrayList<>();
+            reply.add(Long.toString(clientMs));
+            reply.add(Long.toString(serverMs()));
+
+            session.lastTimeSyncMs = serverMs();
+            queueOutbound(session, "TSYNCR", reply);
+            return;
+        }
+
+
+        if ("NPCADD".equals(opcode) || "NPCUPD".equals(opcode))
+        {
+            final boolean isSpawn = "NPCADD".equals(opcode);
+            final int stride = isSpawn ? 12 : 8;
+
+            Long snapshotMs = parseLongOrNull(fields.get(0));
+            Integer count = fields.size() > 1 ? parseIntegerOrNull(fields.get(1)) : null;
+
+            if (snapshotMs == null || count == null || count < 0)
+            {
+                return;
+            }
+
+            final long stamp = clampSnapshotTime(snapshotMs);
+
+            for (int i = 0; i < count; i++)
+            {
+                int base = 2 + (i * stride);
+
+                if (base + stride > fields.size())
+                {
+                    break;
+                }
+
+                Integer guid = parseIntegerOrNull(fields.get(base));
+
+                if (guid == null || guid == 0)
+                {
+                    continue;
+                }
+
+                if (isSpawn)
+                {
+                    Integer area = parseIntegerOrNull(fields.get(base + 1));
+                    Double x = parseDoubleOrNull(fields.get(base + 4));
+                    Double y = parseDoubleOrNull(fields.get(base + 5));
+                    Double z = parseDoubleOrNull(fields.get(base + 6));
+                    Double heading = parseDoubleOrNull(fields.get(base + 7));
+                    Integer hp = parseIntegerOrNull(fields.get(base + 8));
+                    Integer flags = parseIntegerOrNull(fields.get(base + 9));
+                    Integer target = parseIntegerOrNull(fields.get(base + 10));
+                    Integer localCount = parseIntegerOrNull(fields.get(base + 11));
+
+                    if (area == null || x == null || y == null || z == null || heading == null
+                            || hp == null || flags == null || target == null || localCount == null)
+                    {
+                        continue;
+                    }
+
+                    NpcRegistry.Npc admitted = NpcRegistry.upsert(
+                            session.playerId,
+                            guid,
+                            area,
+                            sanitizeToken(fields.get(base + 2)),
+                            sanitizeToken(fields.get(base + 3)),
+                            x, y, z, heading,
+                            clampPermille(hp),
+                            flags,
+                            target,
+                            localCount,
+                            stamp,
+                            now);
+
+                    if (admitted == null)
+                    {
+                        List<String> drop = new ArrayList<>();
+                        drop.add("1");
+                        drop.add(Integer.toString(guid));
+
+                        queueOutbound(session, "NPCDROP", drop);
+                    }
+                }
+                else
+                {
+                    Double x = parseDoubleOrNull(fields.get(base + 1));
+                    Double y = parseDoubleOrNull(fields.get(base + 2));
+                    Double z = parseDoubleOrNull(fields.get(base + 3));
+                    Double heading = parseDoubleOrNull(fields.get(base + 4));
+                    Integer hp = parseIntegerOrNull(fields.get(base + 5));
+                    Integer flags = parseIntegerOrNull(fields.get(base + 6));
+                    Integer target = parseIntegerOrNull(fields.get(base + 7));
+
+                    if (x == null || y == null || z == null || heading == null
+                            || hp == null || flags == null || target == null)
+                    {
+                        continue;
+                    }
+
+                    NpcRegistry.Npc moved = NpcRegistry.move(
+                            session.playerId,
+                            guid,
+                            x, y, z, heading,
+                            clampPermille(hp),
+                            flags,
+                            target,
+                            stamp,
+                            now);
+
+                    if (moved == null)
+                    {
+                        session.goneGuids.add(guid);
+                    }
+                }
+            }
+
+            return;
+        }
+
+        if ("NPCDEL".equals(opcode))
+        {
+            Integer count = parseIntegerOrNull(fields.get(0));
+
+            if (count == null || count < 0)
+            {
+                return;
+            }
+
+            for (int i = 0; i < count; i++)
+            {
+                int base = 1 + (i * 2);
+
+                if (base + 2 > fields.size())
+                {
+                    break;
+                }
+
+                Integer guid = parseIntegerOrNull(fields.get(base));
+
+                if (guid != null)
+                {
+                    NpcRegistry.remove(session.playerId, guid);
+                }
+            }
+
+            return;
+        }
+
+        if ("NPCHIT".equals(opcode))
+        {
+            Integer count = parseIntegerOrNull(fields.get(0));
+
+            if (count == null || count < 0)
+            {
+                return;
+            }
+
+            for (int i = 0; i < count; i++)
+            {
+                int base = 1 + (i * 4);
+
+                if (base + 4 > fields.size())
+                {
+                    break;
+                }
+
+                Integer canonicalId = parseIntegerOrNull(fields.get(base));
+                Integer permille = parseIntegerOrNull(fields.get(base + 1));
+                Integer eventId = parseIntegerOrNull(fields.get(base + 2));
+                Long atMs = parseLongOrNull(fields.get(base + 3));
+
+                if (canonicalId == null || permille == null || eventId == null || atMs == null)
+                {
+                    continue;
+                }
+
+                handleHit(session, canonicalId, clampPermille(permille), eventId, clampSnapshotTime(atMs));
+            }
+
+            return;
+        }
+
+        if ("PSTATE".equals(opcode))
+        {
+            if (fields.isEmpty())
+            {
+                return;
+            }
+
+            Integer state = parseIntegerOrNull(fields.get(0));
+
+            if (state == null)
+            {
+                return;
+            }
+
+            boolean nowPaused = state != 0;
+
+            if (session.paused != nowPaused)
+            {
+                session.paused = nowPaused;
+
+                dbg("PLAYER %s %s\n",
+                        describePlayerId(session.playerId),
+                        nowPaused ? "PAUSED" : "RESUMED");
+            }
+
+            return;
+        }
+
+        if ("NPCNOPE".equals(opcode))
+        {
+            Integer count = parseIntegerOrNull(fields.get(0));
+
+            if (count == null || count < 0)
+            {
+                return;
+            }
+
+            for (int i = 0; i < count; i++)
+            {
+                int base = 1 + i;
+
+                if (base >= fields.size())
+                {
+                    break;
+                }
+
+                Integer canonicalId = parseIntegerOrNull(fields.get(base));
+
+                if (canonicalId == null)
+                {
+                    continue;
+                }
+
+                NpcRegistry.declineHandover(session.playerId, canonicalId, now);
+            }
+
+            return;
+        }
+
+        if ("NPCTAKE".equals(opcode))
+        {
+            Integer count = parseIntegerOrNull(fields.get(0));
+
+            if (count == null || count < 0)
+            {
+                return;
+            }
+
+            for (int i = 0; i < count; i++)
+            {
+                int base = 1 + (i * 2);
+
+                if (base + 2 > fields.size())
+                {
+                    break;
+                }
+
+                Integer canonicalId = parseIntegerOrNull(fields.get(base));
+                Integer localGuid = parseIntegerOrNull(fields.get(base + 1));
+
+                if (canonicalId == null || localGuid == null)
+                {
+                    continue;
+                }
+
+                int[] previous = NpcRegistry.take(session.playerId, canonicalId, localGuid, now);
+
+                if (previous == null || previous[0] == 0 || previous[1] == 0)
+                {
+                    continue;
+                }
+
+                PlayerSession loser = findPlayerById(previous[0]);
+
+                if (loser == null)
+                {
+                    continue;
+                }
+
+                List<String> drop = new ArrayList<>();
+                drop.add("1");
+                drop.add(Integer.toString(previous[1]));
+
+                queueOutbound(loser, "NPCDROP", drop);
+            }
+
+            return;
+        }
+
+        if ("NPCWANT".equals(opcode))
+        {
+            Integer count = parseIntegerOrNull(fields.get(0));
+
+            if (count == null || count < 0)
+            {
+                return;
+            }
+
+            int resent = 0;
+
+            for (int i = 0; i < count; i++)
+            {
+                int base = 1 + i;
+
+                if (base >= fields.size())
+                {
+                    break;
+                }
+
+                Integer canonicalId = parseIntegerOrNull(fields.get(base));
+
+                if (canonicalId == null)
+                {
+                    continue;
+                }
+
+                if (session.knownNpcs.contains(canonicalId))
+                {
+                    NpcRegistry.forgetKnown(session, canonicalId);
+                    resent++;
+                }
+            }
+
+            if (resent > 0)
+            {
+                npcResends.addAndGet(resent);
+            }
+
+            return;
+        }
+
+        if ("NPCACK".equals(opcode))
+        {
+            Integer count = parseIntegerOrNull(fields.get(0));
+
+            if (count == null || count < 0)
+            {
+                return;
+            }
+
+            for (int i = 0; i < count; i++)
+            {
+                int base = 1 + (i * 4);
+
+                if (base + 4 > fields.size())
+                {
+                    break;
+                }
+
+                Integer attackerId = parseIntegerOrNull(fields.get(base));
+                Integer eventId = parseIntegerOrNull(fields.get(base + 1));
+                Integer resultPermille = parseIntegerOrNull(fields.get(base + 2));
+                Integer accepted = parseIntegerOrNull(fields.get(base + 3));
+
+                if (attackerId == null || eventId == null || resultPermille == null || accepted == null)
+                {
+                    continue;
+                }
+
+                int[] routed = pendingAcks.remove(eventId);
+
+                if (routed == null || routed[0] != attackerId || routed[1] != session.playerId)
+                {
+                    npcAcksRejected.incrementAndGet();
+                    continue;
+                }
+
+                NpcRegistry.Npc acked = NpcRegistry.get(routed[2]);
+
+                if (acked != null)
+                {
+                    NpcRegistry.clearPendingDamage(acked);
+                }
+
+                PlayerSession attacker = findPlayerById(attackerId);
+
+                if (attacker == null)
+                {
+                    continue;
+                }
+
+                List<String> ack = new ArrayList<>();
+                ack.add("1");
+                ack.add(Integer.toString(eventId));
+                ack.add(Integer.toString(clampPermille(resultPermille)));
+                ack.add(accepted != 0 ? "1" : "0");
+
+                queueOutbound(attacker, "NPCACKF", ack);
+            }
+
+            return;
+        }
+
+        if (unroutedOpcodes.add(opcode))
+        {
+            dbg("WARNING unhandled opcode %s accepted but no handler claimed it (check isUpdateOpcode vs handleNpcMessage)\n",
+                    opcode);
+        }
+    }
+
+    private static int clampPermille(int value)
+    {
+        if (value < -1)
+        {
+            return -1;
+        }
+
+        return Math.min(value, 1000);
+    }
+
+    private static long clampSnapshotTime(long value)
+    {
+        final long nowMs = serverMs();
+
+        if (value <= 0 || value > nowMs + 1000L)
+        {
+            return nowMs;
+        }
+
+        if (value < nowMs - 5000L)
+        {
+            return nowMs - 5000L;
+        }
+
+        return value;
+    }
+
+    private static void handleHit(PlayerSession attacker, int canonicalId, int permille, int eventId, long atMs)
+    {
+        final long nowMs = serverMs();
+
+        NpcRegistry.Npc npc = NpcRegistry.get(canonicalId);
+
+        if (npc == null)
+        {
+            rejectHit(attacker, eventId, -1, "unknown entity");
+            return;
+        }
+
+        if (npc.ownerPlayerId == attacker.playerId)
+        {
+            return;
+        }
+
+        if (!npc.alive)
+        {
+            rejectHit(attacker, eventId, 0, "already dead");
+            return;
+        }
+
+        if (permille <= 0)
+        {
+            rejectHit(attacker, eventId, npc.hpPermille, "no damage");
+            return;
+        }
+
+        if (!attacker.allowHit(nowMs))
+        {
+            rejectHit(attacker, eventId, npc.hpPermille, "rate limited");
+            npcHitsRejected.incrementAndGet();
+            return;
+        }
+
+        final double distance = NpcRegistry.hitDistance(npc, attacker, atMs);
+
+        if (distance > NpcRegistry.HIT_RANGE)
+        {
+            rejectHit(attacker, eventId, npc.hpPermille, "out of range");
+            npcHitsRejected.incrementAndGet();
+
+            dbg("NPC %s HIT REJECTED by %s | rewindMs=%d distance=%.1f\n",
+                    NpcRegistry.describeNpc(npc),
+                    describePlayerId(attacker.playerId),
+                    nowMs - atMs,
+                    distance);
+            return;
+        }
+
+        PlayerSession owner = findPlayerById(npc.ownerPlayerId);
+
+        if (owner == null)
+        {
+            rejectHit(attacker, eventId, npc.hpPermille, "owner gone");
+            return;
+        }
+
+        if (owner.pendingHits.size() >= MAX_PENDING_HITS)
+        {
+            rejectHit(attacker, eventId, npc.hpPermille, "owner backlog");
+            return;
+        }
+
+        owner.pendingHits.add(new String[]
+        {
+            Integer.toString(npc.ownerLocalGuid),
+            Integer.toString(attacker.playerId),
+            Integer.toString(permille),
+            Integer.toString(eventId),
+            Long.toString(atMs)
+        });
+
+        pendingAcks.put(eventId, new int[] { attacker.playerId, owner.playerId, npc.npcId });
+        NpcRegistry.notePendingDamage(npc, permille, System.nanoTime());
+
+        if (pendingAcks.size() > MAX_PENDING_ACKS)
+        {
+            pendingAcks.clear();
+        }
+
+        npcHitsAccepted.incrementAndGet();
+
+        dbg("NPC %s HIT %d permille by %s | rewindMs=%d distance=%.1f hp=%d owner=%s\n",
+                NpcRegistry.describeNpc(npc),
+                permille,
+                describePlayerId(attacker.playerId),
+                nowMs - atMs,
+                distance,
+                npc.hpPermille,
+                describePlayerId(npc.ownerPlayerId));
+    }
+
+    private static void rejectHit(PlayerSession attacker, int eventId, int hpPermille, String reason)
+    {
+        List<String> ack = new ArrayList<>();
+        ack.add("1");
+        ack.add(Integer.toString(eventId));
+        ack.add(Integer.toString(hpPermille));
+        ack.add("0");
+
+        queueOutbound(attacker, "NPCACKF", ack);
+    }
+
+    private static String sanitizeToken(String value)
+    {
+        if (value == null || value.isEmpty())
+        {
+            return "-";
+        }
+
+        String trimmed = value.trim();
+
+        if (trimmed.isEmpty() || trimmed.length() > 160)
+        {
+            return "-";
+        }
+
+        for (int i = 0; i < trimmed.length(); i++)
+        {
+            char c = trimmed.charAt(i);
+            boolean allowed = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+                    || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.'
+                    || c == '/' || c == '\\';
+
+            if (!allowed)
+            {
+                return "-";
+            }
+        }
+
+        return trimmed;
+    }
+
+    private static void npcLoop(DatagramSocket socket)
+    {
+        long lastHeartbeat = System.nanoTime();
+
+        while (running.get())
+        {
+            try
+            {
+                long now = System.nanoTime();
+                List<PlayerSession> sessions = new ArrayList<>(players.values());
+
+                Set<Integer> ownerOnline = new HashSet<>();
+
+                for (PlayerSession session : sessions)
+                {
+                    ownerOnline.add(session.playerId);
+                }
+
+                NpcRegistry.applyUnackedDamage(now);
+                NpcRegistry.pruneStale(ownerOnline, now);
+
+                for (PlayerSession session : sessions)
+                {
+                    relayNpcs(socket, session);
+                    relayHits(socket, session);
+                    relayKillOrders(socket, session);
+                    drainOutbound(socket, session);
+                }
+
+                relayPauseStates(socket, sessions);
+                relayDeaths(socket, sessions);
+                relayHandovers(socket, sessions, now);
+
+                if (!sessions.isEmpty() && (now - lastHeartbeat) >= NPC_HEARTBEAT_NANOS)
+                {
+                    lastHeartbeat = now;
+
+                    dbg("NPC sync: players=%d npcs=%d admitted=%d rejectedDup=%d | packets spawn=%d move=%d end=%d\n",
+                            sessions.size(),
+                            NpcRegistry.npcCount(),
+                            NpcRegistry.admittedCount(),
+                            NpcRegistry.rejectedDuplicateCount(),
+                            npcSpawnPacketsSent.get(),
+                            npcMovePacketsSent.get(),
+                            npcEndPacketsSent.get());
+
+                    logTargetSnapshot();
+                }
+
+                Thread.sleep(100);
+            }
+            catch (InterruptedException e)
+            {
+                Thread.currentThread().interrupt();
+                break;
+            }
+            catch (Exception e)
+            {
+                e.printStackTrace();
+            }
+        }
+    }
+
+
+    static String describePlayerId(int playerId)
+    {
+        PlayerSession session = findPlayerById(playerId);
+        return session == null ? ("#" + playerId) : (session.username + "#" + playerId);
+    }
+
+    static String describeTargetId(int playerId)
+    {
+        return playerId <= 0 ? "none" : describePlayerId(playerId);
+    }
+
+    private static void logTargetSnapshot()
+    {
+        List<NpcRegistry.Npc> targeted = NpcRegistry.targetedNpcs();
+
+        if (targeted.isEmpty())
+        {
+            return;
+        }
+
+        dbg("NPC targets: %d locked\n", targeted.size());
+
+        int shown = 0;
+
+        for (NpcRegistry.Npc npc : targeted)
+        {
+            dbgNotime("    %s -> %s | hp=%d permille owner=%s spot=%s\n",
+                    NpcRegistry.describeNpc(npc),
+                    describeTargetId(npc.targetPlayerId),
+                    npc.hpPermille,
+                    describePlayerId(npc.ownerPlayerId),
+                    NpcRegistry.describeSpot(npc));
+
+            shown++;
+
+            if (shown >= NPC_TARGET_LOG_LIMIT)
+            {
+                dbgNotime("    ... %d more\n", targeted.size() - shown);
+                break;
+            }
+        }
+    }
+
+    private static void relayPauseStates(DatagramSocket socket, List<PlayerSession> sessions)
+    {
+        List<String> changed = new ArrayList<>();
+        int count = 0;
+
+        for (PlayerSession session : sessions)
+        {
+            if (session.paused == session.pausedBroadcast)
+            {
+                continue;
+            }
+
+            session.pausedBroadcast = session.paused;
+
+            changed.add(Integer.toString(session.playerId));
+            changed.add(session.paused ? "1" : "0");
+            count++;
+        }
+
+        if (count == 0)
+        {
+            return;
+        }
+
+        changed.add(0, Integer.toString(count));
+
+        for (PlayerSession session : sessions)
+        {
+            sendNpcPacket(socket, session, "PSTATEF", changed);
+        }
+    }
+
+    private static void relayNpcs(DatagramSocket socket, PlayerSession session)
+    {
+        List<NpcRegistry.Npc> visible = NpcRegistry.visibleTo(session, NPC_INTEREST_RADIUS_SQUARED);
+        Set<Integer> desired = new HashSet<>();
+
+        final long snapshotMs = serverMs();
+
+        List<String> spawn = new ArrayList<>();
+        List<String> move = new ArrayList<>();
+        int spawnCount = 0;
+        int moveCount = 0;
+        int spawnPackets = 0;
+        int movePackets = 0;
+
+        for (NpcRegistry.Npc npc : visible)
+        {
+            if (!npc.alive && !session.knownNpcs.contains(npc.npcId))
+            {
+                continue;
+            }
+
+            desired.add(npc.npcId);
+
+            if (session.knownNpcs.add(npc.npcId))
+            {
+                if (spawnPackets >= NPC_SPAWN_PACKETS_PER_TICK)
+                {
+                    session.knownNpcs.remove(npc.npcId);
+                    desired.remove(npc.npcId);
+                    continue;
+                }
+
+                spawn.add(Integer.toString(npc.npcId));
+                spawn.add(Integer.toString(npc.area));
+                spawn.add(npc.typeCode);
+                spawn.add(npc.appearance);
+                spawn.add(formatCoord(npc.x));
+                spawn.add(formatCoord(npc.y));
+                spawn.add(formatCoord(npc.z));
+                spawn.add(formatCoord(npc.heading));
+                spawn.add(Integer.toString(npc.hpPermille));
+                spawn.add(Integer.toString(npc.flags));
+                spawn.add(Integer.toString(npc.targetPlayerId));
+                spawnCount++;
+
+                if (spawnCount >= NPC_SPAWN_BATCH)
+                {
+                    sendSnapshot(socket, session, "NPCNEW", spawn, spawnCount, snapshotMs);
+                    spawn = new ArrayList<>();
+                    spawnCount = 0;
+                    spawnPackets++;
+                }
+
+                continue;
+            }
+
+            if (movePackets >= NPC_MOVE_PACKETS_PER_TICK)
+            {
+                continue;
+            }
+
+            if (!npc.alive && npc.deathBroadcast)
+            {
+                continue;
+            }
+
+            move.add(Integer.toString(npc.npcId));
+            move.add(formatCoord(npc.x));
+            move.add(formatCoord(npc.y));
+            move.add(formatCoord(npc.z));
+            move.add(formatCoord(npc.heading));
+            move.add(Integer.toString(npc.hpPermille));
+            move.add(Integer.toString(npc.flags));
+            move.add(Integer.toString(npc.targetPlayerId));
+            moveCount++;
+
+            if (moveCount >= NPC_MOVE_BATCH)
+            {
+                sendSnapshot(socket, session, "NPCMOV", move, moveCount, snapshotMs);
+                move = new ArrayList<>();
+                moveCount = 0;
+                movePackets++;
+            }
+        }
+
+        List<String> remove = new ArrayList<>();
+        int removeCount = 0;
+
+        for (Integer known : new ArrayList<>(session.knownNpcs))
+        {
+            if (desired.contains(known))
+            {
+                continue;
+            }
+
+            session.knownNpcs.remove(known);
+
+            if (removeCount < NPC_REMOVE_BATCH)
+            {
+                remove.add(Integer.toString(known));
+                remove.add(NpcRegistry.get(known) == null ? "0" : "1");
+                removeCount++;
+            }
+        }
+
+        if (spawnCount > 0)
+        {
+            sendSnapshot(socket, session, "NPCNEW", spawn, spawnCount, snapshotMs);
+        }
+
+        if (moveCount > 0)
+        {
+            sendSnapshot(socket, session, "NPCMOV", move, moveCount, snapshotMs);
+        }
+
+        if (removeCount > 0)
+        {
+            remove.add(0, Integer.toString(removeCount));
+            sendNpcPacket(socket, session, "NPCEND", remove);
+        }
+
+        if (!session.goneGuids.isEmpty())
+        {
+            List<String> gone = new ArrayList<>();
+            int goneCount = 0;
+
+            for (Integer guid : new ArrayList<>(session.goneGuids))
+            {
+                session.goneGuids.remove(guid);
+
+                if (goneCount >= NPC_REMOVE_BATCH)
+                {
+                    break;
+                }
+
+                gone.add(Integer.toString(guid));
+                goneCount++;
+            }
+
+            if (goneCount > 0)
+            {
+                gone.add(0, Integer.toString(goneCount));
+                sendNpcPacket(socket, session, "NPCGONE", gone);
+
+                dbg("NPC re-register requested: %d entities -> %s\n",
+                        goneCount,
+                        describePlayerId(session.playerId));
+            }
+        }
+    }
+
+    private static void sendSnapshot(
+            DatagramSocket socket,
+            PlayerSession session,
+            String opcode,
+            List<String> body,
+            int count,
+            long snapshotMs)
+    {
+        body.add(0, Integer.toString(count));
+        body.add(0, Long.toString(snapshotMs));
+
+        sendNpcPacket(socket, session, opcode, body);
+    }
+
+    private static void relayDeaths(DatagramSocket socket, List<PlayerSession> sessions)
+    {
+        List<NpcRegistry.Npc> pending = NpcRegistry.pendingDeaths();
+
+        if (pending.isEmpty())
+        {
+            return;
+        }
+
+        for (NpcRegistry.Npc npc : pending)
+        {
+            npc.deathBroadcast = true;
+
+            for (PlayerSession session : sessions)
+            {
+                if (session.playerId == npc.ownerPlayerId || !session.knownNpcs.contains(npc.npcId))
+                {
+                    continue;
+                }
+
+                List<String> fields = new ArrayList<>();
+                fields.add("1");
+                fields.add(Integer.toString(npc.npcId));
+
+                sendNpcPacket(socket, session, "NPCDEAD", fields);
+            }
+
+            dbg("NPC %s DEATH CONFIRMED | owner=%s cell=%s\n",
+                    NpcRegistry.describeNpc(npc),
+                    describePlayerId(npc.ownerPlayerId),
+                    NpcRegistry.describeSpot(npc));
+        }
+    }
+
+    private static void relayHandovers(DatagramSocket socket, List<PlayerSession> sessions, long now)
+    {
+        List<int[]> orders = NpcRegistry.planHandovers(sessions, NPC_INTEREST_RADIUS_SQUARED, now);
+
+        if (orders.isEmpty())
+        {
+            return;
+        }
+
+        for (PlayerSession session : sessions)
+        {
+            List<String> fields = new ArrayList<>();
+            int count = 0;
+
+            for (int[] order : orders)
+            {
+                if (order[1] != session.playerId)
+                {
+                    continue;
+                }
+
+                fields.add(Integer.toString(order[0]));
+                count++;
+
+                if (count >= NPC_REMOVE_BATCH)
+                {
+                    break;
+                }
+            }
+
+            if (count == 0)
+            {
+                continue;
+            }
+
+            fields.add(0, Integer.toString(count));
+            sendNpcPacket(socket, session, "NPCGIVE", fields);
+
+            if (session.lastHandoverLogged != count)
+            {
+                session.lastHandoverLogged = count;
+                dbg("NPC handover offered: %d entities -> %s\n", count, describePlayerId(session.playerId));
+            }
+        }
+    }
+
+    private static void relayKillOrders(DatagramSocket socket, PlayerSession session)
+    {
+        List<NpcRegistry.Npc> orders = NpcRegistry.pendingKillOrders(session.playerId);
+
+        if (orders.isEmpty())
+        {
+            return;
+        }
+
+        List<String> fields = new ArrayList<>();
+        int count = 0;
+
+        for (NpcRegistry.Npc npc : orders)
+        {
+            if (count >= NPC_REMOVE_BATCH)
+            {
+                break;
+            }
+
+            fields.add(Integer.toString(npc.ownerLocalGuid));
+            npc.killOrderPending = false;
+            count++;
+        }
+
+        if (count == 0)
+        {
+            return;
+        }
+
+        fields.add(0, Integer.toString(count));
+        sendNpcPacket(socket, session, "NPCKILL", fields);
+
+        dbg("NPC kill orders: %d -> %s (server-confirmed deaths)\n", count, describePlayerId(session.playerId));
+    }
+
+    private static void relayHits(DatagramSocket socket, PlayerSession session)
+    {
+        List<String> fields = new ArrayList<>();
+        int count = 0;
+
+        while (count < NPC_HIT_BATCH)
+        {
+            String[] hit = session.pendingHits.poll();
+
+            if (hit == null)
+            {
+                break;
+            }
+
+            fields.add(hit[0]);
+            fields.add(hit[1]);
+            fields.add(hit[2]);
+            fields.add(hit[3]);
+            fields.add(hit[4]);
+            count++;
+        }
+
+        if (count == 0)
+        {
+            return;
+        }
+
+        fields.add(0, Integer.toString(count));
+        sendNpcPacket(socket, session, "NPCHITF", fields);
+    }
+
+    private static void drainOutbound(DatagramSocket socket, PlayerSession session)
+    {
+        Object[] packet;
+        int guard = 0;
+
+        while ((packet = session.pendingOutbound.poll()) != null && guard < 32)
+        {
+            guard++;
+
+            @SuppressWarnings("unchecked")
+            List<String> fields = (List<String>) packet[1];
+
+            sendNpcPacket(socket, session, (String) packet[0], fields);
+        }
+    }
+
+    static void queueOutbound(PlayerSession session, String opcode, List<String> fields)
+    {
+        if (session == null || session.pendingOutbound.size() >= 64)
+        {
+            return;
+        }
+
+        session.pendingOutbound.add(new Object[] { opcode, fields });
+    }
+
+    private static String formatCoord(double value)
+    {
+        return String.format(Locale.US, "%.3f", value);
+    }
+
+    private static void sendNpcPacket(DatagramSocket socket, PlayerSession session, String opcode, List<String> fields)
+    {
+        String packetText = buildTypedPacket(opcode, session.playerId, session.username, fields);
+        byte[] data = packetText.getBytes(StandardCharsets.UTF_8);
+
+        try
+        {
+            ClientEndpoint client = session.endpoint;
+            socket.send(new DatagramPacket(data, data.length, client.address, client.port));
+            totalNpcPacketsSent.incrementAndGet();
+            totalPacketsSent.incrementAndGet();
+
+            if ("NPCNEW".equals(opcode))
+            {
+                npcSpawnPacketsSent.incrementAndGet();
+            }
+            else if ("NPCMOV".equals(opcode))
+            {
+                npcMovePacketsSent.incrementAndGet();
+            }
+            else if ("NPCEND".equals(opcode))
+            {
+                npcEndPacketsSent.incrementAndGet();
+            }
+            else
+            {
+                npcOwnPacketsSent.incrementAndGet();
+            }
+        }
+        catch (Exception e)
+        {
+            totalSendFailures.incrementAndGet();
         }
     }
 
@@ -949,8 +2129,21 @@ public class WitcherServer
             try
             {
                 List<PlayerSession> sessions = new ArrayList<>(players.values());
-                List<ClientEndpoint> everyone = uniqueEndpoints(sessions);
                 long tickNanos = System.nanoTime();
+
+                if (BotManager.count() > 0 && !sessions.isEmpty())
+                {
+                    BotManager.tick(sessions.get(0), tickNanos);
+
+                    for (PlayerSession bot : BotManager.sessions())
+                    {
+                        sendChunk(socket, uniqueEndpoints(sessions), bot, "MOVE", BotManager.movementFields(bot));
+                    }
+
+                    sessions.addAll(BotManager.sessions());
+                }
+
+                List<ClientEndpoint> everyone = uniqueEndpoints(sessions);
                 int packetsSentThisTick = 0;
 
                 for (PlayerSession session : sessions)
@@ -1212,7 +2405,73 @@ public class WitcherServer
             dbg("broadcastTicks=%d\n", totalBroadcastTicks.get());
             dbg("totalPacketsSent=%d\n", totalPacketsSent.get());
             dbg("totalSendFailures=%d\n", totalSendFailures.get());
-            dbg("lastBroadcastTickAgeMs=%d\n\n", lastTickAgeMs);
+            dbg("lastBroadcastTickAgeMs=%d\n", lastTickAgeMs);
+            dbg("npcs=%d admitted=%d rejectedDuplicate=%d npcPacketsSent=%d\n\n",
+                    NpcRegistry.npcCount(),
+                    NpcRegistry.admittedCount(),
+                    NpcRegistry.rejectedDuplicateCount(),
+                    totalNpcPacketsSent.get());
+            return;
+        }
+
+        if (line.startsWith("bots"))
+        {
+            String arg = trimCommandArg(line, "bots");
+            int requested = 3;
+
+            if (!arg.isEmpty())
+            {
+                Integer parsed = parseIntegerOrNull(arg);
+
+                if (parsed == null || parsed < 0 || parsed > 8)
+                {
+                    dbg("Usage: bots <0-8>   (0 clears)\n\n");
+                    return;
+                }
+
+                requested = parsed;
+            }
+
+            if (requested == 0)
+            {
+                BotManager.clear();
+                dbg("Bots cleared.\n\n");
+                return;
+            }
+
+            List<PlayerSession> live = new ArrayList<>(players.values());
+
+            if (live.isEmpty())
+            {
+                dbg("No player connected to anchor bots to.\n\n");
+                return;
+            }
+
+            dbg("%s\n\n", BotManager.spawn(live.get(0), requested));
+            return;
+        }
+
+        if (line.equals("npc"))
+        {
+            dbg("---- NPC sync ----\n");
+            dbg("npcs=%d admitted=%d rejectedDuplicate=%d\n",
+                    NpcRegistry.npcCount(),
+                    NpcRegistry.admittedCount(),
+                    NpcRegistry.rejectedDuplicateCount());
+
+            for (PlayerSession session : players.values())
+            {
+                dbg("  %-18s owned=%d known=%d area=%d\n",
+                        session.username,
+                        NpcRegistry.countOwnedBy(session.playerId),
+                        session.knownNpcs.size(),
+                        session.area);
+            }
+
+            dbg("packetsTotal spawn=%d move=%d end=%d\n\n",
+                    npcSpawnPacketsSent.get(),
+                    npcMovePacketsSent.get(),
+                    npcEndPacketsSent.get());
             return;
         }
 
@@ -1389,6 +2648,8 @@ public class WitcherServer
             dbg("whitelist remove <ip>     - remove IP from whitelist\n");
             dbg("list                      - list connected players\n");
             dbg("stats                     - show broadcast/server health counters\n");
+            dbg("npc                       - show NPC sync cells, authority and counters\n");
+            dbg("bots <0-8>                - spawn fake players orbiting the first connected player\n");
             dbg("about                     - info about Witcher Online\n");
             dbg("stop                      - stop server\n");
             dbg("help                      - show this help\n\n");
@@ -1887,7 +3148,7 @@ public class WitcherServer
         System.out.flush();
     }
 
-    private static void dbg(String format, Object... args)
+    static void dbg(String format, Object... args)
     {
         String prefix = "[" + LocalTime.now().format(LOG_TIME) + " INFO]: ";
         System.out.print(prefix + String.format(format, args));
@@ -1983,6 +3244,8 @@ public class WitcherServer
         {
             return false;
         }
+
+        NpcRegistry.orphanNpcsOwnedBy(session.playerId, System.nanoTime());
 
         String ip = normalizeIp(session.endpoint.address.getHostAddress());
         reservedUsernames.put(usernameKey, new UsernameReservation(

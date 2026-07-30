@@ -1,12 +1,13 @@
-﻿#include "pch.h"
+#include "pch.h"
 #include <iostream>
 #include "Diagnostics.h"
 #include "ScriptBinding.h"
+#include "NpcNet.h"
 #include <windows.h>
 #include <thread>
 #include <atomic>
 #include <string>
-#include <sstream>
+#include <string_view>
 #include <vector>
 #include <regex>
 #include <filesystem>
@@ -54,46 +55,66 @@ struct ParsedHalves
 	std::vector<std::string> second;
 };
 
+static bool NextToken(const std::string& input, size_t& pos, std::string_view& token)
+{
+	while (pos < input.size() && static_cast<unsigned char>(input[pos]) <= ' ')
+		++pos;
+
+	if (pos >= input.size())
+		return false;
+
+	const size_t start = pos;
+
+	while (pos < input.size() && static_cast<unsigned char>(input[pos]) > ' ')
+		++pos;
+
+	token = std::string_view(input.data() + start, pos - start);
+	return true;
+}
+
 static ParsedHalves ParseValuesSplitHalf(const std::string& input)
 {
-	static const std::string kStartMarker = "_s";
-	static const std::string kEndMarker = "_e";
-	static const std::string kHalfMarker = "half";
-
-	std::istringstream iss(input);
-	std::string word;
+	static const std::string_view kStartMarker = "_s";
+	static const std::string_view kEndMarker = "_e";
+	static const std::string_view kHalfMarker = "half";
 
 	ParsedHalves out;
+	out.first.reserve(64);
+	out.second.reserve(32);
+
 	std::vector<std::string>* current = &out.first;
 
-	if (!(iss >> word))
+	size_t pos = 0;
+	std::string_view token;
+
+	if (!NextToken(input, pos, token))
 		return out;
 
 	bool inBlock = false;
 	std::string blockAccum;
 
-	while (iss >> word)
+	while (NextToken(input, pos, token))
 	{
 		if (!inBlock)
 		{
-			if (word == kStartMarker)
+			if (token == kStartMarker)
 			{
 				inBlock = true;
 				blockAccum.clear();
 				continue;
 			}
 
-			if (word == kHalfMarker)
+			if (token == kHalfMarker)
 			{
 				current = &out.second;
 				continue;
 			}
 
-			current->push_back(word);
+			current->emplace_back(token);
 		}
 		else
 		{
-			if (word == kEndMarker)
+			if (token == kEndMarker)
 			{
 				current->push_back(blockAccum);
 				inBlock = false;
@@ -103,7 +124,7 @@ static ParsedHalves ParseValuesSplitHalf(const std::string& input)
 			{
 				if (!blockAccum.empty())
 					blockAccum += ' ';
-				blockAccum += word;
+				blockAccum.append(token);
 			}
 		}
 	}
@@ -116,37 +137,56 @@ static ParsedHalves ParseValuesSplitHalf(const std::string& input)
 
 static std::string PayloadTag(const std::string& input)
 {
-	std::istringstream iss(input);
-	std::string tag;
-	iss >> tag;
-	return tag;
+	size_t pos = 0;
+	std::string_view token;
+
+	if (!NextToken(input, pos, token))
+		return std::string();
+
+	return std::string(token);
+}
+
+static void AppendEscaped(std::string& out, const std::string& value)
+{
+	for (char c : value)
+	{
+		switch (c)
+		{
+		case '\\': out += "\\\\"; break;
+		case '\t': out += "\\t"; break;
+		case '\n': out += "\\n"; break;
+		case '\r': out += "\\r"; break;
+		default: out += c; break;
+		}
+	}
 }
 
 static std::string EscapeField(const std::string& s)
 {
 	std::string out;
 	out.reserve(s.size());
-
-	for (char c : s)
-	{
-		if (c == '\\') out += "\\\\";
-		else if (c == '\t') out += "\\t";
-		else if (c == '\n') out += "\\n";
-		else if (c == '\r') out += "\\r";
-		else out += c;
-	}
-
+	AppendEscaped(out, s);
 	return out;
 }
 
 static std::string BuildPacket(const std::string& opcode, const std::string& id, const std::vector<std::string>& fields)
 {
-	std::string packet = opcode + "\t" + id;
+	size_t estimate = opcode.size() + id.size() + 2;
+
+	for (const auto& f : fields)
+		estimate += f.size() + 1;
+
+	std::string packet;
+	packet.reserve(estimate + 16);
+
+	packet += opcode;
+	packet += '\t';
+	packet += id;
 
 	for (const auto& f : fields)
 	{
-		packet += "\t";
-		packet += EscapeField(f);
+		packet += '\t';
+		AppendEscaped(packet, f);
 	}
 
 	return packet;
@@ -279,8 +319,18 @@ static bool RemoveMovementPrefix(ParsedHalves& halves, std::vector<std::string>&
 
 static void RequestReconnect(const char* reason);
 
+static std::atomic<unsigned long long> g_bytesSent{ 0 };
+static std::atomic<unsigned long long> g_packetsSent{ 0 };
+static std::atomic<unsigned long long> g_bytesRecv{ 0 };
+static std::atomic<unsigned long long> g_packetsRecv{ 0 };
+static std::atomic<unsigned long long> g_outboundNanos{ 0 };
+static std::atomic<unsigned long long> g_outboundCalls{ 0 };
+
 static void SendUdpPacket(const std::string& packet, const char* label)
 {
+	g_bytesSent.fetch_add(packet.size());
+	g_packetsSent.fetch_add(1);
+
 	try
 	{
 		theSocket.send(asio::buffer(packet));
@@ -392,8 +442,37 @@ static void SendCombined(const std::string& payload, const char* opcode, int& se
 		SendUdpPacket(BuildPacket(opcode, packetId, fields), opcode);
 }
 
+static void SendNpcPayload(const std::string& payload, const char* opcode)
+{
+	std::vector<std::string> fields;
+	fields.reserve(64);
+
+	size_t pos = 0;
+	std::string_view token;
+
+	if (!NextToken(payload, pos, token))
+		return;
+
+	while (NextToken(payload, pos, token))
+		fields.emplace_back(token);
+
+	if (fields.empty())
+		return;
+
+	SendUdpPacket(BuildPacket(opcode, BuildLocalPacketId(), fields), opcode);
+}
+
 static void ProcessOutbound(const std::string& payload)
 {
+	const long long started = Profiler::Now();
+	g_outboundCalls.fetch_add(1);
+
+	struct Timing
+	{
+		long long start;
+		~Timing() { g_outboundNanos.fetch_add(static_cast<unsigned long long>(Profiler::MicrosSince(start) * 1000.0)); }
+	} timing{ started };
+
 	const std::string tag = PayloadTag(payload);
 
 	if (tag == "wo")
@@ -404,6 +483,8 @@ static void ProcessOutbound(const std::string& payload)
 		SendCombined(payload, "UPDATE3", g_update3Sequence);
 	else if (tag == "wo4")
 		SendCombined(payload, "UPDATE4", g_update4Sequence);
+	else if (tag == "won1")
+		SendNpcPayload(payload, "NPCCELL");
 }
 
 struct RemotePlayerChunks
@@ -655,7 +736,25 @@ static void HandleServerPacket(const std::string& msg)
 	}
 
 	const std::string& opcode = parts[0];
-	if (opcode != "MOVE" && opcode != "UPDATE1A" && opcode != "UPDATE1B" && opcode != "UPDATE2A" && opcode != "UPDATE2B" && opcode != "UPDATE3" && opcode != "UPDATE4")
+
+	const bool isNetOpcode = opcode == "NPCNEW" || opcode == "NPCMOV" || opcode == "NPCEND"
+		|| opcode == "NPCDEAD" || opcode == "NPCHITF" || opcode == "NPCACKF" || opcode == "TSYNCR" || opcode == "NPCKILL"
+		|| opcode == "NPCGIVE" || opcode == "NPCDROP" || opcode == "NPCGONE" || opcode == "PSTATEF";
+
+	const bool isNpcOpcode = opcode == "NPCOWN";
+
+	if (isNetOpcode)
+	{
+		if (parts.size() < 3)
+			return;
+
+		std::vector<std::string> netFields(parts.begin() + 3, parts.end());
+		NpcNet::OnPacket(opcode, netFields);
+		return;
+	}
+
+	if (!isNpcOpcode
+		&& opcode != "MOVE" && opcode != "UPDATE1A" && opcode != "UPDATE1B" && opcode != "UPDATE2A" && opcode != "UPDATE2B" && opcode != "UPDATE3" && opcode != "UPDATE4")
 		return;
 
 	if (parts.size() < 3)
@@ -677,6 +776,12 @@ static void HandleServerPacket(const std::string& msg)
 
 	std::vector<std::string> fields(parts.begin() + 3, parts.end());
 	const unsigned long long nowMs = GetTickCount64();
+
+	if (isNpcOpcode)
+	{
+		QueueInbound(InboundOpcode::NpcOwn, playerId, 0, playerUsername, std::move(fields));
+		return;
+	}
 
 	if (opcode == "MOVE")
 	{
@@ -806,6 +911,35 @@ static void HandleServerPacket(const std::string& msg)
 		QueueInbound(InboundOpcode::Update2, playerId, 0, pushUsername, std::move(combined2));
 }
 
+static constexpr unsigned long long kScriptStallMs = 600;
+static bool g_reportedPaused = false;
+
+static void ReportPauseState()
+{
+	if (g_localPlayerId.load() <= 0 || g_reconnectRequested.load())
+		return;
+
+	const unsigned long long lastTick = ScriptBinding::LastScriptTickMs();
+
+	if (lastTick == 0)
+		return;
+
+	const unsigned long long nowMs = GetTickCount64();
+	const bool stalled = (nowMs - lastTick) > kScriptStallMs;
+	const bool paused = ScriptBinding::ScriptPaused() || stalled;
+
+	if (paused == g_reportedPaused)
+		return;
+
+	g_reportedPaused = paused;
+
+	std::vector<std::string> fields;
+	fields.push_back(paused ? "1" : "0");
+
+	SendUdpPacket(BuildPacket("PSTATE", BuildLocalPacketId(), fields), "PSTATE");
+	Diagnostics::Log(paused ? "script tick stalled -> reported paused" : "script tick resumed -> reported active");
+}
+
 static void SenderThread()
 {
 	std::string payload;
@@ -840,6 +974,8 @@ static void SenderThread()
 			worked = true;
 		}
 
+		NpcNet::Tick();
+		ReportPauseState();
 		Diagnostics::FlushSummary(false);
 		ScriptBinding::ReportIdle();
 
@@ -859,6 +995,9 @@ static void ReceiverThread()
 			asio::ip::udp::endpoint senderEndpoint;
 
 			std::size_t len = theSocket.receive_from(asio::buffer(data), senderEndpoint);
+
+			g_bytesRecv.fetch_add(len);
+			g_packetsRecv.fetch_add(1);
 
 			std::string msg(data.data(), len);
 			HandleServerPacket(msg);
@@ -883,6 +1022,12 @@ void connectServer()
 	g_run.store(true);
 
 	OpenSocket();
+
+	NpcNet::Reset();
+	NpcNet::SetSender([](const char* opcode, const std::vector<std::string>& fields)
+		{
+			SendUdpPacket(BuildPacket(opcode, BuildLocalPacketId(), fields), opcode);
+		});
 
 	g_sender = std::thread(SenderThread);
 	g_receiver = std::thread(ReceiverThread);
@@ -963,6 +1108,25 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
 		Diagnostics::FlushSummary(true);
 		Diagnostics::Log(ScriptBinding::TransportReport());
 		Diagnostics::Log(ScriptBinding::ChurnReport());
+		Diagnostics::Log(ScriptBinding::AccessorReport());
+
+		{
+			const unsigned long long packetsOut = g_packetsSent.load();
+			const unsigned long long packetsIn = g_packetsRecv.load();
+			const unsigned long long calls = g_outboundCalls.load();
+
+			std::string wire = "wire sentBytes=" + std::to_string(g_bytesSent.load())
+				+ " sentPackets=" + std::to_string(packetsOut)
+				+ " avgOut=" + std::to_string(packetsOut ? g_bytesSent.load() / packetsOut : 0)
+				+ " recvBytes=" + std::to_string(g_bytesRecv.load())
+				+ " recvPackets=" + std::to_string(packetsIn)
+				+ " avgIn=" + std::to_string(packetsIn ? g_bytesRecv.load() / packetsIn : 0)
+				+ " | outboundParse calls=" + std::to_string(calls)
+				+ " totalUs=" + std::to_string(g_outboundNanos.load() / 1000)
+				+ " avgUs=" + std::to_string(calls ? (g_outboundNanos.load() / 1000) / calls : 0);
+
+			Diagnostics::Log(wire);
+		}
 		Diagnostics::Shutdown();
 		CloseOnlineSession();
 
