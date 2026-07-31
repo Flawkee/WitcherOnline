@@ -21,7 +21,7 @@ namespace w3mp {
 		constexpr int kReplicaSampleCap = 24;
 		constexpr int kOwnedHistoryMs = 1500;
 		constexpr int kOwnedHistoryCap = 40;
-		constexpr int kAddPerPacket = 14;
+		constexpr int kAddPerPacket = 8;
 		constexpr int kUpdPerPacket = 20;
 		constexpr int kDelPerPacket = 40;
 		constexpr int kMaxPacketsPerSend = 8;
@@ -1030,6 +1030,32 @@ namespace w3mp {
 
 		if (suspended)
 		{
+			std::vector<std::string> freeFields;
+			int freeCount = 0;
+
+			for (auto& pair : g_owned)
+			{
+				if (!pair.second.registered)
+					continue;
+
+				freeFields.push_back(std::to_string(pair.first));
+				freeCount++;
+
+				if (freeCount >= kDelPerPacket)
+				{
+					freeFields.insert(freeFields.begin(), std::to_string(freeCount));
+					Send("NPCFREE", freeFields);
+					freeFields.clear();
+					freeCount = 0;
+				}
+			}
+
+			if (freeCount > 0)
+			{
+				freeFields.insert(freeFields.begin(), std::to_string(freeCount));
+				Send("NPCFREE", freeFields);
+			}
+
 			g_ownedRemoved.clear();
 			g_owned.clear();
 			g_statSuspends++;

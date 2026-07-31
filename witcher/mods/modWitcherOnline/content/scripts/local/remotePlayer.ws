@@ -81,6 +81,16 @@ statemachine class r_RemotePlayer
     public var lastParry : float;
     public var lastFinisher : float;
     public var signType : ESignType;
+    public var signVfxEnabled : bool;
+    private var lastSignVfxAt : float;
+    private var SIGN_VFX_COOLDOWN : float;
+
+    private var signVfxPrevTime : float;
+
+    default signVfxEnabled = true;
+    default signVfxPrevTime = -1.0;
+    default lastSignVfxAt = 0.0;
+    default SIGN_VFX_COOLDOWN = 0.35;
     public var lastSign : float;
     public var horseSpeed : float;
     public var menuName : string;
@@ -1473,6 +1483,7 @@ statemachine class r_RemotePlayer
         updateGeraltAnims();
         updateHeldItems();
         updateEquippedItems();
+        castGhostSign();
         playEmotes();
         updateMenuStatus();
         updateChat();
@@ -1487,6 +1498,52 @@ statemachine class r_RemotePlayer
         updateOneliners();
         updateOnelinerHeights();
         prune();
+    }
+
+    private function castGhostSign()
+    {
+        var now : float;
+
+        if(!ghost)
+        {
+            return;
+        }
+
+        if(signVfxPrevTime < 0.0)
+        {
+            signVfxPrevTime = lastSign;
+            return;
+        }
+
+        if(lastSign == signVfxPrevTime)
+        {
+            return;
+        }
+
+        signVfxPrevTime = lastSign;
+
+        if(!signVfxEnabled || signType == ST_None)
+        {
+            return;
+        }
+
+        now = theGame.GetEngineTimeAsSeconds();
+
+        if((now - lastSignVfxAt) < SIGN_VFX_COOLDOWN)
+        {
+            return;
+        }
+
+        lastSignVfxAt = now;
+
+        if(wo_spawnGhostSign(ghost, signType))
+        {
+            WO_Note("[ghost_sign] cast player=" + id + " sign=" + (int)signType);
+        }
+        else
+        {
+            WO_Note("[ghost_sign] spawn FAILED player=" + id + " sign=" + (int)signType);
+        }
     }
 
     private function prune()
@@ -2420,17 +2477,18 @@ statemachine class r_RemotePlayer
     {
         var ids : array<SItemUniqueId>;
         var ent : CEntity;
+        var equipped : bool;
 
         lastItem = normalizeNGPItem(lastItem);
         newItem = normalizeNGPItem(newItem);
-        
+
         if (lastItem != '' && lastItem != newItem)
         {
             ids = inv.GetItemsByName(lastItem);
             if (ids.Size() > 0)
             {
                 if(mount)
-                {   
+                {
                     inv.UnmountItem(ids[0], true);
                 }
                 else
@@ -2442,10 +2500,28 @@ statemachine class r_RemotePlayer
             }
         }
 
+        if (newItem == '')
+        {
+            lastItem = newItem;
+            return;
+        }
+
         ids = inv.GetItemsByName(newItem);
+
         if (ids.Size() == 0)
         {
             ids = inv.AddAnItem(newItem, 1);
+        }
+
+        if (ids.Size() == 0)
+        {
+            return;
+        }
+
+        equipped = inv.IsItemMounted(ids[0]);
+
+        if (!equipped)
+        {
             if(mount)
             {
                 inv.MountItem(ids[0]);
@@ -2454,6 +2530,8 @@ statemachine class r_RemotePlayer
             {
                 ghost.EquipItem(ids[0]);
             }
+
+            equipped = inv.IsItemMounted(ids[0]);
         }
 
         ent = inv.GetItemEntityUnsafe(ids[0]);
@@ -2462,7 +2540,10 @@ statemachine class r_RemotePlayer
             ent.SetHideInGame(hide);
         }
 
-        lastItem = newItem;
+        if (equipped)
+        {
+            lastItem = newItem;
+        }
     }
 
     private function updateDye(inv : CInventoryComponent, val : name, dye : string)
@@ -2497,9 +2578,18 @@ statemachine class r_RemotePlayer
         var head : name;
 
         acs = ghost.GetComponentsByClassName( 'CHeadManagerComponent' );
-	    head = ( ( CHeadManagerComponent ) acs[0] ).GetCurHeadName();
+
+        if(acs.Size() > 0)
+        {
+            head = ( ( CHeadManagerComponent ) acs[0] ).GetCurHeadName();
+        }
 
         inv = ghost.GetInventory();
+
+        if(!inv)
+        {
+            return;
+        }
 
         EquipNewItem(inv, last_eq_steel, eq_steel);
         EquipNewItem(inv, last_eq_silver, eq_silver);

@@ -597,6 +597,7 @@ public class WitcherServer
                 || "NPCACK".equals(opcode)
                 || "NPCTAKE".equals(opcode)
                 || "NPCNOPE".equals(opcode)
+                || "NPCFREE".equals(opcode)
                 || "PSTATE".equals(opcode)
                 || "NPCWANT".equals(opcode)
                 || "TSYNC".equals(opcode);
@@ -1160,6 +1161,47 @@ public class WitcherServer
             return;
         }
 
+        if ("NPCFREE".equals(opcode))
+        {
+            Integer count = parseIntegerOrNull(fields.get(0));
+
+            if (count == null || count < 0)
+            {
+                return;
+            }
+
+            int released = 0;
+
+            for (int i = 0; i < count; i++)
+            {
+                int base = 1 + i;
+
+                if (base >= fields.size())
+                {
+                    break;
+                }
+
+                Integer localGuid = parseIntegerOrNull(fields.get(base));
+
+                if (localGuid == null)
+                {
+                    continue;
+                }
+
+                if (NpcRegistry.releaseOwned(session.playerId, localGuid, now))
+                {
+                    released++;
+                }
+            }
+
+            if (released > 0)
+            {
+                dbg("NPC released %d entities from %s (suspended)\n", released, describePlayerId(session.playerId));
+            }
+
+            return;
+        }
+
         if ("NPCTAKE".equals(opcode))
         {
             Integer count = parseIntegerOrNull(fields.get(0));
@@ -1189,6 +1231,11 @@ public class WitcherServer
                 int[] previous = NpcRegistry.take(session.playerId, canonicalId, localGuid, now);
 
                 if (previous == null || previous[0] == 0 || previous[1] == 0)
+                {
+                    continue;
+                }
+
+                if (NpcRegistry.ownsGuid(previous[0], previous[1]))
                 {
                     continue;
                 }
@@ -1823,6 +1870,24 @@ public class WitcherServer
 
     private static void relayHandovers(DatagramSocket socket, List<PlayerSession> sessions, long now)
     {
+        int[] pending;
+
+        while ((pending = NpcRegistry.pollPendingDrop()) != null)
+        {
+            PlayerSession loser = findPlayerById(pending[0]);
+
+            if (loser == null)
+            {
+                continue;
+            }
+
+            List<String> drop = new ArrayList<>();
+            drop.add("1");
+            drop.add(Integer.toString(pending[1]));
+
+            queueOutbound(loser, "NPCDROP", drop);
+        }
+
         List<int[]> orders = NpcRegistry.planHandovers(sessions, NPC_INTEREST_RADIUS_SQUARED, now);
 
         if (orders.isEmpty())

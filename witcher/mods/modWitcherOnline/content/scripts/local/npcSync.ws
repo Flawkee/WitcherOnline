@@ -70,7 +70,9 @@ class r_NpcSync
     private var rejectedGuids : array<int>;
     private var rejectedAt    : array<float>;
 
-    private var templates     : r_NpcTemplates;
+    private var pathCache      : MP_SU_HashMap;
+    private var pathCacheCount : int;
+
     private var aggro         : r_NpcAggro;
     private var actions       : r_NpcActions;
 
@@ -88,6 +90,7 @@ class r_NpcSync
     private var statKilled     : int;
     private var statPrefiltered : int;
     private var statDropped    : int;
+    private var statDroppedUntracked : int;
     private var statTargets    : int;
     private var statHitsSent   : int;
     private var statHitsApplied : int;
@@ -96,6 +99,7 @@ class r_NpcSync
     private var statHealthSync : int;
     private var statTeleports  : int;
     private var statNoTemplate : int;
+    private var statTemplateResolves : int;
     private var statPromoted   : int;
     private var statLocalDamage : int;
     private var statSuspends   : int;
@@ -151,6 +155,7 @@ class r_NpcSync
     private var OFFERS_PER_SECOND : int;
     private var MAX_TRACKED    : int;
     private var MAX_REPLICAS   : int;
+    private var PATH_CACHE_MAX : int;
 
     default SCAN_RADIUS = 110.0;
     default KEEP_RADIUS = 150.0;
@@ -175,6 +180,7 @@ class r_NpcSync
     default OFFERS_PER_SECOND = 12;
     default MAX_TRACKED = 250;
     default MAX_REPLICAS = 250;
+    default PATH_CACHE_MAX = 4096;
 
     public function isEnabled() : bool
     {
@@ -225,16 +231,6 @@ class r_NpcSync
         }
 
         return aggro;
-    }
-
-    private function getTemplates() : r_NpcTemplates
-    {
-        if(!templates)
-        {
-            templates = new r_NpcTemplates in this;
-        }
-
-        return templates;
     }
 
     private function getActions() : r_NpcActions
@@ -555,6 +551,13 @@ class r_NpcSync
         tracked.Clear();
         rejectedGuids.Clear();
         rejectedAt.Clear();
+
+        if(pathCache)
+        {
+            pathCache.init();
+            pathCacheCount = 0;
+        }
+
         getAggro().reset();
     }
 
@@ -646,6 +649,15 @@ class r_NpcSync
         {
             tracked.Clear();
             statSuspends += 1;
+
+            if(pathCache)
+            {
+                pathCache.init();
+                pathCacheCount = 0;
+            }
+
+            rejectedGuids.Clear();
+            rejectedAt.Clear();
 
             dbg("npc_suspend", "suspended: ownership released, "
                 + replicas.Size() + " replicas kept alive");
@@ -995,6 +1007,14 @@ class r_NpcSync
             }
 
             typeCode = classifyType(npc);
+
+            if(typeCode == "")
+            {
+                rememberRejected(guid, now);
+                statNoTemplate += 1;
+                continue;
+            }
+
             replicaCount = countReplicasOfSpecies(typeCode, pos);
 
             if(replicaCount > 0)
@@ -1042,38 +1062,67 @@ class r_NpcSync
         }
     }
 
+    private function getPathCache() : MP_SU_HashMap
+    {
+        if(!pathCache)
+        {
+            pathCache = new MP_SU_HashMap in this;
+            pathCache.init();
+            pathCacheCount = 0;
+        }
+
+        return pathCache;
+    }
+
     private function classifyType(npc : CNewNPC) : string
     {
-        var category : EMonsterCategory;
-        var soundName : name;
-        var isTeleporting : bool;
-        var canBeTargeted : bool;
-        var canBeHitByFists : bool;
-        var code : name;
-        var resolved : string;
+        var cache : MP_SU_HashMap;
+        var stored : MP_SU_HashMapValueString;
+        var path : string;
+        var guid : int;
 
-        theGame.GetMonsterParamsForActor(npc, category, soundName, isTeleporting, canBeTargeted, canBeHitByFists);
-
-        resolved = getTemplates().resolveSpecies(npc.GetAppearance(), soundName);
-
-        if(resolved != "")
+        if(!npc)
         {
-            return resolved;
+            return "";
         }
 
-        code = getTemplates().codeFromAppearance(npc.GetAppearance());
+        guid = npc.GetGuidHash();
+        cache = getPathCache();
 
-        if(code != '' && getTemplates().pathForToken(NameToString(code)) != "")
+        if(guid != 0)
         {
-            return NameToString(code);
+            stored = (MP_SU_HashMapValueString)cache.get(guid);
+
+            if(stored)
+            {
+                return stored.value;
+            }
         }
 
-        dbg("npc_species", "unresolved app=" + NameToString(npc.GetAppearance())
-            + " sound=" + NameToString(soundName)
-            + " category=" + (int)category
-            + " monster=" + npc.IsMonster());
+        path = WO_EntityTemplatePath(npc);
 
-        return StrLower(NameToString(npc.GetAppearance()));
+        if(path == "")
+        {
+            WO_Note("[npc_species] no template path app=" + NameToString(npc.GetAppearance())
+                + " name=" + npc.GetName()
+                + " monster=" + npc.IsMonster()
+                + " maxHp=" + npc.GetMaxHealth());
+        }
+
+        if(guid != 0)
+        {
+            if(pathCacheCount >= PATH_CACHE_MAX)
+            {
+                cache.init();
+                pathCacheCount = 0;
+            }
+
+            cache.insert(guid, hm_fromString(path));
+            pathCacheCount += 1;
+            statTemplateResolves += 1;
+        }
+
+        return path;
     }
 
     public function creditOwnedDamage(actor : CNewNPC, dealt : float)
@@ -1221,8 +1270,36 @@ class r_NpcSync
         return -1;
     }
 
+    private function destroyUntrackedByGuid(out entities : array<CGameplayEntity>, guid : int) : bool
+    {
+        var npc : CNewNPC;
+        var i : int;
+
+        for(i = 0; i < entities.Size(); i += 1)
+        {
+            npc = (CNewNPC)entities[i];
+
+            if(!npc || npc.GetGuidHash() != guid)
+            {
+                continue;
+            }
+
+            if(npc.HasTag('WOReplica') || findReplicaByActor(npc) >= 0)
+            {
+                return false;
+            }
+
+            npc.Destroy();
+            return true;
+        }
+
+        return false;
+    }
+
     private function applyDrops()
     {
+        var entities : array<CGameplayEntity>;
+        var gathered : bool;
         var count : int;
         var guid : int;
         var index : int;
@@ -1237,6 +1314,7 @@ class r_NpcSync
         }
 
         now = theGame.GetEngineTimeAsSeconds();
+        gathered = false;
 
         for(i = 0; i < count; i += 1)
         {
@@ -1245,20 +1323,37 @@ class r_NpcSync
 
             rememberRejected(guid, now);
 
-            if(index < 0)
+            if(index >= 0)
             {
+                if(tracked[index].actor)
+                {
+                    tracked[index].actor.Destroy();
+                }
+
+                tracked.Erase(index);
+                statDropped += 1;
+
+                dbg("npc_handover", "dropped local guid=" + guid);
                 continue;
             }
 
-            if(tracked[index].actor)
+            if(!gathered)
             {
-                tracked[index].actor.Destroy();
+                FindGameplayEntitiesInSphere(entities, thePlayer.GetWorldPosition(), KEEP_RADIUS, 512,,,,'CNewNPC');
+                gathered = true;
             }
 
-            tracked.Erase(index);
-            statDropped += 1;
+            if(destroyUntrackedByGuid(entities, guid))
+            {
+                statDropped += 1;
+                statDroppedUntracked += 1;
 
-            dbg("npc_handover", "dropped local guid=" + guid);
+                dbg("npc_handover", "dropped untracked local guid=" + guid);
+            }
+            else
+            {
+                dbg("npc_handover", "drop unmatched guid=" + guid);
+            }
         }
 
         WO_NpcDropsDone();
@@ -1379,13 +1474,12 @@ class r_NpcSync
 
         typeCode = WO_NpcType(commandIndex);
         appearance = WO_NpcAppearance(commandIndex);
-        path = getTemplates().pathForToken(typeCode);
+        path = typeCode;
 
         if(path == "")
         {
             statNoTemplate += 1;
-            WO_Note("[npc_spawn] no template canonical=" + canonicalId
-                + " code=" + typeCode
+            WO_Note("[npc_spawn] empty template path canonical=" + canonicalId
                 + " app=" + NameToString(appearance));
             WO_NpcUnspawnable(canonicalId);
             return;
@@ -1892,6 +1986,7 @@ class r_NpcSync
             + " offered=" + statRegistered
             + " prefiltered=" + statPrefiltered
             + " dropped=" + statDropped
+            + " droppedUntracked=" + statDroppedUntracked
             + " spawned=" + statSpawned
             + " despawned=" + statDespawned
             + " killed=" + statKilled
@@ -1905,6 +2000,8 @@ class r_NpcSync
             + " healthSync=" + statHealthSync
             + " localDamage=" + statLocalDamage
             + " noTemplate=" + statNoTemplate
+            + " templateResolves=" + statTemplateResolves
+            + " pathCache=" + pathCacheCount
             + " suspends=" + statSuspends
             + " rejectMemory=" + rejectedGuids.Size());
 

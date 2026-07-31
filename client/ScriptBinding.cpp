@@ -937,6 +937,406 @@ namespace w3mp {
 			*static_cast<bool*>(result) = value;
 	}
 
+	static bool ProbeReadRaw(const void* address, unsigned long long& value)
+	{
+		__try
+		{
+			value = *reinterpret_cast<const unsigned long long*>(address);
+			return true;
+		}
+		__except (EXCEPTION_EXECUTE_HANDLER)
+		{
+			return false;
+		}
+	}
+
+	static bool ProbeReadPointer(const void* address, unsigned long long& value)
+	{
+		MEMORY_BASIC_INFORMATION mbi;
+
+		if (!address)
+			return false;
+
+		if (VirtualQuery(address, &mbi, sizeof(mbi)) == 0)
+			return false;
+
+		if (mbi.State != MEM_COMMIT)
+			return false;
+
+		if (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD))
+			return false;
+
+		return ProbeReadRaw(address, value);
+	}
+
+	static bool ProbeReadBytesRaw(const void* address, unsigned char* out, int count)
+	{
+		__try
+		{
+			const unsigned char* src = reinterpret_cast<const unsigned char*>(address);
+
+			for (int i = 0; i < count; ++i)
+				out[i] = src[i];
+
+			return true;
+		}
+		__except (EXCEPTION_EXECUTE_HANDLER)
+		{
+			return false;
+		}
+	}
+
+	static bool ProbeReadBytes(const void* address, unsigned char* out, int count)
+	{
+		MEMORY_BASIC_INFORMATION mbi;
+
+		out[0] = 0;
+
+		if (!address)
+			return false;
+
+		if (VirtualQuery(address, &mbi, sizeof(mbi)) == 0)
+			return false;
+
+		if (mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)))
+			return false;
+
+		return ProbeReadBytesRaw(address, out, count);
+	}
+
+	static bool ProbeReadWideRaw(const void* address, wchar_t* out, int maxChars)
+	{
+		__try
+		{
+			const wchar_t* src = reinterpret_cast<const wchar_t*>(address);
+			int i = 0;
+
+			for (; i < maxChars && src[i]; ++i)
+				out[i] = src[i];
+
+			out[i] = 0;
+			return true;
+		}
+		__except (EXCEPTION_EXECUTE_HANDLER)
+		{
+			return false;
+		}
+	}
+
+	static bool ProbeReadWide(const void* address, wchar_t* out, int maxChars)
+	{
+		MEMORY_BASIC_INFORMATION mbi;
+
+		out[0] = 0;
+
+		if (!address)
+			return false;
+
+		if (VirtualQuery(address, &mbi, sizeof(mbi)) == 0)
+			return false;
+
+		if (mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)))
+			return false;
+
+		return ProbeReadWideRaw(address, out, maxChars);
+	}
+
+	static std::string ProbeHex(unsigned long long value)
+	{
+		char buffer[32];
+		sprintf_s(buffer, "0x%llX", value);
+		return buffer;
+	}
+
+	static std::string ProbeDescribeCandidate(unsigned long long candidate)
+	{
+		const ModuleRegion& image = GameModule::Image();
+		unsigned long long vtable = 0;
+
+		if (candidate < 0x10000)
+			return "null_or_small";
+
+		if (!ProbeReadPointer(reinterpret_cast<const void*>(candidate), vtable))
+			return "unreadable";
+
+		if (!image.IsValid())
+			return "vt=" + ProbeHex(vtable) + " (module unresolved)";
+
+		const unsigned long long base = reinterpret_cast<unsigned long long>(image.base);
+		const unsigned long long end = base + image.size;
+
+		if (vtable >= base && vtable < end)
+			return "OBJECT vt=" + ProbeHex(vtable) + " vtRva=" + ProbeHex(vtable - base);
+
+		return "vt=" + ProbeHex(vtable) + " (outside module)";
+	}
+
+	static bool ProbeReadParam(void* frame, unsigned long long* slot)
+	{
+		__try
+		{
+			ReadParameter(frame, slot);
+			return true;
+		}
+		__except (EXCEPTION_EXECUTE_HANDLER)
+		{
+			return false;
+		}
+	}
+
+	static void WO_EntityProbe(void* context, void* frame, void* result)
+	{
+		unsigned long long slot[4] = { 0, 0, 0, 0 };
+		const bool read = ProbeReadParam(frame, slot);
+
+		AdvanceFrame(frame);
+
+		std::string report = "read=";
+		report += read ? "ok" : "EXCEPTION";
+
+		unsigned long long entity = 0;
+
+		if (slot[0] >= 0x10000)
+			ProbeReadPointer(reinterpret_cast<const unsigned char*>(slot[0]) + 8, entity);
+
+		report += " entity=" + ProbeHex(entity);
+
+		if (entity >= 0x10000)
+		{
+			unsigned long long entVt = 0;
+			ProbeReadPointer(reinterpret_cast<const void*>(entity), entVt);
+			report += " entVtRva=" + ProbeHex(entVt - reinterpret_cast<unsigned long long>(GameModule::Image().base));
+			unsigned long long candidate = 0;
+
+			if (ProbeReadPointer(reinterpret_cast<const unsigned char*>(entity) + 0x18, candidate) && candidate >= 0x10000)
+			{
+				report += " T=" + ProbeHex(candidate);
+
+				for (int w = 0; w < 24; ++w)
+				{
+					unsigned long long field = 0;
+					const unsigned char* fa = reinterpret_cast<const unsigned char*>(candidate) + (w * 8);
+
+					if (!ProbeReadPointer(fa, field) || field < 0x10000)
+						continue;
+
+					unsigned char bytes[80];
+
+					if (!ProbeReadBytes(reinterpret_cast<const void*>(field), bytes, 80))
+						continue;
+
+					std::string text;
+					int printable = 0;
+
+					for (int c = 0; c < 80; ++c)
+					{
+						const unsigned char b = bytes[c];
+
+						if (b > 31 && b < 127)
+						{
+							text += static_cast<char>(b);
+							printable++;
+						}
+						else if (b == 0)
+						{
+							text += '.';
+						}
+						else
+						{
+							text += '?';
+						}
+					}
+
+					if (printable >= 6)
+						report += " s+" + ProbeHex(w * 8) + "='" + text + "'";
+				}
+			}
+
+			report += " ptrs:";
+
+			for (int off = 1; off < 96; ++off)
+			{
+				unsigned long long member = 0;
+				const unsigned char* at = reinterpret_cast<const unsigned char*>(entity) + (off * 8);
+
+				if (!ProbeReadPointer(at, member) || member < 0x10000)
+					continue;
+
+				unsigned long long memberVt = 0;
+
+				if (!ProbeReadPointer(reinterpret_cast<const void*>(member), memberVt))
+					continue;
+
+				const unsigned long long base = reinterpret_cast<unsigned long long>(GameModule::Image().base);
+
+				if (memberVt < base || memberVt >= base + GameModule::Image().size)
+					continue;
+
+				report += " +" + ProbeHex(off * 8) + "=" + ProbeHex(member) + "/" + ProbeHex(memberVt - base);
+			}
+		}
+
+		WriteStringResult(result, report);
+	}
+
+	static const unsigned long long kEntityTemplateVtRva = 0x2A349F8;
+	static const unsigned long long kDiskFileVtRva = 0x2A1EB80;
+	static const unsigned long long kDirectoryVtRva = 0x2A20548;
+	static const int kMaxDepotDepth = 32;
+
+	static std::atomic<bool> g_templateLayoutWarned(false);
+
+	static bool ProbeVtableIs(unsigned long long object, unsigned long long rva)
+	{
+		const ModuleRegion& image = GameModule::Image();
+		unsigned long long vtable = 0;
+
+		if (object < 0x10000 || !image.IsValid())
+			return false;
+
+		if (!ProbeReadPointer(reinterpret_cast<const void*>(object), vtable))
+			return false;
+
+		return vtable == reinterpret_cast<unsigned long long>(image.base) + rva;
+	}
+
+	static std::string ProbeNarrowWide(const wchar_t* text)
+	{
+		std::string out;
+
+		for (int i = 0; text[i]; ++i)
+			out += (text[i] < 256) ? static_cast<char>(text[i]) : '?';
+
+		return out;
+	}
+
+	static unsigned long long ResolveEntityTemplate(unsigned long long entity)
+	{
+		unsigned long long handle = 0;
+		unsigned long long candidate = 0;
+
+		if (ProbeReadPointer(reinterpret_cast<const unsigned char*>(entity) + 0x108, handle) && handle >= 0x10000)
+		{
+			if (ProbeReadPointer(reinterpret_cast<const unsigned char*>(handle) + 0x8, candidate)
+				&& ProbeVtableIs(candidate, kEntityTemplateVtRva))
+				return candidate;
+		}
+
+		candidate = 0;
+
+		if (ProbeReadPointer(reinterpret_cast<const unsigned char*>(entity) + 0x30, candidate)
+			&& ProbeVtableIs(candidate, kEntityTemplateVtRva))
+			return candidate;
+
+		return 0;
+	}
+
+	static std::string EntityTemplatePath(unsigned long long entity)
+	{
+		unsigned long long tmpl = 0;
+		unsigned long long disk = 0;
+		unsigned long long namePtr = 0;
+		unsigned long long directory = 0;
+		std::vector<std::string> parts;
+		wchar_t buffer[260];
+		std::string leaf;
+		std::string path;
+		int depth;
+
+		if (entity < 0x10000)
+			return std::string();
+
+		tmpl = ResolveEntityTemplate(entity);
+
+		if (!tmpl)
+			return std::string();
+
+		if (!ProbeReadPointer(reinterpret_cast<const unsigned char*>(tmpl) + 0x58, disk)
+			|| !ProbeVtableIs(disk, kDiskFileVtRva))
+			return std::string();
+
+		if (!ProbeReadPointer(reinterpret_cast<const unsigned char*>(disk) + 0x18, namePtr)
+			|| !ProbeReadWide(reinterpret_cast<const void*>(namePtr), buffer, 255))
+			return std::string();
+
+		leaf = ProbeNarrowWide(buffer);
+
+		if (leaf.empty())
+			return std::string();
+
+		if (!ProbeReadPointer(reinterpret_cast<const unsigned char*>(disk) + 0x8, directory))
+			directory = 0;
+
+		for (depth = 0; depth < kMaxDepotDepth && ProbeVtableIs(directory, kDirectoryVtRva); ++depth)
+		{
+			unsigned long long dirName = 0;
+			std::string segment;
+
+			if (!ProbeReadPointer(reinterpret_cast<const unsigned char*>(directory) + 0x30, dirName)
+				|| !ProbeReadWide(reinterpret_cast<const void*>(dirName), buffer, 255))
+				break;
+
+			segment = ProbeNarrowWide(buffer);
+
+			if (segment.empty())
+				break;
+
+			parts.push_back(segment);
+
+			if (!ProbeReadPointer(reinterpret_cast<const unsigned char*>(directory) + 0x28, directory))
+				break;
+		}
+
+		for (size_t i = parts.size(); i > 0; --i)
+		{
+			path += parts[i - 1];
+			path += "\\";
+		}
+
+		path += leaf;
+
+		return path;
+	}
+
+	static void WO_EntityTemplatePath(void* context, void* frame, void* result)
+	{
+		unsigned long long slot[4] = { 0, 0, 0, 0 };
+		const bool read = ProbeReadParam(frame, slot);
+		unsigned long long entity = 0;
+		std::string path;
+
+		AdvanceFrame(frame);
+
+		if (read && slot[0] >= 0x10000)
+			ProbeReadPointer(reinterpret_cast<const unsigned char*>(slot[0]) + 8, entity);
+
+		if (entity >= 0x10000)
+			path = EntityTemplatePath(entity);
+
+		if (path.empty() && entity >= 0x10000 && !g_templateLayoutWarned.exchange(true))
+		{
+			const unsigned long long base = reinterpret_cast<unsigned long long>(GameModule::Image().base);
+			unsigned long long entVt = 0;
+			unsigned long long handle = 0;
+			unsigned long long tmpl = 0;
+
+			ProbeReadPointer(reinterpret_cast<const void*>(entity), entVt);
+			ProbeReadPointer(reinterpret_cast<const unsigned char*>(entity) + 0x108, handle);
+
+			if (handle >= 0x10000)
+				ProbeReadPointer(reinterpret_cast<const unsigned char*>(handle) + 0x8, tmpl);
+
+			Diagnostics::Log("ScriptBinding: WO_EntityTemplatePath FAILED - depot layout mismatch"
+				" (game build changed?) entity=" + ProbeHex(entity)
+				+ " entVtRva=" + ProbeHex(entVt >= base ? entVt - base : 0)
+				+ " handle=" + ProbeHex(handle)
+				+ " tmpl=" + ProbeHex(tmpl)
+				+ " expectedTemplateVtRva=" + ProbeHex(kEntityTemplateVtRva));
+		}
+
+		WriteStringResult(result, path);
+	}
+
 	static void WO_SetPaused(void* context, void* frame, void* result)
 	{
 		const bool paused = ReadBoolParameter(frame);
@@ -1761,6 +2161,8 @@ namespace w3mp {
 		RegisterOne(L"WO_Tick", reinterpret_cast<void*>(&WO_Tick), "WO_Tick");
 		RegisterOne(L"WO_IsPlayerPaused", reinterpret_cast<void*>(&WO_IsPlayerPaused), "WO_IsPlayerPaused");
 		RegisterOne(L"WO_SetPaused", reinterpret_cast<void*>(&WO_SetPaused), "WO_SetPaused");
+		RegisterOne(L"WO_EntityProbe", reinterpret_cast<void*>(&WO_EntityProbe), "WO_EntityProbe");
+		RegisterOne(L"WO_EntityTemplatePath", reinterpret_cast<void*>(&WO_EntityTemplatePath), "WO_EntityTemplatePath");
 		RegisterOne(L"WO_FrameReport", reinterpret_cast<void*>(&WO_FrameReport), "WO_FrameReport");
 		RegisterOne(L"WO_Note", reinterpret_cast<void*>(&WO_Note), "WO_Note");
 		RegisterOne(L"WO_Match", reinterpret_cast<void*>(&WO_Match), "WO_Match");

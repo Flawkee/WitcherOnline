@@ -18,6 +18,8 @@ import function WO_NameAt(index : int) : name;
 import function WO_Tick() : int;
 import function WO_IsPlayerPaused(playerId : int) : bool;
 import function WO_SetPaused(paused : bool);
+import function WO_EntityProbe(target : CEntity) : string;
+import function WO_EntityTemplatePath(target : CEntity) : string;
 import function WO_NpcBeginOwned();
 import function WO_NpcPushOwned(guid : int, area : int, localCount : int, typeCode : string, appearance : string,
     x : float, y : float, z : float, heading : float,

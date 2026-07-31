@@ -11,6 +11,7 @@ public final class NpcRegistry
 
     public static final long NPC_STALE_NANOS = 60_000_000_000L;
     public static final long NPC_ORPHAN_RETENTION_NANOS = 180_000_000_000L;
+    public static final long RELEASED_ORPHAN_RETENTION_NANOS = 20_000_000_000L;
     public static final long HANDOVER_DECLINE_NANOS = 3_000_000_000L;
     public static final long NPC_STREAM_FRESH_NANOS = 12_000_000_000L;
     public static final long HANDOVER_SILENCE_NANOS = 1_500_000_000L;
@@ -66,6 +67,9 @@ public final class NpcRegistry
         public volatile long handoverSentNanos;
         public volatile int handoverAttempts;
         public volatile long handoverBlockedUntil;
+        public volatile int releasedByPlayerId;
+        public volatile int releasedLocalGuid;
+        public volatile long releasedAtNanos;
         public final java.util.Map<Integer, Long> declinedUntil = new java.util.concurrent.ConcurrentHashMap<>();
         public volatile boolean killOrderPending;
         public volatile int pendingDamagePermille;
@@ -135,6 +139,7 @@ public final class NpcRegistry
 
     private static final Map<Integer, Npc> npcs = new ConcurrentHashMap<>();
     private static final Map<Long, Integer> ownerGuidToCanonical = new ConcurrentHashMap<>();
+    private static final java.util.Queue<int[]> pendingDrops = new java.util.concurrent.ConcurrentLinkedQueue<>();
     private static final java.util.concurrent.atomic.AtomicInteger nextCanonicalId =
             new java.util.concurrent.atomic.AtomicInteger(1);
 
@@ -271,6 +276,100 @@ public final class NpcRegistry
         return (foreign + mine) < claimed;
     }
 
+    private static Npc adoptOrphan(
+            int ownerPlayerId,
+            int ownerLocalGuid,
+            String typeCode,
+            String appearance,
+            int area,
+            double x,
+            double y,
+            double z,
+            long now)
+    {
+        for (Npc npc : npcs.values())
+        {
+            if (npc.ownerPlayerId != 0 || !npc.alive)
+            {
+                continue;
+            }
+
+            if (!npc.typeCode.equals(typeCode) || !npc.appearance.equals(appearance))
+            {
+                continue;
+            }
+
+            if (!withinReservation(npc, area, x, y, z))
+            {
+                continue;
+            }
+
+            npc.ownerPlayerId = ownerPlayerId;
+            npc.ownerLocalGuid = ownerLocalGuid;
+            npc.handoverTarget = 0;
+            npc.handoverSentNanos = 0L;
+            npc.handoverAttempts = 0;
+            npc.handoverBlockedUntil = 0L;
+            npc.declinedUntil.clear();
+            npc.lastUpdateNanos = now;
+
+            if (npc.releasedByPlayerId != 0 && npc.releasedByPlayerId != ownerPlayerId)
+            {
+                pendingDrops.add(new int[] { npc.releasedByPlayerId, npc.releasedLocalGuid });
+            }
+
+            npc.releasedByPlayerId = 0;
+            npc.releasedLocalGuid = 0;
+
+            ownerGuidToCanonical.put(ownerKey(ownerPlayerId, ownerLocalGuid), npc.npcId);
+
+            WitcherServer.dbg("NPC %s READOPTED | owner=%s spot=%s\n",
+                    describeNpc(npc),
+                    WitcherServer.describePlayerId(ownerPlayerId),
+                    describeSpot(npc));
+
+            return npc;
+        }
+
+        return null;
+    }
+
+    private static void evictOwnStaleDuplicates(
+            int ownerPlayerId,
+            String typeCode,
+            int area,
+            double x,
+            double y,
+            double z,
+            long now)
+    {
+        for (Npc npc : npcs.values())
+        {
+            if (npc.ownerPlayerId != ownerPlayerId || !npc.alive)
+            {
+                continue;
+            }
+
+            if (!npc.typeCode.equals(typeCode) || !withinReservation(npc, area, x, y, z))
+            {
+                continue;
+            }
+
+            if ((now - npc.lastUpdateNanos) < HANDOVER_SILENCE_NANOS)
+            {
+                continue;
+            }
+
+            npcs.remove(npc.npcId);
+            ownerGuidToCanonical.remove(ownerKey(npc.ownerPlayerId, npc.ownerLocalGuid));
+
+            WitcherServer.dbg("NPC %s EVICTED STALE DUPLICATE | owner=%s spot=%s\n",
+                    describeNpc(npc),
+                    WitcherServer.describePlayerId(ownerPlayerId),
+                    describeSpot(npc));
+        }
+    }
+
     public static Npc upsert(
             int ownerPlayerId,
             int ownerLocalGuid,
@@ -297,17 +396,30 @@ public final class NpcRegistry
         Integer canonicalId = ownerGuidToCanonical.get(key);
         Npc npc = (canonicalId == null) ? null : npcs.get(canonicalId);
 
-        if (npc != null && !npc.appearance.equals(appearance))
+        if (npc != null && (!npc.appearance.equals(appearance) || !npc.typeCode.equals(typeCode)))
         {
             npcs.remove(npc.npcId);
             ownerGuidToCanonical.remove(key);
             npc = null;
         }
 
-        final boolean isNew = (npc == null);
+        boolean isNew = (npc == null);
 
         if (isNew)
         {
+            Npc adopted = adoptOrphan(ownerPlayerId, ownerLocalGuid, typeCode, appearance, area, x, y, z, now);
+
+            if (adopted != null)
+            {
+                npc = adopted;
+                isNew = false;
+            }
+        }
+
+        if (isNew)
+        {
+            evictOwnStaleDuplicates(ownerPlayerId, typeCode, area, x, y, z, now);
+
             if (countOwnedBy(ownerPlayerId) >= MAX_NPCS_PER_OWNER)
             {
                 return null;
@@ -484,6 +596,18 @@ public final class NpcRegistry
             {
                 npcs.remove(npc.npcId);
                 ownerGuidToCanonical.remove(ownerKey(npc.ownerPlayerId, npc.ownerLocalGuid));
+                continue;
+            }
+
+            if (npc.ownerPlayerId == 0
+                    && npc.releasedByPlayerId != 0
+                    && (now - npc.releasedAtNanos) > RELEASED_ORPHAN_RETENTION_NANOS)
+            {
+                npcs.remove(npc.npcId);
+
+                WitcherServer.dbg("NPC %s EVICTED (released %.0fs ago, unclaimed)\n",
+                        describeNpc(npc),
+                        (now - npc.releasedAtNanos) / 1_000_000_000.0);
                 continue;
             }
 
@@ -696,6 +820,11 @@ public final class NpcRegistry
                     continue;
                 }
 
+                if (session.playerId == npc.releasedByPlayerId)
+                {
+                    continue;
+                }
+
                 if (session.area != npc.area)
                 {
                     continue;
@@ -757,11 +886,56 @@ public final class NpcRegistry
         npc.declinedUntil.put(playerId, now + HANDOVER_DECLINE_NANOS);
         npc.handoverTarget = 0;
         npc.handoverSentNanos = 0L;
+    }
 
-        if (npc.handoverAttempts > 0)
+    public static boolean ownsGuid(int playerId, int localGuid)
+    {
+        return ownerGuidToCanonical.containsKey(ownerKey(playerId, localGuid));
+    }
+
+    public static int[] pollPendingDrop()
+    {
+        int[] drop;
+
+        while ((drop = pendingDrops.poll()) != null)
         {
-            npc.handoverAttempts--;
+            if (ownsGuid(drop[0], drop[1]))
+            {
+                continue;
+            }
+
+            return drop;
         }
+
+        return null;
+    }
+
+    public static boolean releaseOwned(int playerId, int localGuid, long now)
+    {
+        final long key = ownerKey(playerId, localGuid);
+        Integer canonicalId = ownerGuidToCanonical.get(key);
+        Npc npc = (canonicalId == null) ? null : npcs.get(canonicalId);
+
+        if (npc == null || npc.ownerPlayerId != playerId)
+        {
+            return false;
+        }
+
+        ownerGuidToCanonical.remove(key);
+
+        npc.releasedByPlayerId = playerId;
+        npc.releasedLocalGuid = localGuid;
+        npc.releasedAtNanos = now;
+
+        npc.ownerPlayerId = 0;
+        npc.ownerLocalGuid = 0;
+        npc.handoverTarget = 0;
+        npc.handoverSentNanos = 0L;
+        npc.handoverAttempts = 0;
+        npc.handoverBlockedUntil = 0L;
+        npc.declinedUntil.clear();
+
+        return true;
     }
 
     public static int[] take(int playerId, int canonicalId, int localGuid, long now)
@@ -778,13 +952,21 @@ public final class NpcRegistry
             return null;
         }
 
-        final int previousOwner = npc.ownerPlayerId;
-        final int previousGuid = npc.ownerLocalGuid;
+        int previousOwner = npc.ownerPlayerId;
+        int previousGuid = npc.ownerLocalGuid;
 
         if (previousOwner != 0)
         {
             ownerGuidToCanonical.remove(ownerKey(previousOwner, npc.ownerLocalGuid));
         }
+        else if (npc.releasedByPlayerId != 0 && npc.releasedByPlayerId != playerId)
+        {
+            previousOwner = npc.releasedByPlayerId;
+            previousGuid = npc.releasedLocalGuid;
+        }
+
+        npc.releasedByPlayerId = 0;
+        npc.releasedLocalGuid = 0;
 
         npc.ownerPlayerId = playerId;
         npc.ownerLocalGuid = localGuid;

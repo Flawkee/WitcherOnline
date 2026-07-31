@@ -3916,10 +3916,12 @@ statemachine class r_MultiplayerClient
     private var ghostRebuildWasDead : bool;
     private var ghostRebuildArea    : int;
     private var ghostRebuildAt      : float;
+    private var ghostRebuildPending : bool;
 
     default ghostRebuildWasDead = false;
     default ghostRebuildArea = -999;
     default ghostRebuildAt = 0.0;
+    default ghostRebuildPending = false;
 
     public function updateGhostRebuild()
     {
@@ -3961,7 +3963,12 @@ statemachine class r_MultiplayerClient
 
         ghostRebuildWasDead = dead;
 
-        if(!rebuild || theGame.IsBlackscreen() || theGame.IsFading())
+        if(rebuild)
+        {
+            ghostRebuildPending = true;
+        }
+
+        if(!ghostRebuildPending || theGame.IsBlackscreen() || theGame.IsFading())
         {
             return;
         }
@@ -3971,6 +3978,7 @@ statemachine class r_MultiplayerClient
             return;
         }
 
+        ghostRebuildPending = false;
         ghostRebuildAt = now;
         players = getPlayers();
 
