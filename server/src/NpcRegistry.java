@@ -12,6 +12,9 @@ public final class NpcRegistry
     public static final long NPC_STALE_NANOS = 60_000_000_000L;
     public static final long NPC_ORPHAN_RETENTION_NANOS = 180_000_000_000L;
     public static final long RELEASED_ORPHAN_RETENTION_NANOS = 20_000_000_000L;
+    public static final long LATENCY_MIGRATION_INTERVAL_NANOS = 10_000_000_000L;
+    public static final int LATENCY_MIGRATION_MARGIN_MS = 60;
+    public static final long HANDOVER_RELEASE_GRACE_NANOS = 5_000_000_000L;
     public static final long HANDOVER_DECLINE_NANOS = 3_000_000_000L;
     public static final long NPC_STREAM_FRESH_NANOS = 12_000_000_000L;
     public static final long HANDOVER_SILENCE_NANOS = 1_500_000_000L;
@@ -70,6 +73,7 @@ public final class NpcRegistry
         public volatile int releasedByPlayerId;
         public volatile int releasedLocalGuid;
         public volatile long releasedAtNanos;
+        public volatile long lastMigrationNanos;
         public final java.util.Map<Integer, Long> declinedUntil = new java.util.concurrent.ConcurrentHashMap<>();
         public volatile boolean killOrderPending;
         public volatile int pendingDamagePermille;
@@ -414,6 +418,11 @@ public final class NpcRegistry
                 npc = adopted;
                 isNew = false;
             }
+        }
+
+        if (isNew && ((flags & 1) == 0 || hpPermille <= 0))
+        {
+            return null;
         }
 
         if (isNew)
@@ -786,7 +795,10 @@ public final class NpcRegistry
                 continue;
             }
 
-            if (npc.ownerPlayerId != 0 && (now - npc.lastUpdateNanos) < HANDOVER_SILENCE_NANOS)
+            final boolean ownerHealthy = npc.ownerPlayerId != 0
+                    && (now - npc.lastUpdateNanos) < HANDOVER_SILENCE_NANOS;
+
+            if (ownerHealthy && (now - npc.lastMigrationNanos) < LATENCY_MIGRATION_INTERVAL_NANOS)
             {
                 continue;
             }
@@ -811,7 +823,8 @@ public final class NpcRegistry
             }
 
             PlayerSession best = null;
-            double bestDistance = radiusSquared;
+            int bestLatency = Integer.MAX_VALUE;
+            double bestDistance = Double.MAX_VALUE;
 
             for (PlayerSession session : sessions)
             {
@@ -821,6 +834,16 @@ public final class NpcRegistry
                 }
 
                 if (session.playerId == npc.releasedByPlayerId)
+                {
+                    continue;
+                }
+
+                if (session.paused)
+                {
+                    continue;
+                }
+
+                if ((now - session.lastReleaseNanos) < HANDOVER_RELEASE_GRACE_NANOS)
                 {
                     continue;
                 }
@@ -852,8 +875,15 @@ public final class NpcRegistry
                 double dz = npc.z - session.posZ;
                 double squared = (dx * dx) + (dy * dy) + (dz * dz);
 
-                if (squared <= bestDistance)
+                if (squared > radiusSquared)
                 {
+                    continue;
+                }
+
+                if (session.rttMs < bestLatency
+                        || (session.rttMs == bestLatency && squared < bestDistance))
+                {
+                    bestLatency = session.rttMs;
                     bestDistance = squared;
                     best = session;
                 }
@@ -862,6 +892,34 @@ public final class NpcRegistry
             if (best == null)
             {
                 continue;
+            }
+
+            if (ownerHealthy)
+            {
+                int ownerLatency = PlayerSession.UNKNOWN_RTT_MS;
+
+                for (PlayerSession session : sessions)
+                {
+                    if (session.playerId == npc.ownerPlayerId)
+                    {
+                        ownerLatency = session.rttMs;
+                        break;
+                    }
+                }
+
+                if ((bestLatency + LATENCY_MIGRATION_MARGIN_MS) >= ownerLatency)
+                {
+                    continue;
+                }
+
+                npc.lastMigrationNanos = now;
+
+                WitcherServer.dbg("NPC %s MIGRATE %s (rtt %dms) -> %s (rtt %dms)\n",
+                        describeNpc(npc),
+                        WitcherServer.describePlayerId(npc.ownerPlayerId),
+                        ownerLatency,
+                        WitcherServer.describePlayerId(best.playerId),
+                        bestLatency);
             }
 
             npc.handoverTarget = best.playerId;

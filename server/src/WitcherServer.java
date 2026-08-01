@@ -938,6 +938,13 @@ public class WitcherServer
                 return;
             }
 
+            Integer reportedRtt = fields.size() > 1 ? parseIntegerOrNull(fields.get(1)) : null;
+
+            if (reportedRtt != null && reportedRtt >= 0 && reportedRtt <= 2000)
+            {
+                session.rttMs = reportedRtt;
+            }
+
             List<String> reply = new ArrayList<>();
             reply.add(Long.toString(clientMs));
             reply.add(Long.toString(serverMs()));
@@ -1210,6 +1217,8 @@ public class WitcherServer
                     released++;
                 }
             }
+
+            session.lastReleaseNanos = now;
 
             if (released > 0)
             {

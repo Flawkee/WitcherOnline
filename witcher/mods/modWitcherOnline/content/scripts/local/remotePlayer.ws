@@ -2518,9 +2518,9 @@ statemachine class r_RemotePlayer
             return;
         }
 
-        equipped = inv.IsItemMounted(ids[0]);
+        ent = inv.GetItemEntityUnsafe(ids[0]);
 
-        if (!equipped)
+        if (!ent)
         {
             if(mount)
             {
@@ -2531,13 +2531,13 @@ statemachine class r_RemotePlayer
                 ghost.EquipItem(ids[0]);
             }
 
-            equipped = inv.IsItemMounted(ids[0]);
+            ent = inv.GetItemEntityUnsafe(ids[0]);
         }
 
-        ent = inv.GetItemEntityUnsafe(ids[0]);
         if (ent)
         {
             ent.SetHideInGame(hide);
+            equipped = true;
         }
 
         if (equipped)
@@ -5888,20 +5888,35 @@ statemachine class r_RemotePlayer
         if( heldItem == "steel")
         {
             ids = inv.GetItemsByCategory('steelsword');
-            inv.MountItem( ids[0], true );
+
+            if(ids.Size() > 0)
+            {
+                inv.MountItem( ids[0], true );
+            }
         }
         else if(heldItem == "silver")
         {
             ids = inv.GetItemsByCategory('silversword');
-            inv.MountItem( ids[0], true );
+
+            if(ids.Size() > 0)
+            {
+                inv.MountItem( ids[0], true );
+            }
         }
         else if(heldItem == "none")
         {
             ids = inv.GetItemsByCategory('steelsword');
             ids2 = inv.GetItemsByCategory('silversword');
 
-            ghost.EquipItem(ids[0]);
-            ghost.EquipItem(ids2[0]);
+            if(ids.Size() > 0)
+            {
+                ghost.EquipItem(ids[0]);
+            }
+
+            if(ids2.Size() > 0)
+            {
+                ghost.EquipItem(ids2[0]);
+            }
         }
 
         if(heldSecondaryItem == "torch")

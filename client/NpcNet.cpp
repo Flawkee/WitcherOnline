@@ -135,6 +135,7 @@ namespace w3mp {
 		long long g_clockOffsetMs = 0;
 		bool g_clockReady = false;
 		int g_latencyMs = 0;
+		int g_rttMs = 0;
 		long long g_nextTimeSyncMs = 0;
 		long long g_nextSnapshotMs = 0;
 
@@ -426,7 +427,7 @@ namespace w3mp {
 		{
 			std::vector<std::string> fields;
 			fields.push_back(std::to_string(now));
-			fields.push_back("0");
+			fields.push_back(std::to_string(g_clockReady ? g_rttMs : -1));
 
 			if (g_sender)
 				g_sender("TSYNC", fields);
@@ -723,6 +724,7 @@ namespace w3mp {
 		g_clockReady = false;
 		g_clockOffsetMs = 0;
 		g_latencyMs = 0;
+		g_rttMs = 0;
 	}
 
 	void NpcNet::SetTuning(int interpDelayMs, int snapshotHz)
@@ -756,12 +758,14 @@ namespace w3mp {
 			{
 				g_clockOffsetMs = estimate;
 				g_latencyMs = static_cast<int>(rtt / 2);
+				g_rttMs = static_cast<int>(rtt);
 				g_clockReady = true;
 			}
 			else
 			{
 				g_clockOffsetMs = (g_clockOffsetMs * 7 + estimate) / 8;
 				g_latencyMs = static_cast<int>((g_latencyMs * 7 + rtt / 2) / 8);
+				g_rttMs = static_cast<int>((g_rttMs * 7 + rtt) / 8);
 			}
 
 			return;

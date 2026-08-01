@@ -988,6 +988,11 @@ class r_NpcSync
                 continue;
             }
 
+            if(!npc.IsAlive() || healthPermille(npc) <= 0)
+            {
+                continue;
+            }
+
             pos = npc.GetWorldPosition();
             guid = npc.GetGuidHash();
 
