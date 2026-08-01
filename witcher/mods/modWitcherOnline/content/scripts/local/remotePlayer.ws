@@ -81,6 +81,21 @@ statemachine class r_RemotePlayer
     public var lastParry : float;
     public var lastFinisher : float;
     public var signType : ESignType;
+    public var signCastType : ESignType;
+    public var signAlternate : bool;
+    public var signEndTime : float;
+    public var signEventCode : int;
+    public var signEventSeq : int;
+    public var signSkillLevel : int;
+    public var signDuration : float;
+    public var signCharges : int;
+    private var signEndPrevTime : float;
+    private var signEventPrevSeq : int;
+    private var ghostSignEntity : W3SignEntity;
+
+    default signEndPrevTime = -1.0;
+    default signEventPrevSeq = -1;
+
     public var signVfxEnabled : bool;
     private var lastSignVfxAt : float;
     private var SIGN_VFX_COOLDOWN : float;
@@ -1484,6 +1499,7 @@ statemachine class r_RemotePlayer
         updateHeldItems();
         updateEquippedItems();
         castGhostSign();
+        endGhostSign();
         playEmotes();
         updateMenuStatus();
         updateChat();
@@ -1502,48 +1518,107 @@ statemachine class r_RemotePlayer
 
     private function castGhostSign()
     {
-        var now : float;
-
         if(!ghost)
         {
             return;
         }
 
-        if(signVfxPrevTime < 0.0)
+        if(signEventPrevSeq < 0)
         {
-            signVfxPrevTime = lastSign;
+            signEventPrevSeq = signEventSeq;
             return;
         }
 
-        if(lastSign == signVfxPrevTime)
-        {
-            return;
-        }
-
-        signVfxPrevTime = lastSign;
-
-        if(!signVfxEnabled || signType == ST_None)
+        if(signEventSeq == signEventPrevSeq)
         {
             return;
         }
 
-        now = theGame.GetEngineTimeAsSeconds();
+        signEventPrevSeq = signEventSeq;
 
-        if((now - lastSignVfxAt) < SIGN_VFX_COOLDOWN)
+        if(!signVfxEnabled || signCastType == ST_None)
         {
             return;
         }
 
-        lastSignVfxAt = now;
+        applySignEventBatch();
+    }
 
-        if(wo_spawnGhostSign(ghost, signType))
+    private function applySignEventBatch()
+    {
+        var packed : int;
+        var divisor : int;
+        var code : int;
+        var slot : int;
+
+        packed = signEventCode;
+        divisor = 1;
+
+        for(slot = 0; slot < 10; slot += 1)
         {
-            WO_Note("[ghost_sign] cast player=" + id + " sign=" + (int)signType);
+            code = (packed / divisor) % 8;
+            divisor = divisor * 8;
+
+            if(code == 0)
+            {
+                return;
+            }
+
+            if(code == 1)
+            {
+                wo_endGhostSign(ghostSignEntity);
+
+                ghostSignEntity = wo_spawnGhostSign(ghost, signCastType, signAlternate,
+                    signSkillLevel, signDuration, signCharges);
+
+                if(!ghostSignEntity)
+                {
+                    WO_Note("[ghost_sign] spawn FAILED player=" + id
+                        + " sign=" + (int)signCastType
+                        + " alt=" + signAlternate);
+                    return;
+                }
+
+                WO_Note("[ghost_sign] cast player=" + id
+                    + " sign=" + (int)signCastType
+                    + " alt=" + signAlternate);
+            }
+
+            if(!ghostSignEntity)
+            {
+                return;
+            }
+
+            wo_applyGhostSignEvent(ghostSignEntity, code);
+
+            WO_Note("[ghost_sign] event player=" + id + " code=" + code);
         }
-        else
+    }
+
+    private function endGhostSign()
+    {
+        if(signEndPrevTime < 0.0)
         {
-            WO_Note("[ghost_sign] spawn FAILED player=" + id + " sign=" + (int)signType);
+            signEndPrevTime = signEndTime;
+            return;
         }
+
+        if(signEndTime == signEndPrevTime)
+        {
+            return;
+        }
+
+        signEndPrevTime = signEndTime;
+
+        if(!ghostSignEntity)
+        {
+            return;
+        }
+
+        wo_endGhostSign(ghostSignEntity);
+        ghostSignEntity = NULL;
+
+        WO_Note("[ghost_sign] end player=" + id);
     }
 
     private function prune()

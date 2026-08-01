@@ -103,6 +103,16 @@ statemachine class r_MultiplayerClient
     private var lastRollTime : float;
     private var lastDodgeTime : float;
     private var lastSignTime : float;
+    private var lastSignCastType : ESignType;
+    private var lastSignAlternate : bool;
+    private var lastSignEndTime : float;
+    private var signWatchActive : bool;
+    private var signEventCode : int;
+    private var signEventSeq : int;
+    private var signEventQueue : array<int>;
+    private var signSkillLevel : int;
+    private var signDuration : float;
+    private var signCharges : int;
     private var lastActionTime : float;
     private var lastAction : EPlayerExplorationAction;
 
@@ -3554,6 +3564,114 @@ statemachine class r_MultiplayerClient
         this.lastSignTime = val;
     }
 
+    public function setLastSignCast(signType : ESignType, alternate : bool)
+    {
+        this.lastSignCastType = signType;
+        this.lastSignAlternate = alternate;
+        this.signWatchActive = true;
+    }
+
+    public function noteSignEvent(code : int, signType : ESignType, alternate : bool,
+                                 skillLevel : int, duration : float, charges : int)
+    {
+        this.lastSignCastType = signType;
+        this.lastSignAlternate = alternate;
+        this.signSkillLevel = skillLevel;
+        this.signDuration = duration;
+        this.signCharges = charges;
+        this.signWatchActive = true;
+
+        if(signEventQueue.Size() < 10)
+        {
+            signEventQueue.PushBack(code);
+        }
+    }
+
+    public function flushSignEvents()
+    {
+        var packed : int;
+        var multiplier : int;
+        var i : int;
+
+        if(signEventQueue.Size() == 0)
+        {
+            return;
+        }
+
+        packed = 0;
+        multiplier = 1;
+
+        for(i = 0; i < signEventQueue.Size(); i += 1)
+        {
+            packed += signEventQueue[i] * multiplier;
+            multiplier = multiplier * 8;
+        }
+
+        signEventQueue.Clear();
+        signEventCode = packed;
+        signEventSeq += 1;
+    }
+
+    public function getSignEventCode() : int
+    {
+        return signEventCode;
+    }
+
+    public function getSignEventSeq() : int
+    {
+        return signEventSeq;
+    }
+
+    public function getSignSkillLevel() : int
+    {
+        return signSkillLevel;
+    }
+
+    public function getSignDuration() : float
+    {
+        return signDuration;
+    }
+
+    public function getSignCharges() : int
+    {
+        return signCharges;
+    }
+
+    public function getLastSignCastType() : ESignType
+    {
+        return lastSignCastType;
+    }
+
+    public function getLastSignAlternate() : bool
+    {
+        return lastSignAlternate;
+    }
+
+    public function getLastSignEndTime() : float
+    {
+        return lastSignEndTime;
+    }
+
+    public function updateSignWatch()
+    {
+        var witcher : W3PlayerWitcher;
+
+        if(!signWatchActive)
+        {
+            return;
+        }
+
+        witcher = GetWitcherPlayer();
+
+        if(witcher && witcher.GetCurrentSignEntity())
+        {
+            return;
+        }
+
+        signWatchActive = false;
+        lastSignEndTime = theGame.GetEngineTimeAsSeconds();
+    }
+
     public function setLastActionTime(val : float)
     {
         this.lastActionTime = val;
@@ -4403,7 +4521,10 @@ statemachine class r_MultiplayerClient
                                             channeling : bool, menuName : string, lastActionTime : float, lastAction : EPlayerExplorationAction,
                                             steel : name, silver : name, armor : name, gloves : name, pants : name, boots : name, head : name, hair : name, steelScab : name, silverScab : name, crossbow : name, mask : name,
                                             isRiding : bool, ridingPlayerId : int, outgoingTradeTo : string, outgoingTradeItem : name, outgoingTradePrice : int, outgoingTradeFlag : int, horseAppearance : string,
-                                            morphActive : bool, morphType : name, morphAppearance : name, morphRotation : float) 
+                                            morphActive : bool, morphType : name, morphAppearance : name, morphRotation : float,
+                                            signCastType : ESignType, signAlternate : bool, signEndTime : float,
+                                            signEventCode : int, signEventSeq : int,
+                                            signSkillLevel : int, signDuration : float, signCharges : int)
     {
         var i : int;
         var p : r_RemotePlayer;
@@ -4646,6 +4767,14 @@ statemachine class r_MultiplayerClient
         p.finisherMonster = finisherMonster;
         p.signType = signType;
         p.lastSign = lastSign;
+        p.signCastType = signCastType;
+        p.signAlternate = signAlternate;
+        p.signEndTime = signEndTime;
+        p.signEventCode = signEventCode;
+        p.signEventSeq = signEventSeq;
+        p.signSkillLevel = signSkillLevel;
+        p.signDuration = signDuration;
+        p.signCharges = signCharges;
         p.isSailing = isSailing;
         p.isMounted = isMounted;
         p.horseSpeed = horseSpeed;
@@ -6170,6 +6299,33 @@ function wo_get(playerId : int, username : string)
     {
         list += "0";
     }
+    list += " ";
+
+    theGame.r_getMultiplayerClient().updateSignWatch();
+    theGame.r_getMultiplayerClient().flushSignEvents();
+
+    list += (int)theGame.r_getMultiplayerClient().getLastSignCastType();
+    list += " ";
+
+    list += theGame.r_getMultiplayerClient().getLastSignAlternate();
+    list += " ";
+
+    list += theGame.r_getMultiplayerClient().getLastSignEndTime();
+    list += " ";
+
+    list += theGame.r_getMultiplayerClient().getSignEventCode();
+    list += " ";
+
+    list += theGame.r_getMultiplayerClient().getSignEventSeq();
+    list += " ";
+
+    list += theGame.r_getMultiplayerClient().getSignSkillLevel();
+    list += " ";
+
+    list += theGame.r_getMultiplayerClient().getSignDuration();
+    list += " ";
+
+    list += theGame.r_getMultiplayerClient().getSignCharges();
     list += " ";
 
     WO_Send("wo "+wo_getMovementData()+list);

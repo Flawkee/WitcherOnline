@@ -400,6 +400,7 @@ function OnCastSign( action : SInputAction )
 {
     theGame.r_getMultiplayerClient().setLastSignTime(theGame.GetEngineTimeAsSeconds());
     wrappedMethod(action);
+    wo_noteLocalSignCast();
 }
 
 @wrapMethod(CPlayerInput)
@@ -407,6 +408,143 @@ function AltCastSign(signType : ESignType)
 {
     theGame.r_getMultiplayerClient().setLastSignTime(theGame.GetEngineTimeAsSeconds());
     wrappedMethod(signType);
+    wo_noteLocalSignCast();
+}
+
+@wrapMethod(W3SignEntity)
+function OnProcessSignEvent( eventName : name )
+{
+    var witcher : W3PlayerWitcher;
+    var signType : ESignType;
+    var isLocal : bool;
+    var result : bool;
+
+    witcher = GetWitcherPlayer();
+
+    if(witcher && witcher.GetCurrentSignEntity() == this)
+    {
+        isLocal = true;
+        signType = witcher.GetCurrentlyCastSign();
+    }
+
+    result = wrappedMethod(eventName);
+
+    if(isLocal)
+    {
+        wo_noteLocalSignEvent(this, signType, eventName);
+    }
+
+    return result;
+}
+
+function wo_signEventCode(eventName : name) : int
+{
+    if(eventName == 'cast_begin')          { return 1; }
+    if(eventName == 'cast_throw')          { return 2; }
+    if(eventName == 'cast_end')            { return 3; }
+    if(eventName == 'cast_friendly_begin') { return 4; }
+    if(eventName == 'cast_friendly_throw') { return 5; }
+
+    return 0;
+}
+
+function wo_signSkill(signType : ESignType) : ESkill
+{
+    switch(signType)
+    {
+        case ST_Aard:  return S_Magic_1;
+        case ST_Igni:  return S_Magic_2;
+        case ST_Yrden: return S_Magic_3;
+        case ST_Quen:  return S_Magic_4;
+        case ST_Axii:  return S_Magic_5;
+    }
+
+    return S_Magic_1;
+}
+
+function wo_signDuration(witcher : W3PlayerWitcher, signType : ESignType, skill : ESkill) : float
+{
+    var att : SAbilityAttributeValue;
+
+    if(signType == ST_Quen)
+    {
+        return CalculateAttributeValue(witcher.GetSkillAttributeValue(skill, 'shield_duration', true, true));
+    }
+
+    if(signType == ST_Yrden)
+    {
+        att = witcher.GetSkillAttributeValue(skill, 'trap_duration', false, true);
+        att += witcher.GetTotalSignSpellPower(skill);
+        att.valueMultiplicative -= 1;
+
+        return CalculateAttributeValue(att);
+    }
+
+    return 0.0;
+}
+
+function wo_noteLocalSignEvent(signEnt : W3SignEntity, signType : ESignType, eventName : name)
+{
+    var witcher : W3PlayerWitcher;
+    var skill : ESkill;
+    var duration : float;
+    var charges : int;
+    var code : int;
+
+    code = wo_signEventCode(eventName);
+
+    if(code == 0 || !signEnt || signType == ST_None)
+    {
+        return;
+    }
+
+    witcher = GetWitcherPlayer();
+
+    if(!witcher)
+    {
+        return;
+    }
+
+    skill = wo_signSkill(signType);
+
+    duration = wo_signDuration(witcher, signType, skill);
+
+    if(signType == ST_Yrden)
+    {
+        charges = (int)CalculateAttributeValue(witcher.GetSkillAttributeValue(skill, 'charge_count', false, true));
+    }
+
+    theGame.r_getMultiplayerClient().noteSignEvent(
+        code,
+        signType,
+        signEnt.IsAlternateCast(),
+        witcher.GetSkillLevel(skill),
+        duration,
+        charges);
+}
+
+function wo_noteLocalSignCast()
+{
+    var witcher : W3PlayerWitcher;
+    var signEnt : W3SignEntity;
+
+    witcher = GetWitcherPlayer();
+
+    if(!witcher)
+    {
+        return;
+    }
+
+    signEnt = witcher.GetCurrentSignEntity();
+
+    if(!signEnt)
+    {
+        return;
+    }
+
+    theGame.r_getMultiplayerClient().setLastSignCast(
+        witcher.GetCurrentlyCastSign(),
+        signEnt.IsAlternateCast());
 }
 
 @wrapMethod(CPlayerInput)

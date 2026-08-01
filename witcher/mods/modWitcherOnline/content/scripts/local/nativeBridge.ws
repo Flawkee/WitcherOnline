@@ -111,7 +111,9 @@ function WO_ApplyUpdate1()
         WO_NameAt(50), WO_NameAt(51), WO_NameAt(52), WO_NameAt(53), WO_NameAt(54), WO_NameAt(55),
         WO_NameAt(56), WO_NameAt(57), WO_NameAt(58), WO_NameAt(59), WO_NameAt(60), WO_NameAt(61),
         WO_Bool(62), WO_Int(63), WO_Str(64), WO_NameAt(65), WO_Int(66), WO_Int(67), WO_Str(68),
-        WO_Bool(69), WO_NameAt(70), WO_NameAt(71), WO_Float(72));
+        WO_Bool(69), WO_NameAt(70), WO_NameAt(71), WO_Float(72),
+        (ESignType)WO_Int(73), WO_Bool(74), WO_Float(75), WO_Int(76), WO_Int(77),
+        WO_Int(78), WO_Float(79), WO_Int(80));
 }
 
 function WO_ApplyUpdate2()
