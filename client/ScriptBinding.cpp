@@ -12,6 +12,8 @@
 #include <mutex>
 #include <vector>
 
+extern void ResetInboundDeltaCaches();
+
 namespace w3mp {
 
 	ScriptApi ScriptBinding::api_;
@@ -1210,82 +1212,90 @@ namespace w3mp {
 		return out;
 	}
 
-	static unsigned long long ResolveEntityTemplate(unsigned long long entity)
+	static bool ProbeRedString(unsigned long long object, unsigned long long dataOffset, unsigned long long sizeOffset, std::string& out)
 	{
-		unsigned long long handle = 0;
-		unsigned long long candidate = 0;
+		unsigned long long dataPtr = 0;
+		unsigned long long size = 0;
+		wchar_t buffer[520];
+		std::string text;
 
-		if (ProbeReadPointer(reinterpret_cast<const unsigned char*>(entity) + 0x108, handle) && handle >= 0x10000)
-		{
-			if (ProbeReadPointer(reinterpret_cast<const unsigned char*>(handle) + 0x8, candidate)
-				&& ProbeVtableIs(candidate, kEntityTemplateVtRva))
-				return candidate;
-		}
+		if (object < 0x10000)
+			return false;
 
-		candidate = 0;
+		if (!ProbeReadPointer(reinterpret_cast<const unsigned char*>(object) + dataOffset, dataPtr) || dataPtr < 0x10000)
+			return false;
 
-		if (ProbeReadPointer(reinterpret_cast<const unsigned char*>(entity) + 0x30, candidate)
-			&& ProbeVtableIs(candidate, kEntityTemplateVtRva))
-			return candidate;
+		if (!ProbeReadPointer(reinterpret_cast<const unsigned char*>(object) + sizeOffset, size))
+			return false;
 
-		return 0;
+		size &= 0xFFFFFFFFull;
+
+		if (size < 2 || size > 512)
+			return false;
+
+		if (!ProbeReadWide(reinterpret_cast<const void*>(dataPtr), buffer, 511))
+			return false;
+
+		text = ProbeNarrowWide(buffer);
+
+		if (text.empty() || text.size() + 1 != size)
+			return false;
+
+		out = text;
+		return true;
 	}
 
-	static std::string EntityTemplatePath(unsigned long long entity)
+	static bool EndsWithW2Ent(const std::string& text)
 	{
-		unsigned long long tmpl = 0;
+		const std::string suffix = ".w2ent";
+
+		if (text.size() <= suffix.size())
+			return false;
+
+		return _stricmp(text.c_str() + (text.size() - suffix.size()), suffix.c_str()) == 0;
+	}
+
+	static bool TemplatePathFrom(unsigned long long tmpl, std::string& path)
+	{
 		unsigned long long disk = 0;
-		unsigned long long namePtr = 0;
 		unsigned long long directory = 0;
 		std::vector<std::string> parts;
-		wchar_t buffer[260];
 		std::string leaf;
-		std::string path;
 		int depth;
 
-		if (entity < 0x10000)
-			return std::string();
+		if (tmpl < 0x10000)
+			return false;
 
-		tmpl = ResolveEntityTemplate(entity);
+		if (!ProbeReadPointer(reinterpret_cast<const unsigned char*>(tmpl) + 0x58, disk) || disk < 0x10000)
+			return false;
 
-		if (!tmpl)
-			return std::string();
-
-		if (!ProbeReadPointer(reinterpret_cast<const unsigned char*>(tmpl) + 0x58, disk)
-			|| !ProbeVtableIs(disk, kDiskFileVtRva))
-			return std::string();
-
-		if (!ProbeReadPointer(reinterpret_cast<const unsigned char*>(disk) + 0x18, namePtr)
-			|| !ProbeReadWide(reinterpret_cast<const void*>(namePtr), buffer, 255))
-			return std::string();
-
-		leaf = ProbeNarrowWide(buffer);
-
-		if (leaf.empty())
-			return std::string();
+		if (!ProbeRedString(disk, 0x18, 0x20, leaf) || !EndsWithW2Ent(leaf))
+			return false;
 
 		if (!ProbeReadPointer(reinterpret_cast<const unsigned char*>(disk) + 0x8, directory))
 			directory = 0;
 
-		for (depth = 0; depth < kMaxDepotDepth && ProbeVtableIs(directory, kDirectoryVtRva); ++depth)
+		for (depth = 0; depth < kMaxDepotDepth && directory >= 0x10000; ++depth)
 		{
-			unsigned long long dirName = 0;
+			unsigned long long parent = 0;
 			std::string segment;
 
-			if (!ProbeReadPointer(reinterpret_cast<const unsigned char*>(directory) + 0x30, dirName)
-				|| !ProbeReadWide(reinterpret_cast<const void*>(dirName), buffer, 255))
+			if (!ProbeRedString(directory, 0x30, 0x38, segment))
 				break;
 
-			segment = ProbeNarrowWide(buffer);
-
-			if (segment.empty())
+			if (!ProbeReadPointer(reinterpret_cast<const unsigned char*>(directory) + 0x28, parent)
+				|| parent < 0x10000)
 				break;
 
 			parts.push_back(segment);
 
-			if (!ProbeReadPointer(reinterpret_cast<const unsigned char*>(directory) + 0x28, directory))
-				break;
+			directory = parent;
 		}
+
+		if (!parts.empty() && _stricmp(parts.back().c_str(), "depot") == 0)
+			parts.pop_back();
+
+		path.clear();
 
 		for (size_t i = parts.size(); i > 0; --i)
 		{
@@ -1295,7 +1305,32 @@ namespace w3mp {
 
 		path += leaf;
 
-		return path;
+		return true;
+	}
+
+	static std::string EntityTemplatePath(unsigned long long entity)
+	{
+		unsigned long long handle = 0;
+		unsigned long long candidate = 0;
+		std::string path;
+
+		if (entity < 0x10000)
+			return std::string();
+
+		if (ProbeReadPointer(reinterpret_cast<const unsigned char*>(entity) + 0x108, handle) && handle >= 0x10000)
+		{
+			if (ProbeReadPointer(reinterpret_cast<const unsigned char*>(handle) + 0x8, candidate)
+				&& TemplatePathFrom(candidate, path))
+				return path;
+		}
+
+		candidate = 0;
+
+		if (ProbeReadPointer(reinterpret_cast<const unsigned char*>(entity) + 0x30, candidate)
+			&& TemplatePathFrom(candidate, path))
+			return path;
+
+		return std::string();
 	}
 
 	static void WO_EntityTemplatePath(void* context, void* frame, void* result)
@@ -1326,15 +1361,27 @@ namespace w3mp {
 			if (handle >= 0x10000)
 				ProbeReadPointer(reinterpret_cast<const unsigned char*>(handle) + 0x8, tmpl);
 
+			unsigned long long disk = 0;
+
+			if (tmpl >= 0x10000)
+				ProbeReadPointer(reinterpret_cast<const unsigned char*>(tmpl) + 0x58, disk);
+
 			Diagnostics::Log("ScriptBinding: WO_EntityTemplatePath FAILED - depot layout mismatch"
 				" (game build changed?) entity=" + ProbeHex(entity)
 				+ " entVtRva=" + ProbeHex(entVt >= base ? entVt - base : 0)
 				+ " handle=" + ProbeHex(handle)
 				+ " tmpl=" + ProbeHex(tmpl)
-				+ " expectedTemplateVtRva=" + ProbeHex(kEntityTemplateVtRva));
+				+ " diskFile=" + ProbeHex(disk));
 		}
 
 		WriteStringResult(result, path);
+	}
+
+	static void WO_ResetDeltas(void* context, void* frame, void* result)
+	{
+		AdvanceFrame(frame);
+
+		ResetInboundDeltaCaches();
 	}
 
 	static void WO_SetPaused(void* context, void* frame, void* result)
@@ -2161,6 +2208,7 @@ namespace w3mp {
 		RegisterOne(L"WO_Tick", reinterpret_cast<void*>(&WO_Tick), "WO_Tick");
 		RegisterOne(L"WO_IsPlayerPaused", reinterpret_cast<void*>(&WO_IsPlayerPaused), "WO_IsPlayerPaused");
 		RegisterOne(L"WO_SetPaused", reinterpret_cast<void*>(&WO_SetPaused), "WO_SetPaused");
+		RegisterOne(L"WO_ResetDeltas", reinterpret_cast<void*>(&WO_ResetDeltas), "WO_ResetDeltas");
 		RegisterOne(L"WO_EntityProbe", reinterpret_cast<void*>(&WO_EntityProbe), "WO_EntityProbe");
 		RegisterOne(L"WO_EntityTemplatePath", reinterpret_cast<void*>(&WO_EntityTemplatePath), "WO_EntityTemplatePath");
 		RegisterOne(L"WO_FrameReport", reinterpret_cast<void*>(&WO_FrameReport), "WO_FrameReport");

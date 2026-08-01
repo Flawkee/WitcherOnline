@@ -55,6 +55,13 @@ public class WitcherServer
     private static final double INTEREST_RADIUS = 300.0;
     private static final double INTEREST_RADIUS_SQUARED = INTEREST_RADIUS * INTEREST_RADIUS;
 
+    private static final double PLAYER_VIS_ENTER_RADIUS = 200.0;
+    private static final double PLAYER_VIS_LEAVE_RADIUS = 240.0;
+    private static final double PLAYER_VIS_ENTER_SQUARED = PLAYER_VIS_ENTER_RADIUS * PLAYER_VIS_ENTER_RADIUS;
+    private static final double PLAYER_VIS_LEAVE_SQUARED = PLAYER_VIS_LEAVE_RADIUS * PLAYER_VIS_LEAVE_RADIUS;
+    private static final long PLAYER_VIS_RESEND_NANOS = 1_000_000_000L;
+    private static final int PLAYER_VIS_MAX = 48;
+
     public static final double CELL_SIZE = 128.0;
 
     private static final double NPC_INTEREST_RADIUS = 140.0;
@@ -1561,6 +1568,7 @@ public class WitcherServer
 
                 relayPauseStates(socket, sessions);
                 relayDeaths(socket, sessions);
+                relayVisibility(socket, sessions, now);
                 relayHandovers(socket, sessions, now);
 
                 if (!sessions.isEmpty() && (now - lastHeartbeat) >= NPC_HEARTBEAT_NANOS)
@@ -1865,6 +1873,103 @@ public class WitcherServer
                     NpcRegistry.describeNpc(npc),
                     describePlayerId(npc.ownerPlayerId),
                     NpcRegistry.describeSpot(npc));
+        }
+    }
+
+    private static boolean shouldSeePlayer(PlayerSession viewer, PlayerSession target, boolean alreadyVisible)
+    {
+        if (viewer == target)
+        {
+            return false;
+        }
+
+        if (target.paused && alreadyVisible)
+        {
+            return true;
+        }
+
+        if (!viewer.hasPosition || !target.hasPosition)
+        {
+            return alreadyVisible;
+        }
+
+        if (viewer.area != target.area)
+        {
+            return false;
+        }
+
+        double dx = viewer.posX - target.posX;
+        double dy = viewer.posY - target.posY;
+        double dz = viewer.posZ - target.posZ;
+        double squared = (dx * dx) + (dy * dy) + (dz * dz);
+
+        if (alreadyVisible)
+        {
+            return squared <= PLAYER_VIS_LEAVE_SQUARED;
+        }
+
+        return squared <= PLAYER_VIS_ENTER_SQUARED;
+    }
+
+    private static void relayVisibility(DatagramSocket socket, List<PlayerSession> sessions, long now)
+    {
+        for (PlayerSession viewer : sessions)
+        {
+            Set<Integer> next = new HashSet<>();
+
+            for (PlayerSession target : sessions)
+            {
+                if (next.size() >= PLAYER_VIS_MAX)
+                {
+                    break;
+                }
+
+                if (shouldSeePlayer(viewer, target, viewer.visiblePlayers.contains(target.playerId)))
+                {
+                    next.add(target.playerId);
+                }
+            }
+
+            boolean changed = !next.equals(viewer.visiblePlayers);
+
+            if (changed)
+            {
+                for (Integer entered : next)
+                {
+                    if (!viewer.visiblePlayers.contains(entered))
+                    {
+                        dbg("VIS %s -> sees %s\n", describePlayerId(viewer.playerId), describePlayerId(entered));
+                    }
+                }
+
+                for (Integer left : viewer.visiblePlayers)
+                {
+                    if (!next.contains(left))
+                    {
+                        dbg("VIS %s -> lost %s\n", describePlayerId(viewer.playerId), describePlayerId(left));
+                    }
+                }
+
+                viewer.visiblePlayers.clear();
+                viewer.visiblePlayers.addAll(next);
+            }
+
+            if (!changed && (now - viewer.visibilitySentNanos) < PLAYER_VIS_RESEND_NANOS)
+            {
+                continue;
+            }
+
+            viewer.visibilitySentNanos = now;
+
+            List<String> fields = new ArrayList<>();
+            fields.add(Integer.toString(next.size()));
+
+            for (Integer id : next)
+            {
+                fields.add(Integer.toString(id));
+            }
+
+            sendNpcPacket(socket, viewer, "PVIS", fields);
         }
     }
 
@@ -2288,6 +2393,11 @@ public class WitcherServer
         if (source == target)
         {
             return true;
+        }
+
+        if (!target.visiblePlayers.isEmpty() || target.visibilitySentNanos != 0L)
+        {
+            return target.visiblePlayers.contains(source.playerId);
         }
 
         if (!source.hasPosition || !target.hasPosition)

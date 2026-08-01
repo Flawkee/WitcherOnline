@@ -42,6 +42,9 @@ public class PlayerSession
     public volatile String ownedCellsSignature = "";
     public volatile long ownedCellsSentNanos = 0L;
 
+    public final Set<Integer> visiblePlayers = ConcurrentHashMap.newKeySet();
+    public volatile long visibilitySentNanos = 0L;
+
     public volatile boolean hasPosition = false;
     public volatile double posX = 0.0;
     public volatile double posY = 0.0;

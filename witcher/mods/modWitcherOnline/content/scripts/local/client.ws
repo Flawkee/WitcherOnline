@@ -62,6 +62,11 @@ statemachine class r_MultiplayerClient
     private var globalPlayers : array<r_RemotePlayer>;
     private var playersByServerId : MP_SU_HashMap;
     private var globalPlayersByServerId : MP_SU_HashMap;
+    private var visibleIds : array<int>;
+    private var lastVisibilityAt : float;
+    private var VISIBILITY_TIMEOUT : float;
+    default VISIBILITY_TIMEOUT = 10.0;
+    default lastVisibilityAt = 0.0;
     private var inGame : bool;
     private var spawnTime : float;
     private var execReceived : bool;
@@ -4102,6 +4107,92 @@ statemachine class r_MultiplayerClient
         return globalPlayers;
     }
 
+    public function isVisiblePlayer(serverPlayerId : int) : bool
+    {
+        var i : int;
+
+        for(i = 0; i < visibleIds.Size(); i += 1)
+        {
+            if(visibleIds[i] == serverPlayerId)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    public function visibilityFresh() : bool
+    {
+        var now : float;
+
+        if(lastVisibilityAt <= 0.0)
+        {
+            return false;
+        }
+
+        now = theGame.GetEngineTimeAsSeconds();
+
+        if(now < lastVisibilityAt)
+        {
+            lastVisibilityAt = now;
+            return true;
+        }
+
+        return (now - lastVisibilityAt) <= VISIBILITY_TIMEOUT;
+    }
+
+    public function applyVisibility(ids : array<int>)
+    {
+        var stale : array<int>;
+        var missing : bool;
+        var i : int;
+
+        ensurePlayerHashMaps();
+
+        visibleIds = ids;
+        lastVisibilityAt = theGame.GetEngineTimeAsSeconds();
+
+        for(i = 0; i < players.Size(); i += 1)
+        {
+            if(!players[i] || players[i].serverPlayerId <= 0)
+            {
+                continue;
+            }
+
+            if(!isVisiblePlayer(players[i].serverPlayerId))
+            {
+                stale.PushBack(players[i].serverPlayerId);
+            }
+        }
+
+        for(i = 0; i < stale.Size(); i += 1)
+        {
+            disconnectByServerId(stale[i]);
+        }
+
+        missing = false;
+
+        for(i = 0; i < visibleIds.Size(); i += 1)
+        {
+            if(visibleIds[i] == serverPlayerId)
+            {
+                continue;
+            }
+
+            if(!hm_getRemotePlayer(playersByServerId, visibleIds[i]))
+            {
+                missing = true;
+                break;
+            }
+        }
+
+        if(missing)
+        {
+            WO_ResetDeltas();
+        }
+    }
+
     public function pruneGlobalPlayers(timeout : float)
     {
         var i : int;
@@ -4124,6 +4215,11 @@ statemachine class r_MultiplayerClient
 
             if((now - p.lastUpdate) > timeout)
             {
+                if(p.serverPlayerId > 0 && visibilityFresh() && isVisiblePlayer(p.serverPlayerId))
+                {
+                    continue;
+                }
+
                 if(p.serverPlayerId > 0)
                 {
                     disconnectByServerId(p.serverPlayerId);
@@ -4257,11 +4353,15 @@ statemachine class r_MultiplayerClient
         if(!p || p.id != id || movementSequence <= p.lastMovementSequence)
             return;
 
-        currentArea = theGame.GetCommonMapManager().GetCurrentArea();
-        if(currentArea != area)
+        if(!visibilityFresh())
         {
-            disconnectByServerId(serverPlayerId);
-            return;
+            currentArea = theGame.GetCommonMapManager().GetCurrentArea();
+
+            if(currentArea != area)
+            {
+                disconnectByServerId(serverPlayerId);
+                return;
+            }
         }
 
         p.lastMovementSequence = movementSequence;
@@ -4436,13 +4536,23 @@ statemachine class r_MultiplayerClient
             }
         }
 
-        currentArea = theGame.GetCommonMapManager().GetCurrentArea();
-
-        if(currentArea != gp.area)
+        if(visibilityFresh())
         {
-            disconnectByServerId(serverPlayerId);
-            disconnect(id);
-            return;
+            if(!isVisiblePlayer(serverPlayerId))
+            {
+                return;
+            }
+        }
+        else
+        {
+            currentArea = theGame.GetCommonMapManager().GetCurrentArea();
+
+            if(currentArea != gp.area)
+            {
+                disconnectByServerId(serverPlayerId);
+                disconnect(id);
+                return;
+            }
         }
 
         p = hm_getRemotePlayer(playersByServerId, serverPlayerId);

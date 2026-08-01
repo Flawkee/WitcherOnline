@@ -545,6 +545,14 @@ static std::mutex g_deltaMutex;
 static std::unordered_map<int, std::vector<std::string>> g_lastUpdate1;
 static std::unordered_map<int, std::vector<std::string>> g_lastOther;
 
+void ResetInboundDeltaCaches()
+{
+	std::lock_guard<std::mutex> lock(g_deltaMutex);
+
+	g_lastUpdate1.clear();
+	g_lastOther.clear();
+}
+
 static int ClassifyUpdate1Change(int playerId, const std::vector<std::string>& fields)
 {
 	std::lock_guard<std::mutex> lock(g_deltaMutex);
@@ -754,6 +762,7 @@ static void HandleServerPacket(const std::string& msg)
 	}
 
 	if (!isNpcOpcode
+		&& opcode != "PVIS"
 		&& opcode != "MOVE" && opcode != "UPDATE1A" && opcode != "UPDATE1B" && opcode != "UPDATE2A" && opcode != "UPDATE2B" && opcode != "UPDATE3" && opcode != "UPDATE4")
 		return;
 
@@ -780,6 +789,12 @@ static void HandleServerPacket(const std::string& msg)
 	if (isNpcOpcode)
 	{
 		QueueInbound(InboundOpcode::NpcOwn, playerId, 0, playerUsername, std::move(fields));
+		return;
+	}
+
+	if (opcode == "PVIS")
+	{
+		QueueInbound(InboundOpcode::Visibility, playerId, 0, playerUsername, std::move(fields));
 		return;
 	}
 
