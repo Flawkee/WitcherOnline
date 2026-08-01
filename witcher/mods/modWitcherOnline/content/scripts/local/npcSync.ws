@@ -160,9 +160,9 @@ class r_NpcSync
     default SCAN_RADIUS = 110.0;
     default KEEP_RADIUS = 150.0;
     default TRACK_GRACE = 3.0;
-    default PUSH_INTERVAL = 0.05;
+    default PUSH_INTERVAL = 0.025;
     default SCAN_INTERVAL = 0.25;
-    default DRIVE_INTERVAL = 0.1;
+    default DRIVE_INTERVAL = 0.025;
     default AGGRO_INTERVAL = 0.4;
     default DEBUG_INTERVAL = 2.0;
     default HARD_SNAP = 15.0;
@@ -170,7 +170,7 @@ class r_NpcSync
     default ACTION_FREE_RADIUS = 6.0;
     default ACTION_FREE_WINDOW = 1.5;
     default ACTION_COMMAND_WINDOW = 1.2;
-    default SLIDE_WINDOW = 0.3;
+    default SLIDE_WINDOW = 0.03;
     default HEALTH_TOLERANCE = 0.05;
     default PREDICT_GRACE = 1.5;
     default RESERVATION_RADIUS = 30.0;

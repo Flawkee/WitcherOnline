@@ -60,6 +60,16 @@ public class WitcherServer
     private static final double PLAYER_VIS_ENTER_SQUARED = PLAYER_VIS_ENTER_RADIUS * PLAYER_VIS_ENTER_RADIUS;
     private static final double PLAYER_VIS_LEAVE_SQUARED = PLAYER_VIS_LEAVE_RADIUS * PLAYER_VIS_LEAVE_RADIUS;
     private static final long PLAYER_VIS_RESEND_NANOS = 1_000_000_000L;
+
+    private static final long NPC_LOD_NEAR_NANOS = 25_000_000L;
+    private static final long NPC_LOD_MID_NANOS = 50_000_000L;
+    private static final long NPC_LOD_FAR_NANOS = 250_000_000L;
+    private static final double NPC_LOD_NEAR_SQUARED = 40.0 * 40.0;
+    private static final double NPC_LOD_MID_SQUARED = 55.0 * 55.0;
+    private static final long NPC_VIEW_KEEPALIVE_NANOS = 500_000_000L;
+    private static final double NPC_DELTA_POS_EPSILON = 0.02;
+    private static final double NPC_DELTA_HEADING_EPSILON = 0.5;
+    private static final long NPC_TICK_SLEEP_MS = 25L;
     private static final int PLAYER_VIS_MAX = 48;
 
     public static final double CELL_SIZE = 128.0;
@@ -1560,7 +1570,7 @@ public class WitcherServer
 
                 for (PlayerSession session : sessions)
                 {
-                    relayNpcs(socket, session);
+                    relayNpcs(socket, session, now);
                     relayHits(socket, session);
                     relayKillOrders(socket, session);
                     drainOutbound(socket, session);
@@ -1587,7 +1597,7 @@ public class WitcherServer
                     logTargetSnapshot();
                 }
 
-                Thread.sleep(100);
+                Thread.sleep(NPC_TICK_SLEEP_MS);
             }
             catch (InterruptedException e)
             {
@@ -1677,7 +1687,32 @@ public class WitcherServer
         }
     }
 
-    private static void relayNpcs(DatagramSocket socket, PlayerSession session)
+    private static long npcSendIntervalNanos(PlayerSession session, NpcRegistry.Npc npc)
+    {
+        if (!session.hasPosition)
+        {
+            return NPC_LOD_MID_NANOS;
+        }
+
+        double dx = session.posX - npc.x;
+        double dy = session.posY - npc.y;
+        double dz = session.posZ - npc.z;
+        double squared = (dx * dx) + (dy * dy) + (dz * dz);
+
+        if (squared <= NPC_LOD_NEAR_SQUARED)
+        {
+            return NPC_LOD_NEAR_NANOS;
+        }
+
+        if (squared <= NPC_LOD_MID_SQUARED)
+        {
+            return NPC_LOD_MID_NANOS;
+        }
+
+        return NPC_LOD_FAR_NANOS;
+    }
+
+    private static void relayNpcs(DatagramSocket socket, PlayerSession session, long nowNanos)
     {
         List<NpcRegistry.Npc> visible = NpcRegistry.visibleTo(session, NPC_INTEREST_RADIUS_SQUARED);
         Set<Integer> desired = new HashSet<>();
@@ -1743,14 +1778,99 @@ public class WitcherServer
                 continue;
             }
 
+            PlayerSession.NpcView view = session.npcViews.get(npc.npcId);
+
+            if (view == null)
+            {
+                view = new PlayerSession.NpcView();
+                session.npcViews.put(npc.npcId, view);
+            }
+
+            if ((nowNanos - view.lastSentNanos) < npcSendIntervalNanos(session, npc))
+            {
+                continue;
+            }
+
+            int mask = 0;
+
+            if (!view.valid
+                    || Math.abs(view.x - npc.x) > NPC_DELTA_POS_EPSILON
+                    || Math.abs(view.y - npc.y) > NPC_DELTA_POS_EPSILON
+                    || Math.abs(view.z - npc.z) > NPC_DELTA_POS_EPSILON)
+            {
+                mask |= 1;
+            }
+
+            if (!view.valid || Math.abs(view.heading - npc.heading) > NPC_DELTA_HEADING_EPSILON)
+            {
+                mask |= 2;
+            }
+
+            if (!view.valid || view.hpPermille != npc.hpPermille)
+            {
+                mask |= 4;
+            }
+
+            if (!view.valid || view.flags != npc.flags)
+            {
+                mask |= 8;
+            }
+
+            if (!view.valid || view.targetPlayerId != npc.targetPlayerId)
+            {
+                mask |= 16;
+            }
+
+            if (mask == 0 && (nowNanos - view.lastSentNanos) < NPC_VIEW_KEEPALIVE_NANOS)
+            {
+                continue;
+            }
+
+            if (mask == 0)
+            {
+                mask = 1;
+            }
+
             move.add(Integer.toString(npc.npcId));
-            move.add(formatCoord(npc.x));
-            move.add(formatCoord(npc.y));
-            move.add(formatCoord(npc.z));
-            move.add(formatCoord(npc.heading));
-            move.add(Integer.toString(npc.hpPermille));
-            move.add(Integer.toString(npc.flags));
-            move.add(Integer.toString(npc.targetPlayerId));
+            move.add(Integer.toString(mask));
+
+            if ((mask & 1) != 0)
+            {
+                move.add(formatCoord(npc.x));
+                move.add(formatCoord(npc.y));
+                move.add(formatCoord(npc.z));
+            }
+
+            if ((mask & 2) != 0)
+            {
+                move.add(formatCoord(npc.heading));
+            }
+
+            if ((mask & 4) != 0)
+            {
+                move.add(Integer.toString(npc.hpPermille));
+            }
+
+            if ((mask & 8) != 0)
+            {
+                move.add(Integer.toString(npc.flags));
+            }
+
+            if ((mask & 16) != 0)
+            {
+                move.add(Integer.toString(npc.targetPlayerId));
+            }
+
+            view.x = npc.x;
+            view.y = npc.y;
+            view.z = npc.z;
+            view.heading = npc.heading;
+            view.hpPermille = npc.hpPermille;
+            view.flags = npc.flags;
+            view.targetPlayerId = npc.targetPlayerId;
+            view.lastSentNanos = nowNanos;
+            view.valid = true;
+
             moveCount++;
 
             if (moveCount >= NPC_MOVE_BATCH)
@@ -1773,6 +1893,7 @@ public class WitcherServer
             }
 
             session.knownNpcs.remove(known);
+            session.npcViews.remove(known);
 
             if (removeCount < NPC_REMOVE_BATCH)
             {

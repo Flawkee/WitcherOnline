@@ -15,8 +15,9 @@ namespace w3mp {
 
 	namespace {
 
-		constexpr int kDefaultInterpDelayMs = 120;
-		constexpr int kDefaultSnapshotHz = 20;
+		constexpr int kDefaultInterpDelayMs = 60;
+		constexpr long long kMaxInterpDelayMs = 400;
+		constexpr int kDefaultSnapshotHz = 40;
 		constexpr int kMaxExtrapolationMs = 250;
 		constexpr int kReplicaSampleCap = 24;
 		constexpr int kOwnedHistoryMs = 1500;
@@ -25,6 +26,8 @@ namespace w3mp {
 		constexpr int kUpdPerPacket = 20;
 		constexpr int kDelPerPacket = 40;
 		constexpr int kMaxPacketsPerSend = 8;
+		constexpr int kMaxAddPacketsPerSend = 4;
+		constexpr int kMaxUpdPacketsPerSend = 8;
 		constexpr int kWantPerPacket = 16;
 		constexpr int kWantIntervalMs = 700;
 		constexpr int kSpawnAttemptLimit = 3;
@@ -96,6 +99,7 @@ namespace w3mp {
 			int spawnAttempts = 0;
 			long long wantedAtMs = 0;
 			long long lastPacketMs = 0;
+			long long avgIntervalMs = 0;
 		};
 
 		struct PendingHit
@@ -140,6 +144,8 @@ namespace w3mp {
 		unsigned long long g_statAdds = 0;
 		unsigned long long g_statUpdates = 0;
 		unsigned long long g_statRemovals = 0;
+		unsigned long long g_statAddBudgetHit = 0;
+		unsigned long long g_statUpdBudgetHit = 0;
 		unsigned long long g_statSpawns = 0;
 		unsigned long long g_statDespawns = 0;
 		unsigned long long g_statKills = 0;
@@ -315,18 +321,24 @@ namespace w3mp {
 
 			g_ownedRemoved.clear();
 
+			int addPackets = 0;
+			int updPackets = 0;
+
 			for (auto& pair : g_owned)
 			{
 				OwnedEntity& entity = pair.second;
-
-				if (packets >= kMaxPacketsPerSend)
-					break;
 
 				if (!NeedsUpdate(entity, now))
 					continue;
 
 				if (!entity.registered)
 				{
+					if (addPackets >= kMaxAddPacketsPerSend)
+					{
+						g_statAddBudgetHit++;
+						continue;
+					}
+
 					addFields.push_back(std::to_string(entity.guid));
 					addFields.push_back(std::to_string(entity.area));
 					addFields.push_back(entity.typeCode.empty() ? "-" : entity.typeCode);
@@ -351,9 +363,16 @@ namespace w3mp {
 						Send("NPCADD", addFields);
 						addFields.clear();
 						addCount = 0;
+						addPackets++;
 						packets++;
 					}
 
+					continue;
+				}
+
+				if (updPackets >= kMaxUpdPacketsPerSend)
+				{
+					g_statUpdBudgetHit++;
 					continue;
 				}
 
@@ -376,6 +395,7 @@ namespace w3mp {
 					Send("NPCUPD", updFields);
 					updFields.clear();
 					updCount = 0;
+					updPackets++;
 					packets++;
 				}
 			}
@@ -546,15 +566,43 @@ namespace w3mp {
 		{
 			const long long snapshotMs = ParseLong(fields, 0);
 			const int count = ParseInt(fields, 1);
-			const int stride = isSpawn ? 11 : 8;
 			const long long now = ServerNow();
+			size_t cursor = 2;
 
 			for (int i = 0; i < count; ++i)
 			{
-				const size_t base = 2 + static_cast<size_t>(i) * stride;
+				size_t entrySize = 0;
+				int mask = 0;
 
-				if (base + stride > fields.size())
+				if (isSpawn)
+				{
+					entrySize = 11;
+				}
+				else
+				{
+					if (cursor + 2 > fields.size())
+						break;
+
+					mask = ParseInt(fields, cursor + 1);
+					entrySize = 2;
+
+					if (mask & 1)
+						entrySize += 3;
+					if (mask & 2)
+						entrySize += 1;
+					if (mask & 4)
+						entrySize += 1;
+					if (mask & 8)
+						entrySize += 1;
+					if (mask & 16)
+						entrySize += 1;
+				}
+
+				if (cursor + entrySize > fields.size())
 					break;
+
+				const size_t base = cursor;
+				cursor += entrySize;
 
 				const int canonicalId = ParseInt(fields, base);
 
@@ -582,17 +630,68 @@ namespace w3mp {
 				}
 				else
 				{
-					sample.x = ParseFloat(fields, base + 1);
-					sample.y = ParseFloat(fields, base + 2);
-					sample.z = ParseFloat(fields, base + 3);
-					sample.heading = ParseFloat(fields, base + 4);
-					sample.hpPermille = ParseInt(fields, base + 5);
-					sample.flags = ParseInt(fields, base + 6);
-					sample.targetPlayerId = ParseInt(fields, base + 7);
+					size_t at = base + 2;
+
+					if (!replica.samples.empty())
+					{
+						const TransformSample& previous = replica.samples.back();
+
+						sample.x = previous.x;
+						sample.y = previous.y;
+						sample.z = previous.z;
+						sample.heading = previous.heading;
+						sample.hpPermille = previous.hpPermille;
+						sample.flags = previous.flags;
+						sample.targetPlayerId = previous.targetPlayerId;
+					}
+
+					if (mask & 1)
+					{
+						sample.x = ParseFloat(fields, at);
+						sample.y = ParseFloat(fields, at + 1);
+						sample.z = ParseFloat(fields, at + 2);
+						at += 3;
+					}
+
+					if (mask & 2)
+					{
+						sample.heading = ParseFloat(fields, at);
+						at += 1;
+					}
+
+					if (mask & 4)
+					{
+						sample.hpPermille = ParseInt(fields, at);
+						at += 1;
+					}
+
+					if (mask & 8)
+					{
+						sample.flags = ParseInt(fields, at);
+						at += 1;
+					}
+
+					if (mask & 16)
+					{
+						sample.targetPlayerId = ParseInt(fields, at);
+						at += 1;
+					}
 				}
 
 				if (!replica.samples.empty() && sample.t < replica.samples.back().t)
 					sample.t = replica.samples.back().t;
+
+				if (!replica.samples.empty())
+				{
+					const long long interval = sample.t - replica.samples.back().t;
+
+					if (interval > 0 && interval < 2000)
+					{
+						replica.avgIntervalMs = (replica.avgIntervalMs > 0)
+							? ((replica.avgIntervalMs * 3 + interval) / 4)
+							: interval;
+					}
+				}
 
 				replica.samples.push_back(sample);
 
@@ -1106,7 +1205,6 @@ namespace w3mp {
 		std::vector<int> wanted;
 
 		const long long serverNow = ServerNow();
-		const long long renderTime = serverNow - g_interpDelayMs;
 
 		for (auto it = g_replicas.begin(); it != g_replicas.end();)
 		{
@@ -1149,6 +1247,21 @@ namespace w3mp {
 			command.localGuid = replica.localGuid;
 			command.typeCode = replica.typeCode;
 			command.appearance = replica.appearance;
+
+			long long delayMs = g_interpDelayMs;
+
+			if (replica.avgIntervalMs > 0)
+			{
+				const long long needed = replica.avgIntervalMs * 2 + 15;
+
+				if (needed > delayMs)
+					delayMs = needed;
+			}
+
+			if (delayMs > kMaxInterpDelayMs)
+				delayMs = kMaxInterpDelayMs;
+
+			const long long renderTime = serverNow - delayMs;
 
 			if (!Interpolate(replica, renderTime, command))
 			{
@@ -1465,6 +1578,8 @@ namespace w3mp {
 			+ " snapshots=" + std::to_string(g_statSnapshotsSent)
 			+ " adds=" + std::to_string(g_statAdds)
 			+ " updates=" + std::to_string(g_statUpdates)
+			+ " addBudgetHit=" + std::to_string(g_statAddBudgetHit)
+			+ " updBudgetHit=" + std::to_string(g_statUpdBudgetHit)
 			+ " removals=" + std::to_string(g_statRemovals)
 			+ " spawns=" + std::to_string(g_statSpawns)
 			+ " despawns=" + std::to_string(g_statDespawns)

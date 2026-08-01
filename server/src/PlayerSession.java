@@ -1,5 +1,6 @@
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -41,6 +42,21 @@ public class PlayerSession
     public final java.util.Queue<Object[]> pendingOutbound = new java.util.concurrent.ConcurrentLinkedQueue<>();
     public volatile String ownedCellsSignature = "";
     public volatile long ownedCellsSentNanos = 0L;
+
+    public static final class NpcView
+    {
+        public long lastSentNanos = 0L;
+        public double x = 0.0;
+        public double y = 0.0;
+        public double z = 0.0;
+        public double heading = 0.0;
+        public int hpPermille = Integer.MIN_VALUE;
+        public int flags = Integer.MIN_VALUE;
+        public int targetPlayerId = Integer.MIN_VALUE;
+        public boolean valid = false;
+    }
+
+    public final Map<Integer, NpcView> npcViews = new ConcurrentHashMap<>();
 
     public final Set<Integer> visiblePlayers = ConcurrentHashMap.newKeySet();
     public volatile long visibilitySentNanos = 0L;
