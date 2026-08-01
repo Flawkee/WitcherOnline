@@ -355,8 +355,6 @@ statemachine class r_RemotePlayer
     // party
     public var inParty : bool;
     public var joinedParty : string;
-    public var lastJoinedParty : string;
-    public var lastInParty : bool;
 
     public var weather : name;
     public var day, hour, minute, second : int;

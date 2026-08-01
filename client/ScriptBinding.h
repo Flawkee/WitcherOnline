@@ -19,7 +19,8 @@ namespace w3mp {
 		NpcMove = 9,
 		NpcEnd = 10,
 		NpcHit = 11,
-		Visibility = 12
+		Visibility = 12,
+		PartyState = 13
 	};
 
 	enum class ClientStatus

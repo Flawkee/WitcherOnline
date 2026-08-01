@@ -192,6 +192,7 @@ statemachine class r_MultiplayerClient
     // party
     private var inParty : bool;
     private var joinedParty : string;
+    private var partyId : int;
     private var nextWeatherSyncAt : float;
     default nextWeatherSyncAt = -999;
 
@@ -222,21 +223,13 @@ statemachine class r_MultiplayerClient
     private var lastSelectedDialogAt : float;
     default lastSelectedDialogAt = -999;
 
-    private var joinedPartyAt : float;
-    private var nextPartyFollowTeleportAt : float;
 
-    default joinedPartyAt = -999;
-    default nextPartyFollowTeleportAt = -999;
 
     private var partyTargetMissingSince : float;
     private var partyTargetWasMissing : bool;
-    private var partyTargetLastSeenAt : float;
-    private var partyTargetLastKnownArea : EAreaName;
-    private var partyTargetLastKnownPos : Vector;
 
     default partyTargetMissingSince = -1;
     default partyTargetWasMissing = false;
-    default partyTargetLastSeenAt = -999;
 
     private var leaderDialogReadyText : string;
     private var leaderDialogAllReadyShown : bool;
@@ -495,7 +488,7 @@ statemachine class r_MultiplayerClient
 
         now = theGame.GetEngineTimeAsSeconds();
 
-        if(inParty)
+        if(inParty && joinedParty != username)
         {
             return;
         }
@@ -820,7 +813,7 @@ statemachine class r_MultiplayerClient
         var now : float;
         var text : string;
 
-        if(!inParty)
+        if(!inParty || joinedParty == username)
         {
             return;
         }
@@ -847,11 +840,6 @@ statemachine class r_MultiplayerClient
 
         updatePartyTargetSeen(globalPlayer);
 
-        if(now - globalPlayer.lastUpdate > 90.0)
-        {
-            leavePartyBecauseTargetLeft();
-            return;
-        }
 
         if(checkPartyRegions(globalPlayer))
         {
@@ -1383,115 +1371,187 @@ statemachine class r_MultiplayerClient
         return diff <= maxDiffSeconds;
     }
 
-    private function resolvePartyTarget(playerName : string) : string
-    {
-        var target : r_RemotePlayer;
-
-        if(playerName == "" || playerName == "none")
-        {
-            return playerName;
-        }
-
-        target = getGlobalPlayerByUsername(playerName);
-
-        if(!target)
-        {
-            target = mpghosts_getPlayer(playerName);
-        }
-
-        if(target && target.inParty && target.joinedParty != "" && target.joinedParty != "none")
-        {
-            return target.joinedParty;
-        }
-
-        return playerName;
-    }
-
     public function joinParty(val : string)
     {
-        var finalTarget : string;
-
         if(val == "" || val == "none")
         {
             theGame.GetGuiManager().ShowNotification(GetLocStringById(2111114200));
             return;
         }
 
-        finalTarget = resolvePartyTarget(val);
-
-        if(finalTarget == "" || finalTarget == "none")
-        {
-            theGame.GetGuiManager().ShowNotification(GetLocStringById(2111114200));
-            return;
-        }
-
-        if(finalTarget == username)
+        if(val == username)
         {
             theGame.GetGuiManager().ShowNotification(GetLocStringById(2111114201));
             return;
         }
 
-        if(inParty && joinedParty == finalTarget)
+        if(inParty && joinedParty == val)
         {
-            theGame.GetGuiManager().ShowNotification(GetLocStringById(2111114202) + " " + finalTarget + GetLocStringById(2111114203));
+            theGame.GetGuiManager().ShowNotification(GetLocStringById(2111114202) + " " + val + GetLocStringById(2111114203));
             return;
         }
 
-        inParty = true;
-        joinedParty = finalTarget;
-
-        joinedPartyAt = theGame.GetEngineTimeAsSeconds();
-        partyTargetMissingSince = -1;
-        partyTargetWasMissing = false;
-        nextPartyFollowTeleportAt = -999;
-
-        theGame.GetGuiManager().ShowNotification(GetLocStringById(2111114204) + " " + finalTarget + GetLocStringById(2111114205));
+        WO_PartyJoin(val);
 
         mpghosts_playSound('gui_global_panel_open');
     }
 
     public function leaveParty()
     {
-        var oldParty : string;
-
         if(!inParty)
         {
             GetWitcherPlayer().DisplayHudMessage(GetLocStringById(2111114206));
             return;
         }
 
-        oldParty = joinedParty;
-
-        inParty = false;
-        joinedParty = "";
-
-        theGame.GetGuiManager().ShowNotification(GetLocStringById(2111114207));
+        WO_PartyLeave();
 
         mpghosts_playSound('gui_global_panel_close');
     }
 
-    private function handleMissingPartyTarget() : bool
+    public function applyPartyState(newPartyId : int, memberNames : array<string>)
     {
-        var now : float;
-        var missingFor : float;
-        var maxMissingTime : float;
+        var leaderName : string;
+        var wasInParty : bool;
+        var i : int;
+        var j : int;
 
-        now = theGame.GetEngineTimeAsSeconds();
+        wasInParty = inParty;
 
-        maxMissingTime = 90.0;
-
-        if(partyTargetMissingSince < 0)
+        for(i = 0; i < globalPlayers.Size(); i += 1)
         {
-            partyTargetMissingSince = now;
-            partyTargetWasMissing = true;
+            if(globalPlayers[i])
+            {
+                globalPlayers[i].inParty = false;
+                globalPlayers[i].joinedParty = "";
+            }
         }
 
-        missingFor = now - partyTargetMissingSince;
-
-        if(missingFor >= maxMissingTime)
+        for(i = 0; i < players.Size(); i += 1)
         {
-            leavePartyBecauseTargetLeft();
-            return false;
+            if(players[i])
+            {
+                players[i].inParty = false;
+                players[i].joinedParty = "";
+            }
+        }
+
+        if(newPartyId <= 0 || memberNames.Size() < 2)
+        {
+            partyId = 0;
+            seenPartyPlayers.Clear();
+
+            if(wasInParty)
+            {
+                inParty = false;
+                joinedParty = "";
+                partyTargetMissingSince = -1;
+                partyTargetWasMissing = false;
+
+                cancelPendingSyncedDialogChoice();
+
+                theGame.GetGuiManager().ShowNotification(GetLocStringById(2111114207));
+            }
+
+            return;
+        }
+
+        leaderName = memberNames[0];
+
+        if(partyId != newPartyId)
+        {
+            partyTargetMissingSince = -1;
+            partyTargetWasMissing = false;
+
+            theGame.GetGuiManager().ShowNotification(GetLocStringById(2111114204) + " " + leaderName + GetLocStringById(2111114205));
+        }
+
+        partyId = newPartyId;
+        inParty = true;
+        joinedParty = leaderName;
+
+        for(i = seenPartyPlayers.Size() - 1; i >= 0; i -= 1)
+        {
+            if(!memberNames.Contains(seenPartyPlayers[i]))
+            {
+                theGame.GetGuiManager().ShowNotification(seenPartyPlayers[i] + " " + GetLocStringById(2111114199));
+                mpghosts_playSound('gui_global_panel_close');
+                seenPartyPlayers.Erase(i);
+            }
+        }
+
+        for(i = 0; i < memberNames.Size(); i += 1)
+        {
+            if(memberNames[i] == username)
+            {
+                continue;
+            }
+
+            if(!seenPartyPlayers.Contains(memberNames[i]))
+            {
+                theGame.GetGuiManager().ShowNotification(memberNames[i] + " " + GetLocStringById(2111114198));
+                mpghosts_playSound('gui_global_panel_open');
+                seenPartyPlayers.PushBack(memberNames[i]);
+            }
+
+            for(j = 0; j < globalPlayers.Size(); j += 1)
+            {
+                if(globalPlayers[j] && globalPlayers[j].username == memberNames[i])
+                {
+                    globalPlayers[j].inParty = true;
+                    globalPlayers[j].joinedParty = leaderName;
+                    break;
+                }
+            }
+
+            for(j = 0; j < players.Size(); j += 1)
+            {
+                if(players[j] && players[j].username == memberNames[i])
+                {
+                    players[j].inParty = true;
+                    players[j].joinedParty = leaderName;
+                    break;
+                }
+            }
+        }
+    }
+
+    public function getPartyId() : int
+    {
+        return partyId;
+    }
+
+    public function isPartyLeader() : bool
+    {
+        return inParty && joinedParty == username;
+    }
+
+    public function isPartyLeaderName(playerName : string) : bool
+    {
+        return inParty && playerName != "" && joinedParty == playerName;
+    }
+
+    public function partyDisplayName(member : r_RemotePlayer) : string
+    {
+        if(!member)
+        {
+            return "";
+        }
+
+        if(isPartyLeaderName(member.username))
+        {
+            return "[LEADER] " + member.username;
+        }
+
+        return member.username;
+    }
+
+    private function handleMissingPartyTarget() : bool
+    {
+        if(partyTargetMissingSince < 0)
+        {
+            partyTargetMissingSince = theGame.GetEngineTimeAsSeconds();
+            partyTargetWasMissing = true;
         }
 
         return true;
@@ -1507,9 +1567,6 @@ statemachine class r_MultiplayerClient
         partyTargetWasMissing = false;
         partyTargetMissingSince = -1;
 
-        partyTargetLastSeenAt = theGame.GetEngineTimeAsSeconds();
-        partyTargetLastKnownArea = globalPlayer.area;
-        partyTargetLastKnownPos = globalPlayer.pos;
     }
 
     private function checkPartyRegions(globalPlayer : r_RemotePlayer) : bool
@@ -1537,29 +1594,6 @@ statemachine class r_MultiplayerClient
         }
 
         return true;
-    }
-
-    private function leavePartyBecauseTargetLeft()
-    {
-        var oldParty : string;
-
-        if(!inParty)
-        {
-            return;
-        }
-
-        oldParty = joinedParty;
-
-        inParty = false;
-        joinedParty = "";
-        joinedPartyAt = -999;
-        nextPartyFollowTeleportAt = -999;
-
-        cancelPendingSyncedDialogChoice();
-
-        theGame.GetGuiManager().ShowNotification(GetLocStringById(2111114207));
-
-        mpghosts_playSound('gui_global_panel_close');
     }
 
     private function getGlobalPlayerByUsername(user : string) : r_RemotePlayer
@@ -2687,7 +2721,7 @@ statemachine class r_MultiplayerClient
         
         inventory = new CInventoryComponent in theGame;
         
-        if(inParty)
+        if(inParty && player.inParty && player.joinedParty == joinedParty)
         {
             inventory.AddAnItem('wo_leaveParty', 1);
         }
@@ -2727,8 +2761,8 @@ statemachine class r_MultiplayerClient
     {
         inParty = false;
         joinedParty = "";
-        joinedPartyAt = -999;
-        nextPartyFollowTeleportAt = -999;
+        partyId = 0;
+        seenPartyPlayers.Clear();
 
         lightAttackAnims.Clear();
         heavyAttackAnims.Clear();
@@ -3382,11 +3416,6 @@ statemachine class r_MultiplayerClient
         return joinedParty;
     }
     
-    public function setInParty(val : bool)
-    {
-        inParty = val;
-    }
-
     public function getInParty() : bool
     {
         return inParty;
@@ -4645,8 +4674,6 @@ statemachine class r_MultiplayerClient
 
             gp.inParty = false;
             gp.joinedParty = "";
-            gp.lastInParty = false;
-            gp.lastJoinedParty = "";
 
             globalPlayers.PushBack(gp);
             hm_insertRemotePlayer(globalPlayersByServerId, serverPlayerId, gp);
@@ -4722,8 +4749,6 @@ statemachine class r_MultiplayerClient
 
             p.inParty = false;
             p.joinedParty = "";
-            p.lastInParty = false;
-            p.lastJoinedParty = "";
 
             players.PushBack(p);
             hm_insertRemotePlayer(playersByServerId, serverPlayerId, p);
@@ -5011,37 +5036,6 @@ statemachine class r_MultiplayerClient
 
         gp.lastUpdate = now;
 
-        if(gp.inParty != inParty || gp.joinedParty != joinedParty)
-        {
-            if(inParty && joinedParty == username && (!gp.lastInParty || gp.lastJoinedParty != username))
-            {
-                if(!seenPartyPlayers.Contains(gp.username))
-                {
-                    theGame.GetGuiManager().ShowNotification(gp.username + " " + GetLocStringById(2111114198));
-                    mpghosts_playSound('gui_global_panel_open');
-                    seenPartyPlayers.PushBack(gp.username);
-                }
-            }
-            else if(gp.lastInParty && gp.lastJoinedParty == username && (!inParty || joinedParty != username))
-            {
-                theGame.GetGuiManager().ShowNotification(gp.username + " " + GetLocStringById(2111114199));
-                mpghosts_playSound('gui_global_panel_close');
-
-                for(j = 0; j < seenPartyPlayers.Size(); j+=1)
-                {
-                    if(seenPartyPlayers[j] == gp.username)
-                    {
-                        seenPartyPlayers.Erase(j);
-                        break;
-                    }
-                }
-            }
-        }
-
-        gp.inParty = inParty;
-        gp.joinedParty = joinedParty;
-        gp.lastInParty = inParty;
-        gp.lastJoinedParty = joinedParty;
         gp.health = health;
 
         p = hm_getRemotePlayer(playersByServerId, serverPlayerId);
@@ -5053,10 +5047,6 @@ statemachine class r_MultiplayerClient
 
         p.lastUpdate = now;
 
-        p.inParty = inParty;
-        p.joinedParty = joinedParty;
-        p.lastInParty = inParty;
-        p.lastJoinedParty = joinedParty;
         p.weather = weather;
         p.day = day;
         p.hour = hour;

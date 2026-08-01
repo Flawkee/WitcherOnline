@@ -545,6 +545,18 @@ static std::mutex g_deltaMutex;
 static std::unordered_map<int, std::vector<std::string>> g_lastUpdate1;
 static std::unordered_map<int, std::vector<std::string>> g_lastOther;
 
+void SendPartyRequest(const char* opcode, const std::string& argument)
+{
+	std::vector<std::string> fields;
+
+	if (!argument.empty())
+		fields.push_back(argument);
+	else
+		fields.push_back("-");
+
+	SendUdpPacket(BuildPacket(opcode, BuildLocalPacketId(), fields), opcode);
+}
+
 void ResetInboundDeltaCaches()
 {
 	std::lock_guard<std::mutex> lock(g_deltaMutex);
@@ -763,6 +775,7 @@ static void HandleServerPacket(const std::string& msg)
 
 	if (!isNpcOpcode
 		&& opcode != "PVIS"
+		&& opcode != "PARTY"
 		&& opcode != "MOVE" && opcode != "UPDATE1A" && opcode != "UPDATE1B" && opcode != "UPDATE2A" && opcode != "UPDATE2B" && opcode != "UPDATE3" && opcode != "UPDATE4")
 		return;
 
@@ -795,6 +808,12 @@ static void HandleServerPacket(const std::string& msg)
 	if (opcode == "PVIS")
 	{
 		QueueInbound(InboundOpcode::Visibility, playerId, 0, playerUsername, std::move(fields));
+		return;
+	}
+
+	if (opcode == "PARTY")
+	{
+		QueueInbound(InboundOpcode::PartyState, playerId, 0, playerUsername, std::move(fields));
 		return;
 	}
 

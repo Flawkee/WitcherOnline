@@ -19,6 +19,8 @@ import function WO_Tick() : int;
 import function WO_IsPlayerPaused(playerId : int) : bool;
 import function WO_SetPaused(paused : bool);
 import function WO_ResetDeltas();
+import function WO_PartyJoin(target : string);
+import function WO_PartyLeave();
 import function WO_EntityProbe(target : CEntity) : string;
 import function WO_EntityTemplatePath(target : CEntity) : string;
 import function WO_NpcBeginOwned();
@@ -213,6 +215,10 @@ function WO_PumpInbound(maxMessages : int)
                 WO_ApplyVisibility();
                 break;
 
+            case 13:
+                WO_ApplyParty();
+                break;
+
 
 
             default:
@@ -241,6 +247,29 @@ function WO_ApplyVisibility()
     }
 
     theGame.r_getMultiplayerClient().applyVisibility(ids);
+}
+
+function WO_ApplyParty()
+{
+    var names : array<string>;
+    var partyId : int;
+    var count : int;
+    var i : int;
+
+    partyId = WO_Int(0);
+    count = WO_Int(1);
+
+    for(i = 0; i < count; i += 1)
+    {
+        if((2 + (i * 2) + 1) >= WO_FieldCount())
+        {
+            break;
+        }
+
+        names.PushBack(WO_Str(2 + (i * 2) + 1));
+    }
+
+    theGame.r_getMultiplayerClient().applyPartyState(partyId, names);
 }
 
 function WO_PumpStatus()

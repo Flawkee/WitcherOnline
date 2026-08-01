@@ -13,6 +13,7 @@
 #include <vector>
 
 extern void ResetInboundDeltaCaches();
+extern void SendPartyRequest(const char* opcode, const std::string& argument);
 
 namespace w3mp {
 
@@ -1384,6 +1385,24 @@ namespace w3mp {
 		ResetInboundDeltaCaches();
 	}
 
+	static void WO_PartyJoin(void* context, void* frame, void* result)
+	{
+		RedString text;
+		const int size = ReadStringParameter(frame, text);
+
+		AdvanceFrame(frame);
+
+		if (size > 0)
+			SendPartyRequest("PJOIN", NarrowPayload(text));
+	}
+
+	static void WO_PartyLeave(void* context, void* frame, void* result)
+	{
+		AdvanceFrame(frame);
+
+		SendPartyRequest("PLEAVE", std::string());
+	}
+
 	static void WO_SetPaused(void* context, void* frame, void* result)
 	{
 		const bool paused = ReadBoolParameter(frame);
@@ -2209,6 +2228,8 @@ namespace w3mp {
 		RegisterOne(L"WO_IsPlayerPaused", reinterpret_cast<void*>(&WO_IsPlayerPaused), "WO_IsPlayerPaused");
 		RegisterOne(L"WO_SetPaused", reinterpret_cast<void*>(&WO_SetPaused), "WO_SetPaused");
 		RegisterOne(L"WO_ResetDeltas", reinterpret_cast<void*>(&WO_ResetDeltas), "WO_ResetDeltas");
+		RegisterOne(L"WO_PartyJoin", reinterpret_cast<void*>(&WO_PartyJoin), "WO_PartyJoin");
+		RegisterOne(L"WO_PartyLeave", reinterpret_cast<void*>(&WO_PartyLeave), "WO_PartyLeave");
 		RegisterOne(L"WO_EntityProbe", reinterpret_cast<void*>(&WO_EntityProbe), "WO_EntityProbe");
 		RegisterOne(L"WO_EntityTemplatePath", reinterpret_cast<void*>(&WO_EntityTemplatePath), "WO_EntityTemplatePath");
 		RegisterOne(L"WO_FrameReport", reinterpret_cast<void*>(&WO_FrameReport), "WO_FrameReport");

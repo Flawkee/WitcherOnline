@@ -61,6 +61,7 @@ public class PlayerSession
     public final Set<Integer> visiblePlayers = ConcurrentHashMap.newKeySet();
     public volatile long visibilitySentNanos = 0L;
 
+    public volatile int partyId = 0;
     public volatile int rttMs = UNKNOWN_RTT_MS;
     public volatile long lastReleaseNanos = 0L;
 

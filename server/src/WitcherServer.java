@@ -38,6 +38,13 @@ public class WitcherServer
     private static final Set<String> whitelistedIps = ConcurrentHashMap.newKeySet();
     private static final Map<String, UsernameReservation> reservedUsernames = new ConcurrentHashMap<>();
 
+    private static final Map<Integer, Party> parties = new ConcurrentHashMap<>();
+    private static final Map<String, Integer> playerParty = new ConcurrentHashMap<>();
+    private static final java.util.concurrent.atomic.AtomicInteger nextPartyId =
+            new java.util.concurrent.atomic.AtomicInteger(1);
+    private static final long PARTY_RESEND_NANOS = 2_000_000_000L;
+    private static long lastPartyResendNanos = 0L;
+
     private static final AtomicBoolean running = new AtomicBoolean(true);
     private static final AtomicBoolean whitelistEnabled = new AtomicBoolean(false);
 
@@ -615,6 +622,8 @@ public class WitcherServer
                 || "NPCTAKE".equals(opcode)
                 || "NPCNOPE".equals(opcode)
                 || "NPCFREE".equals(opcode)
+                || "PJOIN".equals(opcode)
+                || "PLEAVE".equals(opcode)
                 || "PSTATE".equals(opcode)
                 || "NPCWANT".equals(opcode)
                 || "TSYNC".equals(opcode);
@@ -1185,6 +1194,22 @@ public class WitcherServer
             return;
         }
 
+        if ("PJOIN".equals(opcode))
+        {
+            if (!fields.isEmpty())
+            {
+                partyJoin(session, fields.get(0));
+            }
+
+            return;
+        }
+
+        if ("PLEAVE".equals(opcode))
+        {
+            partyRemoveMember(normalizeUsernameKey(session.username), "requested");
+            return;
+        }
+
         if ("NPCFREE".equals(opcode))
         {
             Integer count = parseIntegerOrNull(fields.get(0));
@@ -1589,6 +1614,7 @@ public class WitcherServer
                 relayDeaths(socket, sessions, now);
                 relayVisibility(socket, sessions, now);
                 relayHandovers(socket, sessions, now);
+                relayPartyHeartbeat(now);
 
                 if (!sessions.isEmpty() && (now - lastHeartbeat) >= NPC_HEARTBEAT_NANOS)
                 {
@@ -1719,6 +1745,201 @@ public class WitcherServer
         }
 
         return NPC_LOD_FAR_NANOS;
+    }
+
+    private static Party partyOf(String usernameKey)
+    {
+        Integer id = playerParty.get(usernameKey);
+
+        return (id == null) ? null : parties.get(id);
+    }
+
+    private static void sendPartyState(PlayerSession session, Party party)
+    {
+        List<String> fields = new ArrayList<>();
+
+        if (party == null || party.size() < 2)
+        {
+            fields.add("0");
+            fields.add("0");
+            queueOutbound(session, "PARTY", fields);
+            return;
+        }
+
+        List<String> members = party.snapshot();
+
+        fields.add(Integer.toString(party.partyId));
+        fields.add(Integer.toString(members.size()));
+
+        for (String memberKey : members)
+        {
+            PlayerSession member = players.get(memberKey);
+
+            fields.add(member == null ? "0" : Integer.toString(member.playerId));
+            fields.add(member == null ? memberKey : member.username);
+        }
+
+        queueOutbound(session, "PARTY", fields);
+    }
+
+    private static void broadcastParty(Party party)
+    {
+        if (party == null)
+        {
+            return;
+        }
+
+        for (String memberKey : party.snapshot())
+        {
+            PlayerSession member = players.get(memberKey);
+
+            if (member != null)
+            {
+                sendPartyState(member, party);
+            }
+        }
+    }
+
+    private static void disbandParty(Party party)
+    {
+        if (party == null)
+        {
+            return;
+        }
+
+        for (String memberKey : party.snapshot())
+        {
+            playerParty.remove(memberKey);
+
+            PlayerSession member = players.get(memberKey);
+
+            if (member != null)
+            {
+                member.partyId = 0;
+                sendPartyState(member, null);
+            }
+        }
+
+        parties.remove(party.partyId);
+
+        dbg("PARTY #%d disbanded\n", party.partyId);
+    }
+
+    private static void partyRemoveMember(String usernameKey, String reason)
+    {
+        Party party = partyOf(usernameKey);
+
+        if (party == null)
+        {
+            return;
+        }
+
+        final String previousLeader = party.leader();
+
+        party.remove(usernameKey);
+        playerParty.remove(usernameKey);
+
+        PlayerSession leaver = players.get(usernameKey);
+
+        if (leaver != null)
+        {
+            leaver.partyId = 0;
+            sendPartyState(leaver, null);
+        }
+
+        dbg("PARTY #%d %s left (%s)\n", party.partyId, usernameKey, reason);
+
+        if (party.size() < 2)
+        {
+            disbandParty(party);
+            return;
+        }
+
+        if (!usernameKey.equals(previousLeader))
+        {
+            broadcastParty(party);
+            return;
+        }
+
+        dbg("PARTY #%d leader %s left, promoted %s\n", party.partyId, previousLeader, party.leader());
+
+        broadcastParty(party);
+    }
+
+    private static void partyJoin(PlayerSession actor, String targetName)
+    {
+        String actorKey = normalizeUsernameKey(actor.username);
+        String targetKey = normalizeUsernameKey(targetName);
+
+        if (targetKey.isEmpty() || targetKey.equals(actorKey))
+        {
+            return;
+        }
+
+        PlayerSession target = players.get(targetKey);
+
+        if (target == null)
+        {
+            return;
+        }
+
+        Party targetParty = partyOf(targetKey);
+        Party actorParty = partyOf(actorKey);
+
+        if (targetParty != null && actorParty != null && targetParty.partyId == actorParty.partyId)
+        {
+            return;
+        }
+
+        if (targetParty != null && targetParty.size() >= Party.MAX_MEMBERS)
+        {
+            dbg("PARTY #%d full, rejected %s\n", targetParty.partyId, actorKey);
+            return;
+        }
+
+        if (actorParty != null)
+        {
+            partyRemoveMember(actorKey, "switching party");
+        }
+
+        if (targetParty == null)
+        {
+            targetParty = new Party(nextPartyId.getAndIncrement());
+            targetParty.add(targetKey);
+            parties.put(targetParty.partyId, targetParty);
+            playerParty.put(targetKey, targetParty.partyId);
+            target.partyId = targetParty.partyId;
+
+            dbg("PARTY #%d created, leader %s\n", targetParty.partyId, targetKey);
+        }
+
+        if (!targetParty.add(actorKey))
+        {
+            return;
+        }
+
+        playerParty.put(actorKey, targetParty.partyId);
+        actor.partyId = targetParty.partyId;
+
+        dbg("PARTY #%d %s joined (leader %s, size %d)\n",
+                targetParty.partyId, actorKey, targetParty.leader(), targetParty.size());
+
+        broadcastParty(targetParty);
+    }
+
+    private static void relayPartyHeartbeat(long now)
+    {
+        if ((now - lastPartyResendNanos) < PARTY_RESEND_NANOS)
+        {
+            return;
+        }
+
+        lastPartyResendNanos = now;
+
+        for (Party party : parties.values())
+        {
+            broadcastParty(party);
+        }
     }
 
     private static void relayNpcs(DatagramSocket socket, PlayerSession session, long nowNanos)
@@ -2414,6 +2635,8 @@ public class WitcherServer
                             dbg("Released reserved username %s for IP %s\n",
                                     reservation.username,
                                     reservation.ip);
+
+                            partyRemoveMember(entry.getKey(), "username released");
                         }
                     }
                 }
