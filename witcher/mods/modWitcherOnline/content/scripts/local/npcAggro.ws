@@ -382,8 +382,38 @@ class r_NpcAggro
         var currentScore : float;
         var bestId       : int;
         var i            : int;
+        var engineTarget : CActor;
+        var engineId     : int;
 
         decayThreat(record, dt);
+
+        engineTarget = npc.GetTarget();
+
+        if(engineTarget)
+        {
+            engineId = theGame.r_getMultiplayerClient().encodeTargetPlayerId(engineTarget);
+
+            if(engineId > 0 && !containsId(ids, engineId))
+            {
+                if(debugLogging)
+                {
+                    WO_Note("[npc_aggro] release npc=" + record.npcId
+                        + " target=" + engineId
+                        + " reason=out_of_scope");
+                }
+
+                clearThreat(record, engineId);
+
+                if(record.forcedTargetId == engineId)
+                {
+                    releaseTarget(record, npc);
+                }
+                else
+                {
+                    wo_releaseNpcTarget(npc);
+                }
+            }
+        }
 
         if(record.forcedTargetId != 0 && !containsId(ids, record.forcedTargetId))
         {
@@ -539,6 +569,11 @@ class r_NpcAggro
             }
 
             if((now - players[i].lastUpdate) > PAUSED_GRACE)
+            {
+                continue;
+            }
+
+            if(!client.sharesNpcScope(players[i].serverPlayerId))
             {
                 continue;
             }

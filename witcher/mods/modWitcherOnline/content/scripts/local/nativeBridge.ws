@@ -68,6 +68,7 @@ import function WO_NpcAcksDone();
 import function WO_NpcReport() : string;
 import function WO_NpcLatency() : int;
 import function WO_NpcTune(interpDelayMs : int, snapshotHz : int);
+import function WO_NpcSyncMode(mode : int);
 
 function WO_ApplyMovement()
 {
@@ -231,22 +232,31 @@ function WO_PumpInbound(maxMessages : int)
 function WO_ApplyVisibility()
 {
     var ids : array<int>;
+    var scopeIds : array<int>;
     var count : int;
+    var base : int;
     var i : int;
 
     count = WO_Int(0);
 
     for(i = 0; i < count; i += 1)
     {
-        if(i + 1 >= WO_FieldCount())
+        base = 1 + (i * 2);
+
+        if(base + 1 >= WO_FieldCount())
         {
             break;
         }
 
-        ids.PushBack(WO_Int(i + 1));
+        ids.PushBack(WO_Int(base));
+
+        if(WO_Int(base + 1) == 1)
+        {
+            scopeIds.PushBack(WO_Int(base));
+        }
     }
 
-    theGame.r_getMultiplayerClient().applyVisibility(ids);
+    theGame.r_getMultiplayerClient().applyVisibility(ids, scopeIds);
 }
 
 function WO_ApplyParty()

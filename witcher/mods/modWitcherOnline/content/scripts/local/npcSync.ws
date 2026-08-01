@@ -118,6 +118,11 @@ class r_NpcSync
     private var reportedAway : bool;
 
     default reportedAway = false;
+
+    private var reportedSyncMode : int;
+    default reportedSyncMode = -1;
+
+    private var reportedScope : string;
     default actionLogging = false;
     default actionForceMode = 1;
 
@@ -576,6 +581,8 @@ class r_NpcSync
         }
 
         now = theGame.GetEngineTimeAsSeconds();
+
+        updateSyncMode();
 
         if(updateSuspension(now))
         {
@@ -1158,6 +1165,50 @@ class r_NpcSync
         statLocalDamage += 1;
     }
 
+    private function syncScopeLabel() : string
+    {
+        var client : r_MultiplayerClient;
+
+        client = theGame.r_getMultiplayerClient();
+
+        if(client.getPartyId() != 0)
+        {
+            return "party#" + client.getPartyId();
+        }
+
+        if(client.getNpcSyncMode() == 0)
+        {
+            return "world";
+        }
+
+        return "standalone";
+    }
+
+    private function updateSyncMode()
+    {
+        var mode : int;
+        var scope : string;
+
+        mode = theGame.r_getMultiplayerClient().getNpcSyncMode();
+        scope = syncScopeLabel();
+
+        if(mode == reportedSyncMode && scope == reportedScope)
+        {
+            return;
+        }
+
+        if(mode != reportedSyncMode)
+        {
+            WO_NpcSyncMode(mode);
+        }
+
+        reportedSyncMode = mode;
+        reportedScope = scope;
+
+        WO_Note("[npc_sync] config=" + (mode == 0 ? "world" : "party")
+            + " scope=" + scope);
+    }
+
     private function pushOwned(now : float)
     {
         var npc : CNewNPC;
@@ -1171,6 +1222,13 @@ class r_NpcSync
         area = currentArea();
 
         WO_NpcBeginOwned();
+
+        if(theGame.r_getMultiplayerClient().npcSyncIsolated())
+        {
+            WO_NpcEndOwned();
+            pollOwnedAttackVars(now);
+            return;
+        }
 
         for(i = 0; i < tracked.Size(); i += 1)
         {
@@ -1193,6 +1251,13 @@ class r_NpcSync
             else
             {
                 targetId = theGame.r_getMultiplayerClient().encodeTargetPlayerId(npc.GetTarget());
+            }
+
+            if(targetId > 0
+                && targetId != theGame.r_getMultiplayerClient().getServerId()
+                && !theGame.r_getMultiplayerClient().sharesNpcScope(targetId))
+            {
+                targetId = 0;
             }
 
             WO_NpcPushOwned(
@@ -2005,6 +2070,7 @@ class r_NpcSync
             + " healthSync=" + statHealthSync
             + " localDamage=" + statLocalDamage
             + " noTemplate=" + statNoTemplate
+            + " scope=" + syncScopeLabel()
             + " templateResolves=" + statTemplateResolves
             + " pathCache=" + pathCacheCount
             + " suspends=" + statSuspends

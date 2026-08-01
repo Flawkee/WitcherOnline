@@ -954,6 +954,13 @@ public class WitcherServer
                 session.rttMs = reportedRtt;
             }
 
+            Integer reportedSyncMode = fields.size() > 2 ? parseIntegerOrNull(fields.get(2)) : null;
+
+            if (reportedSyncMode != null)
+            {
+                session.npcSyncMode = (reportedSyncMode == 1) ? 1 : 0;
+            }
+
             List<String> reply = new ArrayList<>();
             reply.add(Long.toString(clientMs));
             reply.add(Long.toString(serverMs()));
@@ -1629,6 +1636,7 @@ public class WitcherServer
                             npcMovePacketsSent.get(),
                             npcEndPacketsSent.get());
 
+                    logSyncGroups(sessions);
                     logTargetSnapshot();
                 }
 
@@ -1745,6 +1753,84 @@ public class WitcherServer
         }
 
         return NPC_LOD_FAR_NANOS;
+    }
+
+    private static void logSyncGroups(List<PlayerSession> sessions)
+    {
+        StringBuilder sb = new StringBuilder();
+
+        for (PlayerSession session : sessions)
+        {
+            int owned = NpcRegistry.countOwnedBy(session.playerId);
+            String scope;
+
+            if (session.partyId != 0)
+            {
+                scope = "party#" + session.partyId;
+            }
+            else if (session.npcSyncMode == 0)
+            {
+                scope = "world";
+            }
+            else
+            {
+                scope = "standalone";
+            }
+
+            if (sb.length() > 0)
+            {
+                sb.append(" | ");
+            }
+
+            sb.append(String.format("%s scope=%s cfg=%s owns=%d",
+                    describePlayerId(session.playerId),
+                    scope,
+                    session.npcSyncMode == 0 ? "world" : "party",
+                    owned));
+        }
+
+        if (sb.length() > 0)
+        {
+            dbg("NPC scopes: %s\n", sb.toString());
+        }
+    }
+
+    public static boolean canShareNpcs(PlayerSession a, PlayerSession b)
+    {
+        if (a == null || b == null)
+        {
+            return false;
+        }
+
+        if (a.playerId == b.playerId)
+        {
+            return true;
+        }
+
+        if (a.partyId != 0 || b.partyId != 0)
+        {
+            return a.partyId != 0 && a.partyId == b.partyId;
+        }
+
+        return a.npcSyncMode == 0 && b.npcSyncMode == 0;
+    }
+
+    public static PlayerSession sessionByPlayerId(int playerId)
+    {
+        if (playerId == 0)
+        {
+            return null;
+        }
+
+        for (PlayerSession session : players.values())
+        {
+            if (session.playerId == playerId)
+            {
+                return session;
+            }
+        }
+
+        return null;
     }
 
     private static Party partyOf(String usernameKey)
@@ -2332,6 +2418,7 @@ public class WitcherServer
             for (Integer id : next)
             {
                 fields.add(Integer.toString(id));
+                fields.add(canShareNpcs(viewer, sessionByPlayerId(id)) ? "1" : "0");
             }
 
             sendNpcPacket(socket, viewer, "PVIS", fields);

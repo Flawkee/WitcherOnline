@@ -1385,6 +1385,14 @@ namespace w3mp {
 		ResetInboundDeltaCaches();
 	}
 
+	static void WO_NpcSyncMode(void* context, void* frame, void* result)
+	{
+		const int mode = ReadIntParameter(frame);
+		AdvanceFrame(frame);
+
+		NpcNet::SetSyncMode(mode);
+	}
+
 	static void WO_PartyJoin(void* context, void* frame, void* result)
 	{
 		RedString text;
@@ -2228,6 +2236,7 @@ namespace w3mp {
 		RegisterOne(L"WO_IsPlayerPaused", reinterpret_cast<void*>(&WO_IsPlayerPaused), "WO_IsPlayerPaused");
 		RegisterOne(L"WO_SetPaused", reinterpret_cast<void*>(&WO_SetPaused), "WO_SetPaused");
 		RegisterOne(L"WO_ResetDeltas", reinterpret_cast<void*>(&WO_ResetDeltas), "WO_ResetDeltas");
+		RegisterOne(L"WO_NpcSyncMode", reinterpret_cast<void*>(&WO_NpcSyncMode), "WO_NpcSyncMode");
 		RegisterOne(L"WO_PartyJoin", reinterpret_cast<void*>(&WO_PartyJoin), "WO_PartyJoin");
 		RegisterOne(L"WO_PartyLeave", reinterpret_cast<void*>(&WO_PartyLeave), "WO_PartyLeave");
 		RegisterOne(L"WO_EntityProbe", reinterpret_cast<void*>(&WO_EntityProbe), "WO_EntityProbe");

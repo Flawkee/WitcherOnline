@@ -109,6 +109,7 @@ namespace w3mp {
 		static int LatencyMs();
 		static std::string Report();
 		static void SetTuning(int interpDelayMs, int snapshotHz);
+		static void SetSyncMode(int mode);
 	};
 
 }

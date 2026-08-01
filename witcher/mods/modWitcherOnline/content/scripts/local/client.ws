@@ -63,6 +63,7 @@ statemachine class r_MultiplayerClient
     private var playersByServerId : MP_SU_HashMap;
     private var globalPlayersByServerId : MP_SU_HashMap;
     private var visibleIds : array<int>;
+    private var npcScopeIds : array<int>;
     private var lastVisibilityAt : float;
     private var VISIBILITY_TIMEOUT : float;
     default VISIBILITY_TIMEOUT = 10.0;
@@ -1521,6 +1522,33 @@ statemachine class r_MultiplayerClient
         return partyId;
     }
 
+    public function getNpcSyncMode() : int
+    {
+        var raw : string;
+        var mode : int;
+
+        raw = theGame.GetInGameConfigWrapper().GetVarValue('MPGhosts_Main', 'MPGhosts_NpcSyncMode');
+
+        if(raw == "" || raw == "none")
+        {
+            return 0;
+        }
+
+        mode = StringToInt(raw, 0);
+
+        if(mode != 1)
+        {
+            return 0;
+        }
+
+        return 1;
+    }
+
+    public function npcSyncIsolated() : bool
+    {
+        return getNpcSyncMode() == 1 && partyId == 0;
+    }
+
     public function isPartyLeader() : bool
     {
         return inParty && joinedParty == username;
@@ -1540,7 +1568,7 @@ statemachine class r_MultiplayerClient
 
         if(isPartyLeaderName(member.username))
         {
-            return "[LEADER] " + member.username;
+            return GetLocStringById(2111114270) + " " + member.username;
         }
 
         return member.username;
@@ -4289,7 +4317,34 @@ statemachine class r_MultiplayerClient
         return (now - lastVisibilityAt) <= VISIBILITY_TIMEOUT;
     }
 
-    public function applyVisibility(ids : array<int>)
+    public function sharesNpcScope(serverPlayerId : int) : bool
+    {
+        var i : int;
+
+        if(serverPlayerId <= 0)
+        {
+            return false;
+        }
+
+        for(i = 0; i < npcScopeIds.Size(); i += 1)
+        {
+            if(npcScopeIds[i] == serverPlayerId)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    public function applyVisibility(ids : array<int>, scopeIds : array<int>)
+    {
+        npcScopeIds = scopeIds;
+
+        applyVisibilityMembers(ids);
+    }
+
+    private function applyVisibilityMembers(ids : array<int>)
     {
         var stale : array<int>;
         var missing : bool;

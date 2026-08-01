@@ -62,6 +62,7 @@ public class PlayerSession
     public volatile long visibilitySentNanos = 0L;
 
     public volatile int partyId = 0;
+    public volatile int npcSyncMode = 0;
     public volatile int rttMs = UNKNOWN_RTT_MS;
     public volatile long lastReleaseNanos = 0L;
 

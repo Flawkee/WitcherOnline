@@ -272,3 +272,6 @@
 2111114269||wo_message_troubleshooting_wiki|Follow all steps from the Troubleshooting page of the wiki.
 2111114270||wo_message_party_leader|[Leader]
 2111114271||option_MPGhosts_HidePartyHUD|Hide Party HUD
+2111114272||option_MPGhosts_NpcSyncMode|NPC Sync Mode
+2111114273||preset_value_npcsync_world|World
+2111114274||preset_value_npcsync_party|Party Only

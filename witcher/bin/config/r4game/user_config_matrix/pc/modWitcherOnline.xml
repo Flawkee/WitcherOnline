@@ -12,6 +12,7 @@
 				<Entry varId="MPGhosts_HorseAppearance" value="0"/>
 				<Entry varId="MPGhosts_AutoDeclineTrade" value="false"/>
 				<Entry varId="MPGhosts_AutoDeclineGwent" value="false"/>
+					<Entry varId="MPGhosts_NpcSyncMode" value="0"/>
 			</Preset>
 		</PresetsArray>
 		<VisibleVars>
@@ -23,6 +24,17 @@
 			<Var id="MPGhosts_RenderDistance" displayName="MPGhosts_RenderDistance" displayType="SLIDER;0;5000;100"/>
 			<Var id="MPGhosts_AutoDeclineTrade" displayName="MPGhosts_AutoDeclineTrade" displayType="TOGGLE"/>
 			<Var id="MPGhosts_AutoDeclineGwent" displayName="MPGhosts_AutoDeclineGwent" displayType="TOGGLE"/>
+			
+			<Var id="MPGhosts_NpcSyncMode" displayName="MPGhosts_NpcSyncMode" displayType="OPTIONS">
+				<OptionsArray>
+					<Option id="0" displayName="npcsync_world">
+						<Entry varId="MPGhosts_NpcSyncMode" value="0"/>
+					</Option>
+					<Option id="1" displayName="npcsync_party">
+						<Entry varId="MPGhosts_NpcSyncMode" value="1"/>
+					</Option>
+				</OptionsArray>
+			</Var>
 			
 			<Var id="MPGhosts_HorseAppearance" displayName="MPGhosts_HorseAppearance" displayType="OPTIONS">
 				<OptionsArray>

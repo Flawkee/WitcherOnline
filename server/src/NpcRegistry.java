@@ -253,6 +253,8 @@ public final class NpcRegistry
         int foreign = 0;
         int mine = 0;
 
+        PlayerSession owner = WitcherServer.sessionByPlayerId(ownerPlayerId);
+
         for (Npc npc : npcs.values())
         {
             if (!npc.alive || !npc.typeCode.equals(typeCode))
@@ -271,6 +273,11 @@ public final class NpcRegistry
             }
             else if (npc.ownerPlayerId != 0)
             {
+                if (!WitcherServer.canShareNpcs(owner, WitcherServer.sessionByPlayerId(npc.ownerPlayerId)))
+                {
+                    continue;
+                }
+
                 foreign++;
             }
         }
@@ -296,6 +303,8 @@ public final class NpcRegistry
             double z,
             long now)
     {
+        PlayerSession adopter = WitcherServer.sessionByPlayerId(ownerPlayerId);
+
         for (Npc npc : npcs.values())
         {
             if (npc.ownerPlayerId != 0 || !npc.alive)
@@ -304,6 +313,12 @@ public final class NpcRegistry
             }
 
             if (!npc.typeCode.equals(typeCode) || !npc.appearance.equals(appearance))
+            {
+                continue;
+            }
+
+            if (npc.releasedByPlayerId != 0
+                    && !WitcherServer.canShareNpcs(adopter, WitcherServer.sessionByPlayerId(npc.releasedByPlayerId)))
             {
                 continue;
             }
@@ -768,6 +783,11 @@ public final class NpcRegistry
                 continue;
             }
 
+            if (!sharesSyncGroup(session, npc))
+            {
+                continue;
+            }
+
             if (npc.area != session.area)
             {
                 continue;
@@ -784,6 +804,33 @@ public final class NpcRegistry
         }
 
         return visible;
+    }
+
+    public static boolean sharesSyncGroup(PlayerSession viewer, Npc npc)
+    {
+        int referenceId;
+        PlayerSession reference;
+
+        if (viewer == null || npc == null)
+        {
+            return false;
+        }
+
+        referenceId = (npc.ownerPlayerId != 0) ? npc.ownerPlayerId : npc.releasedByPlayerId;
+
+        if (referenceId == 0 || referenceId == viewer.playerId)
+        {
+            return true;
+        }
+
+        reference = WitcherServer.sessionByPlayerId(referenceId);
+
+        if (reference == null)
+        {
+            return true;
+        }
+
+        return WitcherServer.canShareNpcs(viewer, reference);
     }
 
     public static List<Npc> targetedNpcs()
@@ -861,6 +908,11 @@ public final class NpcRegistry
                 }
 
                 if ((now - session.lastReleaseNanos) < HANDOVER_RELEASE_GRACE_NANOS)
+                {
+                    continue;
+                }
+
+                if (!sharesSyncGroup(session, npc))
                 {
                     continue;
                 }
