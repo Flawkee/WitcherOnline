@@ -75,6 +75,7 @@ public class WitcherServer
     private static final double NPC_LOD_NEAR_SQUARED = 40.0 * 40.0;
     private static final double NPC_LOD_MID_SQUARED = 55.0 * 55.0;
     private static final long NPC_VIEW_KEEPALIVE_NANOS = 500_000_000L;
+    private static final int NPC_VIEW_FULL_MASK = 1 + 2 + 4 + 8 + 16;
     private static final double NPC_DELTA_POS_EPSILON = 0.02;
     private static final double NPC_DELTA_HEADING_EPSILON = 0.5;
     private static final long NPC_TICK_SLEEP_MS = 25L;
@@ -2168,7 +2169,7 @@ public class WitcherServer
 
             if (mask == 0)
             {
-                mask = 1;
+                mask = NPC_VIEW_FULL_MASK;
             }
 
             move.add(Integer.toString(npc.npcId));

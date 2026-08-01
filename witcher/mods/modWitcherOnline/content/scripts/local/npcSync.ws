@@ -50,9 +50,11 @@ class r_Replica
     public var pendingDir    : int;
     public var baseMaxHealth : float;
     public var appliedScale  : int;
+    public var appliedHostile : int;
 
     default baseMaxHealth = -1.0;
     default appliedScale = 1000;
+    default appliedHostile = -1;
     default lastActionSeq = -1;
     default lastActionAt = 0.0;
     default pendingActionAt = -1.0;
@@ -1807,6 +1809,40 @@ class r_NpcSync
             + " guid=" + record.localGuid);
     }
 
+    private function applyReplicaHostility(record : r_Replica, npc : CNewNPC, flags : int)
+    {
+        var desired : int;
+
+        if((flags & 2) != 0)
+        {
+            desired = 1;
+        }
+        else
+        {
+            desired = 0;
+        }
+
+        if(record.appliedHostile == desired)
+        {
+            return;
+        }
+
+        record.appliedHostile = desired;
+
+        if(desired == 1)
+        {
+            npc.SetAttitude(thePlayer, AIA_Hostile);
+        }
+        else
+        {
+            npc.ResetAttitude(thePlayer);
+        }
+
+        dbg("npc_attitude", "canonical=" + record.canonicalId
+            + " hostile=" + desired
+            + " app=" + NameToString(record.appearance));
+    }
+
     private function prepareReplica(record : r_Replica)
     {
         var npc : CNewNPC;
@@ -1925,6 +1961,7 @@ class r_NpcSync
         var speed : float;
         var distance : float;
         var hp : int;
+        var flags : int;
 
         npc = record.actor;
 
@@ -1943,8 +1980,11 @@ class r_NpcSync
         speed = WO_NpcSpeed(commandIndex);
         hp = WO_NpcHp(commandIndex);
 
+        flags = WO_NpcFlags(commandIndex);
+
         applyReplicaTarget(record, npc, WO_NpcTarget(commandIndex));
-        applyReplicaAction(record, npc, WO_NpcFlags(commandIndex));
+        applyReplicaHostility(record, npc, flags);
+        applyReplicaAction(record, npc, flags);
         reconcileReplicaHealth(record, npc, hp, now);
 
         if(!npc.IsAlive())
