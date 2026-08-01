@@ -34,6 +34,7 @@ namespace w3mp {
 		constexpr int kKeepaliveMs = 500;
 		constexpr int kOwnedGraceMs = 900;
 		constexpr int kReplicaStaleMs = 6000;
+		constexpr int kDeathAnimGraceMs = 2000;
 		constexpr float kPositionDeadband = 0.08f;
 		constexpr float kHeadingDeadband = 2.0f;
 		constexpr int kTimeSyncIntervalMs = 1000;
@@ -100,6 +101,7 @@ namespace w3mp {
 			long long wantedAtMs = 0;
 			long long lastPacketMs = 0;
 			long long avgIntervalMs = 0;
+			long long despawnAfterMs = 0;
 		};
 
 		struct PendingHit
@@ -1216,6 +1218,28 @@ namespace w3mp {
 
 			if (replica.despawn)
 			{
+				if (replica.dead && !replica.deathEmitted && replica.localGuid != 0)
+				{
+					ReplicaCommand command;
+					command.canonicalId = replica.canonicalId;
+					command.op = static_cast<int>(ReplicaOp::Kill);
+					command.localGuid = replica.localGuid;
+					g_commands.push_back(command);
+
+					replica.deathEmitted = true;
+					replica.despawnAfterMs = serverNow + kDeathAnimGraceMs;
+					g_statKills++;
+
+					++it;
+					continue;
+				}
+
+				if (replica.despawnAfterMs != 0 && serverNow < replica.despawnAfterMs)
+				{
+					++it;
+					continue;
+				}
+
 				if (replica.localGuid != 0 || replica.spawnEmitted)
 				{
 					ReplicaCommand command;

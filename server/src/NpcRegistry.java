@@ -15,6 +15,9 @@ public final class NpcRegistry
     public static final long LATENCY_MIGRATION_INTERVAL_NANOS = 10_000_000_000L;
     public static final int LATENCY_MIGRATION_MARGIN_MS = 60;
     public static final long HANDOVER_RELEASE_GRACE_NANOS = 5_000_000_000L;
+    public static final int DEATH_BROADCAST_REPEATS = 3;
+    public static final long DEATH_BROADCAST_INTERVAL_NANOS = 200_000_000L;
+    public static final long DEATH_BROADCAST_WINDOW_NANOS = 3_000_000_000L;
     public static final long HANDOVER_DECLINE_NANOS = 3_000_000_000L;
     public static final long NPC_STREAM_FRESH_NANOS = 12_000_000_000L;
     public static final long HANDOVER_SILENCE_NANOS = 1_500_000_000L;
@@ -64,6 +67,8 @@ public final class NpcRegistry
         public volatile int targetPlayerId;
         public volatile boolean alive = true;
         public volatile boolean deathBroadcast;
+        public final java.util.Map<Integer, Integer> deathSends = new java.util.concurrent.ConcurrentHashMap<>();
+        public volatile long lastDeathSendNanos;
         public volatile long lastUpdateNanos;
         public volatile long deadSinceNanos;
         public volatile int handoverTarget;
@@ -718,16 +723,28 @@ public final class NpcRegistry
         return orders;
     }
 
-    public static List<Npc> pendingDeaths()
+    public static List<Npc> pendingDeaths(long now)
     {
         List<Npc> pending = new ArrayList<>();
 
         for (Npc npc : npcs.values())
         {
-            if (!npc.alive && !npc.deathBroadcast)
+            if (npc.alive)
             {
-                pending.add(npc);
+                continue;
             }
+
+            if (npc.deathBroadcast && (now - npc.deadSinceNanos) > DEATH_BROADCAST_WINDOW_NANOS)
+            {
+                continue;
+            }
+
+            if ((now - npc.lastDeathSendNanos) < DEATH_BROADCAST_INTERVAL_NANOS)
+            {
+                continue;
+            }
+
+            pending.add(npc);
         }
 
         return pending;

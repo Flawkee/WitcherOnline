@@ -1586,7 +1586,7 @@ public class WitcherServer
                 }
 
                 relayPauseStates(socket, sessions);
-                relayDeaths(socket, sessions);
+                relayDeaths(socket, sessions, now);
                 relayVisibility(socket, sessions, now);
                 relayHandovers(socket, sessions, now);
 
@@ -1972,9 +1972,9 @@ public class WitcherServer
         sendNpcPacket(socket, session, opcode, body);
     }
 
-    private static void relayDeaths(DatagramSocket socket, List<PlayerSession> sessions)
+    private static void relayDeaths(DatagramSocket socket, List<PlayerSession> sessions, long now)
     {
-        List<NpcRegistry.Npc> pending = NpcRegistry.pendingDeaths();
+        List<NpcRegistry.Npc> pending = NpcRegistry.pendingDeaths(now);
 
         if (pending.isEmpty())
         {
@@ -1983,11 +1983,19 @@ public class WitcherServer
 
         for (NpcRegistry.Npc npc : pending)
         {
-            npc.deathBroadcast = true;
+            npc.lastDeathSendNanos = now;
 
             for (PlayerSession session : sessions)
             {
                 if (session.playerId == npc.ownerPlayerId || !session.knownNpcs.contains(npc.npcId))
+                {
+                    continue;
+                }
+
+                Integer sent = npc.deathSends.get(session.playerId);
+                int count = (sent == null) ? 0 : sent;
+
+                if (count >= NpcRegistry.DEATH_BROADCAST_REPEATS)
                 {
                     continue;
                 }
@@ -1997,12 +2005,18 @@ public class WitcherServer
                 fields.add(Integer.toString(npc.npcId));
 
                 sendNpcPacket(socket, session, "NPCDEAD", fields);
+                npc.deathSends.put(session.playerId, count + 1);
             }
 
-            dbg("NPC %s DEATH CONFIRMED | owner=%s cell=%s\n",
-                    NpcRegistry.describeNpc(npc),
-                    describePlayerId(npc.ownerPlayerId),
-                    NpcRegistry.describeSpot(npc));
+            if (!npc.deathBroadcast)
+            {
+                npc.deathBroadcast = true;
+
+                dbg("NPC %s DEATH CONFIRMED | owner=%s cell=%s\n",
+                        NpcRegistry.describeNpc(npc),
+                        describePlayerId(npc.ownerPlayerId),
+                        NpcRegistry.describeSpot(npc));
+            }
         }
     }
 
