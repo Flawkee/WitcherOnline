@@ -184,6 +184,67 @@ class r_EntityClassifier
             || head == "5" || head == "6" || head == "7" || head == "8" || head == "9";
     }
 
+    private function isDigit(text : string) : bool
+    {
+        return text == "0" || text == "1" || text == "2" || text == "3" || text == "4"
+            || text == "5" || text == "6" || text == "7" || text == "8" || text == "9";
+    }
+
+    private function stripLeadingUnderscores(text : string) : string
+    {
+        var length : int;
+        var start  : int;
+
+        length = StrLen(text);
+        start = 0;
+
+        while(start < length && StrMid(text, start, 1) == "_")
+        {
+            start += 1;
+        }
+
+        if(start == 0)
+        {
+            return text;
+        }
+
+        return StrMid(text, start, length - start);
+    }
+
+    private function looksLikeQuestName(text : string) : bool
+    {
+        var body : string;
+        var head : string;
+        var at   : int;
+
+        if(text == "")
+        {
+            return false;
+        }
+
+        body = stripLeadingUnderscores(StrLower(text));
+
+        if(body == "")
+        {
+            return false;
+        }
+
+        at = 0;
+        head = StrMid(body, 0, 1);
+
+        if(head == "m" || head == "s")
+        {
+            at = 1;
+        }
+
+        if(StrMid(body, at, 1) != "q")
+        {
+            return false;
+        }
+
+        return isDigit(StrMid(body, at + 1, 1));
+    }
+
     public function isFightCapable(npc : CNewNPC) : bool
     {
         var maximum : float;
@@ -235,6 +296,8 @@ class r_EntityClassifier
     {
         var tags : array<name>;
         var questTag : string;
+        var appearance : string;
+        var entityName : string;
 
         sample.entityClass = REC_Unknown;
         sample.reason = "unclassified";
@@ -283,6 +346,24 @@ class r_EntityClassifier
         {
             sample.entityClass = REC_Quest;
             sample.reason = "quest tag " + questTag;
+            return;
+        }
+
+        appearance = NameToString(npc.GetAppearance());
+
+        if(looksLikeQuestName(appearance))
+        {
+            sample.entityClass = REC_Quest;
+            sample.reason = "quest appearance " + appearance;
+            return;
+        }
+
+        entityName = npc.GetName();
+
+        if(looksLikeQuestName(entityName))
+        {
+            sample.entityClass = REC_Quest;
+            sample.reason = "quest name " + entityName;
             return;
         }
 

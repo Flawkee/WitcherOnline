@@ -20,6 +20,7 @@ import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
@@ -81,13 +82,15 @@ public class WitcherServer
 
     public static final double CELL_SIZE = 128.0;
 
-    private static final double NPC_INTEREST_RADIUS = 140.0;
+    private static final double NPC_INTEREST_RADIUS = 85.0;
     private static final double NPC_INTEREST_RADIUS_SQUARED = NPC_INTEREST_RADIUS * NPC_INTEREST_RADIUS;
     private static final long NPC_OWNERSHIP_REFRESH_NANOS = 2_000_000_000L;
     private static final int NPC_SPAWN_BATCH = 14;
     private static final int NPC_MOVE_BATCH = 20;
     private static final int NPC_REMOVE_BATCH = 16;
     private static final int NPC_HIT_BATCH = 10;
+    private static final int NPC_SCALE_BATCH = 48;
+    private static final long NPC_SCALE_RESEND_NANOS = 1_000_000_000L;
     private static final int NPC_TARGET_LOG_LIMIT = 12;
 
     private static final long SERVER_START_NANOS = System.nanoTime();
@@ -169,6 +172,7 @@ public class WitcherServer
 
         loadBannedIps();
         loadWhitelistIps();
+        NpcScaling.load();
 
         DatagramSocket socket = new DatagramSocket(port);
 
@@ -1608,10 +1612,12 @@ public class WitcherServer
 
                 NpcRegistry.applyUnackedDamage(now);
                 NpcRegistry.pruneStale(ownerOnline, now);
+                NpcRegistry.recomputeScaling(sessions, NpcRegistry.HIT_RANGE_SQUARED);
 
                 for (PlayerSession session : sessions)
                 {
                     relayNpcs(socket, session, now);
+                    relayScaling(socket, session, now);
                     relayHits(socket, session);
                     relayKillOrders(socket, session);
                     drainOutbound(socket, session);
@@ -1782,17 +1788,35 @@ public class WitcherServer
                 sb.append(" | ");
             }
 
-            sb.append(String.format("%s scope=%s cfg=%s owns=%d",
+            sb.append(String.format("%s scope=%s cfg=%s owns=%d hpScale=%s",
                     describePlayerId(session.playerId),
                     scope,
                     session.npcSyncMode == 0 ? "world" : "party",
-                    owned));
+                    owned,
+                    describeOwnedScale(session)));
         }
 
         if (sb.length() > 0)
         {
             dbg("NPC scopes: %s\n", sb.toString());
         }
+    }
+
+    private static String describeOwnedScale(PlayerSession session)
+    {
+        int peak = NpcScaling.SCALE_UNIT;
+        int peakPlayers = 1;
+
+        for (NpcRegistry.Npc npc : NpcRegistry.ownedBy(session.playerId))
+        {
+            if (npc.scaleMilli > peak)
+            {
+                peak = npc.scaleMilli;
+                peakPlayers = npc.scalePlayerCount;
+            }
+        }
+
+        return String.format("x%.2f/%dp", peak / (double) NpcScaling.SCALE_UNIT, peakPlayers);
     }
 
     public static boolean canShareNpcs(PlayerSession a, PlayerSession b)
@@ -2486,6 +2510,88 @@ public class WitcherServer
                 session.lastHandoverLogged = count;
                 dbg("NPC handover offered: %d entities -> %s\n", count, describePlayerId(session.playerId));
             }
+        }
+    }
+
+    private static void relayScaling(DatagramSocket socket, PlayerSession session, long now)
+    {
+        Map<Integer, Integer> current = new HashMap<>();
+        List<int[]> wire = new ArrayList<>();
+
+        for (NpcRegistry.Npc npc : NpcRegistry.ownedBy(session.playerId))
+        {
+            current.put(npc.npcId, npc.scaleMilli);
+            wire.add(new int[] { npc.ownerLocalGuid, npc.scaleMilli });
+        }
+
+        for (Integer known : session.knownNpcs)
+        {
+            NpcRegistry.Npc npc = NpcRegistry.get(known);
+
+            if (npc == null || npc.ownerPlayerId == session.playerId)
+            {
+                continue;
+            }
+
+            current.put(npc.npcId, npc.scaleMilli);
+            wire.add(new int[] { npc.npcId, npc.scaleMilli });
+        }
+
+        boolean changed = !current.equals(session.sentScales);
+
+        if (!changed && (now - session.scalesSentNanos) < NPC_SCALE_RESEND_NANOS)
+        {
+            return;
+        }
+
+        session.sentScales.clear();
+        session.sentScales.putAll(current);
+        session.scalesSentNanos = now;
+
+        if (wire.isEmpty())
+        {
+            return;
+        }
+
+        int sent = 0;
+        int setId = ++session.scaleSetId;
+
+        while (sent < wire.size())
+        {
+            int chunk = Math.min(NPC_SCALE_BATCH, wire.size() - sent);
+
+            List<String> fields = new ArrayList<>();
+            fields.add(Integer.toString(setId));
+            fields.add(Integer.toString(wire.size()));
+            fields.add(Integer.toString(chunk));
+
+            for (int i = 0; i < chunk; i++)
+            {
+                int[] pair = wire.get(sent + i);
+                fields.add(Integer.toString(pair[0]));
+                fields.add(Integer.toString(pair[1]));
+            }
+
+            sendNpcPacket(socket, session, "NPCSCALE", fields);
+            sent += chunk;
+        }
+
+        if (changed)
+        {
+            int peak = NpcScaling.SCALE_UNIT;
+
+            for (int[] pair : wire)
+            {
+                if (pair[1] > peak)
+                {
+                    peak = pair[1];
+                }
+            }
+
+            dbg("NPC scale sent: %d entries peak=x%.2f -> %s\n",
+                    wire.size(),
+                    peak / (double) NpcScaling.SCALE_UNIT,
+                    describePlayerId(session.playerId));
         }
     }
 
@@ -3260,6 +3366,12 @@ public class WitcherServer
             return;
         }
 
+        if (line.equals("scaling") || line.startsWith("scaling "))
+        {
+            handleScalingCommand(trimCommandArg(line, "scaling"));
+            return;
+        }
+
         if (line.equals("stop"))
         {
             dbg("Shutting down...\n\n");
@@ -3278,6 +3390,11 @@ public class WitcherServer
             dbg("list                      - list connected players\n");
             dbg("stats                     - show broadcast/server health counters\n");
             dbg("npc                       - show NPC sync cells, authority and counters\n");
+            dbg("scaling                   - show NPC health scaling config and curve\n");
+            dbg("scaling on|off            - enable or disable NPC health scaling\n");
+            dbg("scaling step <value>      - extra health per additional player (0.5 = +50%%)\n");
+            dbg("scaling max <value>       - clamp for the health multiplier\n");
+            dbg("scaling reload            - re-read npc-scaling.json from disk\n");
             dbg("bots <0-8>                - spawn fake players orbiting the first connected player\n");
             dbg("about                     - info about Witcher Online\n");
             dbg("stop                      - stop server\n");
@@ -3296,6 +3413,100 @@ public class WitcherServer
         }
 
         dbg("Unknown command: %s (type 'help')\n\n", line);
+    }
+
+    private static void handleScalingCommand(String arg)
+    {
+        if (arg.isEmpty() || arg.equals("show"))
+        {
+            printScaling();
+            return;
+        }
+
+        if (arg.equals("on") || arg.equals("off"))
+        {
+            NpcScaling.setEnabled(arg.equals("on"));
+            dbg("NPC health scaling is now %s.\n", arg.equals("on") ? "enabled" : "disabled");
+            printScaling();
+            return;
+        }
+
+        if (arg.equals("reload"))
+        {
+            NpcScaling.load();
+            printScaling();
+            return;
+        }
+
+        if (arg.startsWith("step"))
+        {
+            Double value = parseDouble(trimCommandArg(arg, "step"));
+
+            if (value == null)
+            {
+                dbg("Usage: scaling step <value> - extra health per additional player\n\n");
+                return;
+            }
+
+            NpcScaling.setPerExtraPlayer(value);
+            printScaling();
+            return;
+        }
+
+        if (arg.startsWith("max"))
+        {
+            Double value = parseDouble(trimCommandArg(arg, "max"));
+
+            if (value == null)
+            {
+                dbg("Usage: scaling max <value> - clamp for the health multiplier\n\n");
+                return;
+            }
+
+            NpcScaling.setMaxMultiplier(value);
+            printScaling();
+            return;
+        }
+
+        dbg("Usage: scaling [on|off|step <value>|max <value>|reload]\n\n");
+    }
+
+    private static void printScaling()
+    {
+        dbg("--------- NPC health scaling ---------\n");
+        dbg("%s\n", NpcScaling.describe());
+        dbg("config: %s\n", npcScalingPath());
+
+        StringBuilder curve = new StringBuilder();
+
+        for (int i = 1; i <= 8; i++)
+        {
+            if (i > 1)
+            {
+                curve.append("  ");
+            }
+
+            curve.append(String.format("%d:x%.2f", i, NpcScaling.scaleMilliFor(i) / (double) NpcScaling.SCALE_UNIT));
+        }
+
+        dbg("curve: %s\n\n", curve.toString());
+    }
+
+    private static Double parseDouble(String text)
+    {
+        if (text == null || text.isEmpty())
+        {
+            return null;
+        }
+
+        try
+        {
+            return Double.parseDouble(text.trim());
+        }
+        catch (NumberFormatException e)
+        {
+            return null;
+        }
     }
 
     private static void kickPlayer(DatagramSocket socket, PlayerSession victim, String kickText)
@@ -3612,6 +3823,11 @@ public class WitcherServer
     private static Path whitelistedPlayersPath()
     {
         return appDir().resolve("whitelisted-players.json");
+    }
+
+    static Path npcScalingPath()
+    {
+        return appDir().resolve("npc-scaling.json");
     }
 
     private static Path appDir()

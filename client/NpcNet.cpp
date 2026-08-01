@@ -128,6 +128,11 @@ namespace w3mp {
 		std::vector<int> g_killGuids;
 		std::vector<int> g_giveNacks;
 		std::unordered_map<int, bool> g_pausedPlayers;
+		std::unordered_map<int, int> g_scales;
+		std::unordered_map<int, int> g_scaleStaging;
+		unsigned int g_scaleGeneration = 0;
+		int g_lastLoggedScale = 1000;
+		int g_scaleSetId = -1;
 		std::unordered_set<std::string> g_unroutedOpcodes;
 		bool g_suspended = false;
 
@@ -725,6 +730,8 @@ namespace w3mp {
 		g_acks.clear();
 		g_pending.clear();
 		g_ackQueue.clear();
+		g_scales.clear();
+		g_scaleStaging.clear();
 		g_clockReady = false;
 		g_clockOffsetMs = 0;
 		g_latencyMs = 0;
@@ -960,6 +967,62 @@ namespace w3mp {
 
 				if (it != g_replicas.end())
 					it->second.dead = true;
+			}
+
+			return;
+		}
+
+		if (opcode == "NPCSCALE")
+		{
+			const int setId = ParseInt(fields, 0);
+			const int total = ParseInt(fields, 1);
+			const int count = ParseInt(fields, 2);
+
+			if (setId != g_scaleSetId)
+			{
+				g_scaleStaging.clear();
+				g_scaleSetId = setId;
+			}
+
+			for (int i = 0; i < count; ++i)
+			{
+				const size_t base = 3 + static_cast<size_t>(i) * 2;
+
+				if (base + 2 > fields.size())
+					break;
+
+				const int npcId = ParseInt(fields, base);
+				const int scaleMilli = ParseInt(fields, base + 1);
+
+				if (npcId != 0 && scaleMilli > 0)
+					g_scaleStaging[npcId] = scaleMilli;
+			}
+
+			if (total > 0 && static_cast<int>(g_scaleStaging.size()) >= total)
+			{
+				g_scales.swap(g_scaleStaging);
+				g_scaleStaging.clear();
+				g_scaleGeneration++;
+
+				int peak = 1000;
+				int peakId = 0;
+
+				for (const auto& entry : g_scales)
+				{
+					if (entry.second > peak)
+					{
+						peak = entry.second;
+						peakId = entry.first;
+					}
+				}
+
+				if (peak != g_lastLoggedScale)
+				{
+					g_lastLoggedScale = peak;
+					Diagnostics::Log("npc scale set: entries=" + std::to_string(g_scales.size())
+						+ " peak=" + std::to_string(peak)
+						+ " peakId=" + std::to_string(peakId));
+				}
 			}
 
 			return;
@@ -1592,6 +1655,22 @@ namespace w3mp {
 		auto it = g_pausedPlayers.find(playerId);
 
 		return it != g_pausedPlayers.end() && it->second;
+	}
+
+	int NpcNet::ScaleMilli(int npcId)
+	{
+		std::lock_guard<std::mutex> lock(g_mutex);
+
+		auto it = g_scales.find(npcId);
+
+		return it == g_scales.end() ? 1000 : it->second;
+	}
+
+	int NpcNet::ScaleGeneration()
+	{
+		std::lock_guard<std::mutex> lock(g_mutex);
+
+		return static_cast<int>(g_scaleGeneration);
 	}
 
 	long long NpcNet::ServerNowMs()

@@ -105,6 +105,9 @@ namespace w3mp {
 		static void SetPlayerPaused(int playerId, bool paused);
 		static bool IsPlayerPaused(int playerId);
 
+		static int ScaleMilli(int npcId);
+		static int ScaleGeneration();
+
 		static long long ServerNowMs();
 		static int LatencyMs();
 		static std::string Report();

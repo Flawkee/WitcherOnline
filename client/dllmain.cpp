@@ -759,7 +759,8 @@ static void HandleServerPacket(const std::string& msg)
 
 	const bool isNetOpcode = opcode == "NPCNEW" || opcode == "NPCMOV" || opcode == "NPCEND"
 		|| opcode == "NPCDEAD" || opcode == "NPCHITF" || opcode == "NPCACKF" || opcode == "TSYNCR" || opcode == "NPCKILL"
-		|| opcode == "NPCGIVE" || opcode == "NPCDROP" || opcode == "NPCGONE" || opcode == "PSTATEF";
+		|| opcode == "NPCGIVE" || opcode == "NPCDROP" || opcode == "NPCGONE" || opcode == "PSTATEF"
+		|| opcode == "NPCSCALE";
 
 	const bool isNpcOpcode = opcode == "NPCOWN";
 

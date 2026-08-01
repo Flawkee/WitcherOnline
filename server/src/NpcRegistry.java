@@ -33,6 +33,7 @@ public final class NpcRegistry
     public static final int HISTORY_SAMPLES = 40;
     public static final long HISTORY_WINDOW_MS = 2000L;
     public static final double HIT_RANGE = 60.0;
+    public static final double HIT_RANGE_SQUARED = HIT_RANGE * HIT_RANGE;
 
     public static final class Sample
     {
@@ -83,6 +84,8 @@ public final class NpcRegistry
         public volatile boolean killOrderPending;
         public volatile int pendingDamagePermille;
         public volatile long pendingDamageSince;
+        public volatile int scaleMilli = NpcScaling.SCALE_UNIT;
+        public volatile int scalePlayerCount = 1;
 
         final ArrayDeque<Sample> history = new ArrayDeque<>();
 
@@ -833,6 +836,64 @@ public final class NpcRegistry
         return WitcherServer.canShareNpcs(viewer, reference);
     }
 
+    public static List<Npc> ownedBy(int ownerPlayerId)
+    {
+        List<Npc> owned = new ArrayList<>();
+
+        if (ownerPlayerId == 0)
+        {
+            return owned;
+        }
+
+        for (Npc npc : npcs.values())
+        {
+            if (npc.ownerPlayerId == ownerPlayerId)
+            {
+                owned.add(npc);
+            }
+        }
+
+        return owned;
+    }
+
+    public static void recomputeScaling(List<PlayerSession> sessions, double radiusSquared)
+    {
+        for (Npc npc : npcs.values())
+        {
+            int count = 0;
+
+            for (PlayerSession session : sessions)
+            {
+                if (!session.hasPosition || session.area != npc.area)
+                {
+                    continue;
+                }
+
+                if (!sharesSyncGroup(session, npc))
+                {
+                    continue;
+                }
+
+                double dx = npc.x - session.posX;
+                double dy = npc.y - session.posY;
+                double dz = npc.z - session.posZ;
+
+                if ((dx * dx + dy * dy + dz * dz) <= radiusSquared)
+                {
+                    count++;
+                }
+            }
+
+            if (count < 1)
+            {
+                count = 1;
+            }
+
+            npc.scalePlayerCount = count;
+            npc.scaleMilli = NpcScaling.scaleMilliFor(count);
+        }
+    }
+
     public static List<Npc> targetedNpcs()
     {
         List<Npc> targeted = new ArrayList<>();
@@ -889,6 +950,7 @@ public final class NpcRegistry
             PlayerSession best = null;
             int bestLatency = Integer.MAX_VALUE;
             double bestDistance = Double.MAX_VALUE;
+            boolean bestInHitRange = false;
 
             for (PlayerSession session : sessions)
             {
@@ -949,11 +1011,32 @@ public final class NpcRegistry
                     continue;
                 }
 
-                if (session.rttMs < bestLatency
-                        || (session.rttMs == bestLatency && squared < bestDistance))
+                boolean inHitRange = squared <= HIT_RANGE_SQUARED;
+
+                boolean better;
+
+                if (best == null)
+                {
+                    better = true;
+                }
+                else if (inHitRange != bestInHitRange)
+                {
+                    better = inHitRange;
+                }
+                else if (session.rttMs != bestLatency)
+                {
+                    better = session.rttMs < bestLatency;
+                }
+                else
+                {
+                    better = squared < bestDistance;
+                }
+
+                if (better)
                 {
                     bestLatency = session.rttMs;
                     bestDistance = squared;
+                    bestInHitRange = inHitRange;
                     best = session;
                 }
             }
@@ -966,29 +1049,45 @@ public final class NpcRegistry
             if (ownerHealthy)
             {
                 int ownerLatency = PlayerSession.UNKNOWN_RTT_MS;
+                boolean ownerInHitRange = false;
 
                 for (PlayerSession session : sessions)
                 {
                     if (session.playerId == npc.ownerPlayerId)
                     {
                         ownerLatency = session.rttMs;
+
+                        if (session.hasPosition && session.area == npc.area)
+                        {
+                            double odx = npc.x - session.posX;
+                            double ody = npc.y - session.posY;
+                            double odz = npc.z - session.posZ;
+
+                            ownerInHitRange = ((odx * odx) + (ody * ody) + (odz * odz)) <= HIT_RANGE_SQUARED;
+                        }
+
                         break;
                     }
                 }
 
-                if ((bestLatency + LATENCY_MIGRATION_MARGIN_MS) >= ownerLatency)
+                boolean proximityWin = bestInHitRange && !ownerInHitRange;
+
+                if (!proximityWin && (bestLatency + LATENCY_MIGRATION_MARGIN_MS) >= ownerLatency)
                 {
                     continue;
                 }
 
                 npc.lastMigrationNanos = now;
 
-                WitcherServer.dbg("NPC %s MIGRATE %s (rtt %dms) -> %s (rtt %dms)\n",
+                WitcherServer.dbg("NPC %s MIGRATE %s (rtt %dms hit=%s) -> %s (rtt %dms hit=%s) reason=%s\n",
                         describeNpc(npc),
                         WitcherServer.describePlayerId(npc.ownerPlayerId),
                         ownerLatency,
+                        ownerInHitRange ? "yes" : "no",
                         WitcherServer.describePlayerId(best.playerId),
-                        bestLatency);
+                        bestLatency,
+                        bestInHitRange ? "yes" : "no",
+                        proximityWin ? "proximity" : "latency");
             }
 
             npc.handoverTarget = best.playerId;

@@ -2058,6 +2058,23 @@ namespace w3mp {
 			*static_cast<int*>(result) = NpcNet::LatencyMs();
 	}
 
+	static void WO_NpcScale(void* context, void* frame, void* result)
+	{
+		const int npcId = ReadIntParameter(frame);
+		AdvanceFrame(frame);
+
+		if (result)
+			*static_cast<int*>(result) = NpcNet::ScaleMilli(npcId);
+	}
+
+	static void WO_NpcScaleGen(void* context, void* frame, void* result)
+	{
+		AdvanceFrame(frame);
+
+		if (result)
+			*static_cast<int*>(result) = NpcNet::ScaleGeneration();
+	}
+
 	static void WO_NpcTune(void* context, void* frame, void* result)
 	{
 		const int interpDelayMs = ReadIntParameter(frame);
@@ -2290,6 +2307,8 @@ namespace w3mp {
 		RegisterOne(L"WO_NpcReport", reinterpret_cast<void*>(&WO_NpcReport), "WO_NpcReport");
 		RegisterOne(L"WO_NpcLatency", reinterpret_cast<void*>(&WO_NpcLatency), "WO_NpcLatency");
 		RegisterOne(L"WO_NpcTune", reinterpret_cast<void*>(&WO_NpcTune), "WO_NpcTune");
+		RegisterOne(L"WO_NpcScale", reinterpret_cast<void*>(&WO_NpcScale), "WO_NpcScale");
+		RegisterOne(L"WO_NpcScaleGen", reinterpret_cast<void*>(&WO_NpcScaleGen), "WO_NpcScaleGen");
 
 		Diagnostics::Log("ScriptBinding: registered=" + std::to_string(g_registeredCount.load())
 			+ (g_registrationError.empty() ? "" : " failed:" + g_registrationError));

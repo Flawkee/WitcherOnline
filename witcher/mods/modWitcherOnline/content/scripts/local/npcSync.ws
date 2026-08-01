@@ -14,7 +14,11 @@ class r_TrackedNpc
     public var actionDir  : int;
     public var lastAttackType : int;
     public var lastPerform : int;
+    public var baseMaxHealth : float;
+    public var appliedScale : int;
 
+    default baseMaxHealth = -1.0;
+    default appliedScale = 1000;
     default lastAttackType = -1;
     default lastPerform = -1;
     default lastHp = -1;
@@ -44,7 +48,11 @@ class r_Replica
     public var pendingActionAt : float;
     public var pendingType   : int;
     public var pendingDir    : int;
+    public var baseMaxHealth : float;
+    public var appliedScale  : int;
 
+    default baseMaxHealth = -1.0;
+    default appliedScale = 1000;
     default lastActionSeq = -1;
     default lastActionAt = 0.0;
     default pendingActionAt = -1.0;
@@ -83,6 +91,9 @@ class r_NpcSync
     private var offerWindowAt : float;
     private var offerCount    : int;
     private var nextSkipLogAt : float;
+    private var nextScaleAt   : float;
+    private var lastScaleGen  : int;
+    private var scaleSkipReason : string;
 
     private var statRegistered : int;
     private var statSpawned    : int;
@@ -136,6 +147,8 @@ class r_NpcSync
     default offerWindowAt = 0.0;
     default offerCount = 0;
     default nextSkipLogAt = 0.0;
+    default nextScaleAt = 0.0;
+    default lastScaleGen = -1;
 
     private var SCAN_RADIUS    : float;
     private var KEEP_RADIUS    : float;
@@ -144,6 +157,7 @@ class r_NpcSync
     private var SCAN_INTERVAL  : float;
     private var DRIVE_INTERVAL : float;
     private var AGGRO_INTERVAL : float;
+    private var SCALE_INTERVAL : float;
     private var DEBUG_INTERVAL : float;
     private var HARD_SNAP      : float;
     private var FREE_RADIUS    : float;
@@ -162,13 +176,14 @@ class r_NpcSync
     private var MAX_REPLICAS   : int;
     private var PATH_CACHE_MAX : int;
 
-    default SCAN_RADIUS = 110.0;
-    default KEEP_RADIUS = 150.0;
+    default SCAN_RADIUS = 80.0;
+    default KEEP_RADIUS = 85.0;
     default TRACK_GRACE = 3.0;
     default PUSH_INTERVAL = 0.025;
     default SCAN_INTERVAL = 0.25;
     default DRIVE_INTERVAL = 0.025;
     default AGGRO_INTERVAL = 0.4;
+    default SCALE_INTERVAL = 0.5;
     default DEBUG_INTERVAL = 2.0;
     default HARD_SNAP = 15.0;
     default FREE_RADIUS = 2.0;
@@ -613,6 +628,12 @@ class r_NpcSync
             pushOwned(now);
         }
 
+        if(now >= nextScaleAt)
+        {
+            nextScaleAt = now + SCALE_INTERVAL;
+            updateHealthScaling();
+        }
+
         applyDrops();
         applyKillOrders();
         driveReplicas(now);
@@ -735,6 +756,194 @@ class r_NpcSync
 
         offerCount += 1;
         return true;
+    }
+
+    private function updateHealthScaling()
+    {
+        var baseMax : float;
+        var applied : int;
+        var scale   : int;
+        var scaled  : int;
+        var seen    : int;
+        var i : int;
+
+        scaled = 0;
+        seen = 0;
+
+        for(i = 0; i < tracked.Size(); i += 1)
+        {
+            if(!tracked[i].actor)
+            {
+                continue;
+            }
+
+            baseMax = tracked[i].baseMaxHealth;
+            applied = tracked[i].appliedScale;
+            scale = WO_NpcScale(tracked[i].npcId);
+
+            if(scale != 1000)
+            {
+                seen += 1;
+            }
+
+            applyHealthScale(tracked[i].actor, scale, baseMax, applied);
+
+            tracked[i].baseMaxHealth = baseMax;
+            tracked[i].appliedScale = applied;
+
+            if(applied != 1000)
+            {
+                scaled += 1;
+            }
+        }
+
+        for(i = 0; i < replicas.Size(); i += 1)
+        {
+            if(!replicas[i].actor)
+            {
+                continue;
+            }
+
+            baseMax = replicas[i].baseMaxHealth;
+            applied = replicas[i].appliedScale;
+            scale = WO_NpcScale(replicas[i].canonicalId);
+
+            if(scale != 1000)
+            {
+                seen += 1;
+            }
+
+            applyHealthScale(replicas[i].actor, scale, baseMax, applied);
+
+            replicas[i].baseMaxHealth = baseMax;
+            replicas[i].appliedScale = applied;
+
+            if(applied != 1000)
+            {
+                scaled += 1;
+            }
+        }
+
+        if(debugLogging)
+        {
+            WO_Note("[npc_scale] tracked=" + tracked.Size()
+                + " replicas=" + replicas.Size()
+                + " gotScale=" + seen
+                + " applied=" + scaled
+                + " skip=" + scaleSkipReason);
+        }
+
+        scaleSkipReason = "";
+        lastScaleGen = WO_NpcScaleGen();
+    }
+
+    private function scaleStatOf(npc : CNewNPC) : EBaseCharacterStats
+    {
+        if(npc.UsesVitality())
+        {
+            return BCS_Vitality;
+        }
+
+        if(npc.UsesEssence())
+        {
+            return BCS_Essence;
+        }
+
+        return BCS_Undefined;
+    }
+
+    private function applyHealthScale(npc : CNewNPC, scaleMilli : int, out baseMax : float, out appliedScale : int)
+    {
+        var stat       : EBaseCharacterStats;
+        var currentMax : float;
+        var desiredMax : float;
+        var fraction   : float;
+
+        if(scaleMilli <= 0)
+        {
+            scaleMilli = 1000;
+        }
+
+        if(!npc.IsAlive())
+        {
+            scaleSkipReason = "dead";
+            return;
+        }
+
+        stat = scaleStatOf(npc);
+
+        if(stat == BCS_Undefined)
+        {
+            scaleSkipReason = "stat";
+            return;
+        }
+
+        if(!npc.abilityManager)
+        {
+            scaleSkipReason = "noAbilityMgr";
+            return;
+        }
+
+        if(!npc.abilityManager.IsInitialized())
+        {
+            scaleSkipReason = "abilityMgrNotInit";
+            return;
+        }
+
+        currentMax = npc.GetMaxHealth();
+
+        if(currentMax <= 0.0)
+        {
+            scaleSkipReason = "maxHp" + currentMax;
+            return;
+        }
+
+        if(baseMax <= 0.0)
+        {
+            baseMax = currentMax / ((float)appliedScale / 1000.0);
+        }
+        else if(AbsF(currentMax - baseMax) < 0.5)
+        {
+            appliedScale = 1000;
+        }
+        else if(AbsF(currentMax - (baseMax * ((float)appliedScale / 1000.0))) >= 0.5)
+        {
+            baseMax = currentMax;
+            appliedScale = 1000;
+        }
+
+        desiredMax = baseMax * ((float)scaleMilli / 1000.0);
+
+        if(AbsF(currentMax - desiredMax) < 0.5)
+        {
+            appliedScale = scaleMilli;
+            return;
+        }
+
+        fraction = npc.GetHealth() / currentMax;
+
+        if(fraction < 0.0)
+        {
+            fraction = 0.0;
+        }
+
+        if(fraction > 1.0)
+        {
+            fraction = 1.0;
+        }
+
+        npc.abilityManager.SetStatPointMax(stat, desiredMax);
+        npc.SetHealthPerc(fraction);
+
+        appliedScale = scaleMilli;
+
+        if(debugLogging)
+        {
+            dbg("npc_scale", "base=" + baseMax
+                + " scale=" + scaleMilli
+                + " max=" + npc.GetMaxHealth()
+                + " frac=" + fraction);
+        }
     }
 
     private function healthPermille(npc : CNewNPC) : int
