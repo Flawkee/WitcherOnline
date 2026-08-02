@@ -301,3 +301,9 @@
 2111114298||wo_coop_save_blocked|Saving is disabled during Co-op Story Mode.
 2111114299||wo_coop_load_blocked|Loading is disabled during Co-op Story Mode. Leave the party to load a game.
 2111114300||wo_coop_leader_active|Co-op Story Mode active - you are the party leader. Saving and loading are disabled.
+2111114301||wo_dlg_wait_party|Waiting for all party members
+2111114302||wo_scene_join_member|%s has begun a conversation. The party must gather for the tale to go on. Ride there now?
+2111114303||wo_scene_join_leader|%s has begun a conversation. Naught can proceed without you. Ride there now?
+2111114304||wo_scene_join_title|A Conversation Begins
+2111114305||wo_scene_stuck|%s is held fast in a conversation the party must join, else they cannot go on. Ride there now?
+2111114306||wo_scene_manual|Walk about or speak to the quest NPC to begin.

@@ -218,7 +218,14 @@ timer function r_showWelcome(dt : float, id : int)
 function OnEnteredMainMenu()
 {
     wrappedMethod();
-    theGame.r_getMultiplayerClient().setInGame(false);
+
+    if(!theGame.r_multiplayerClient)
+    {
+        return;
+    }
+
+    theGame.r_multiplayerClient.setInGame(false);
+    theGame.r_multiplayerClient.leaveCoopForMainMenu();
 }
 
 @wrapMethod(CR4Game)
@@ -1173,7 +1180,23 @@ function NotifyGwentMatchEnded( wonMatch : bool )
 @wrapMethod(CR4HudModuleDialog)
 function OnDialogChoicesSet(choices : array<SSceneChoice>, alternativeUI : bool)
 {
-    theGame.r_getMultiplayerClient().setDialogChoices(choices);
+    var client : r_MultiplayerClient;
+    var i : int;
+
+    client = theGame.r_getMultiplayerClient();
+
+    client.setDialogChoices(choices);
+
+    if(client.shouldLockDialogChoices())
+    {
+        for(i = 0; i < choices.Size(); i += 1)
+        {
+            if(!client.isServiceDialogAction(choices[i].dialogAction))
+            {
+                choices[i].disabled = true;
+            }
+        }
+    }
 
     wrappedMethod(choices, alternativeUI);
 }
@@ -1213,6 +1236,83 @@ function OnDialogSkipped(value : int)
     theGame.r_getMultiplayerClient().clearActiveDialogChoices();
 
     wrappedMethod(value);
+}
+
+@addMethod(CR4HudModuleDialog)
+public function WO_RelockDialogChoices(source : array<SSceneChoice>, locked : bool)
+{
+    var flashValueStorage : CScriptedFlashValueStorage;
+    var choiceFlashArray : CScriptedFlashArray;
+    var choiceFlashObject : CScriptedFlashObject;
+    var description : string;
+    var prefix : string;
+    var colour : string;
+    var blocked : bool;
+    var i : int;
+
+    if(source.Size() <= 0 || source.Size() != lastSetChoices.Size())
+    {
+        return;
+    }
+
+    flashValueStorage = GetModuleFlashValueStorage();
+    choiceFlashArray = flashValueStorage.CreateTempFlashArray();
+
+    for(i = 0; i < source.Size(); i += 1)
+    {
+        blocked = source[i].disabled
+            || (locked && !theGame.r_getMultiplayerClient().isServiceDialogAction(source[i].dialogAction));
+
+        lastSetChoices[i].disabled = blocked;
+
+        description = "<font size = '" + IntToString(23 + choiceScale) + "' >" + source[i].description + "</font>";
+        prefix = "<font size = '" + IntToString(23 + choiceScale) + "' >" + IntToString(i + 1) + ". " + "</font>";
+
+        if(blocked)
+        {
+            colour = "#CC0000";
+        }
+        else if(source[i].previouslyChoosen)
+        {
+            colour = "#a7a7a7";
+        }
+        else if(source[i].emphasised)
+        {
+            colour = "#d9b215";
+        }
+        else
+        {
+            colour = "#F2D6B7";
+        }
+
+        description = "<FONT COLOR='" + colour + "'>" + description + "</FONT>";
+        prefix = "<FONT COLOR='" + colour + "'>" + prefix + "</FONT>";
+
+        choiceFlashObject = flashValueStorage.CreateTempFlashObject();
+        choiceFlashObject.SetMemberFlashString("prefix", prefix);
+        choiceFlashObject.SetMemberFlashString("name", description);
+        choiceFlashObject.SetMemberFlashInt("icon", (int)source[i].dialogAction);
+        choiceFlashObject.SetMemberFlashBool("read", source[i].previouslyChoosen == false);
+        choiceFlashObject.SetMemberFlashBool("emphasis", source[i].emphasised);
+        choiceFlashObject.SetMemberFlashBool("locked", blocked);
+
+        choiceFlashArray.SetElementFlashObject(i, choiceFlashObject);
+    }
+
+    flashValueStorage.SetFlashArray("hud.dialog.choices", choiceFlashArray);
+}
+
+@addMethod(CR4HudModuleDialog)
+public function WO_AcceptChoiceUnlocked(index : int)
+{
+    if(index < 0 || index >= lastSetChoices.Size())
+    {
+        return;
+    }
+
+    lastSetChoices[index].disabled = false;
+
+    OnDialogOptionAccepted(index);
 }
 
 @addMethod(CR4HudModuleDialog)
@@ -1342,7 +1442,7 @@ public function WO_ShowDialogAssistText(text : string, emphasise : bool)
         msg = "<font size = '"+ IntToString( 27 + subtitleScale ) + "' ><FONT COLOR='#a7a7a7'>" + text + "</FONT></font>";
     }
 
-    m_fxPreviousSentenceSetSFF.InvokeSelfOneArg(FlashArgString(msg));
+    m_fxPreviousSentenceSetSFF.InvokeSelfOneArg(FlashArgString(msg + "<br><br>"));
 }
 
 @addMethod(CR4HudModuleDialog)

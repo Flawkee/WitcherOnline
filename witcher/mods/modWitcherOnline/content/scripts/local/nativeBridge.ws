@@ -38,6 +38,7 @@ import function WO_SaveProgress() : int;
 import function WO_SaveError() : string;
 import function WO_SaveFile() : string;
 import function WO_SaveReset();
+import function WO_SceneStart(voiceTag : string, npcX : float, npcY : float, npcZ : float, kind : int);
 import function WO_SavePurge(marker : string) : int;
 import function WO_SaveLeftovers(marker : string) : int;
 import function WO_CharStore(slot : string, body : string) : bool;
@@ -247,6 +248,10 @@ function WO_PumpInbound(maxMessages : int)
                 WO_ApplyPartyInvite();
                 break;
 
+            case 15:
+                WO_ApplySceneStart();
+                break;
+
 
 
             default:
@@ -289,6 +294,17 @@ function WO_ApplyVisibility()
 function WO_ApplyPartyInvite()
 {
     theGame.r_getMultiplayerClient().onPartyInvite(WO_Str(0), WO_Str(1), WO_Str(2));
+}
+
+function WO_ApplySceneStart()
+{
+    if(WO_FieldCount() < 5)
+    {
+        return;
+    }
+
+    theGame.r_getMultiplayerClient().onRemoteSceneStart(WO_Str(0), WO_Str(1),
+        WO_Float(2), WO_Float(3), WO_Float(4), WO_Int(5));
 }
 
 function WO_ApplyParty()

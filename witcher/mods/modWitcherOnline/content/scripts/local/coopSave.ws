@@ -22,6 +22,7 @@ class r_CoopSave
     private var purgeUntil : float;
     private var nextPurgeAt : float;
     private var saveHoldUntil : float;
+    private var nextGateReportAt : float;
 
     private var SAVE_INTERVAL : float;
     private var SAVE_SETTLE   : float;
@@ -46,6 +47,7 @@ class r_CoopSave
     default purgeUntil = 0.0;
     default nextPurgeAt = 0.0;
     default saveHoldUntil = 0.0;
+    default nextGateReportAt = 0.0;
 
     default SAVE_INTERVAL = 300.0;
     default SAVE_SETTLE = 1.0;
@@ -102,6 +104,20 @@ class r_CoopSave
 
         WO_SaveIncomingDir(WO_SaveDirectory());
         WO_Note("[coopsave] session resumed after adoption load");
+    }
+
+    public function abandonSession()
+    {
+        if(!active)
+        {
+            return;
+        }
+
+        active = false;
+        savePending = false;
+        releaseLock();
+
+        WO_Note("[coopsave] session abandoned for the main menu");
     }
 
     public function endSession()
@@ -230,6 +246,15 @@ class r_CoopSave
         updateAdoption();
 
         now = theGame.GetEngineTimeAsSeconds();
+
+        if(now >= nextGateReportAt)
+        {
+            nextGateReportAt = now + 30.0;
+
+            WO_Note("[coopsave] gate active=" + active + " pending=" + savePending
+                + " adopt=" + adoptStage + " now=" + now
+                + " hold=" + saveHoldUntil + " next=" + nextSaveAt);
+        }
 
         if(savePending)
         {

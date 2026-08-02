@@ -7,7 +7,7 @@ function WitcherOnline_CoopActive() : bool
         return false;
     }
 
-    client = theGame.r_getMultiplayerClient();
+    client = theGame.r_multiplayerClient;
 
     if(!client)
     {

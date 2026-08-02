@@ -15,6 +15,7 @@
 extern void ResetInboundDeltaCaches();
 extern void SendPartyRequest(const char* opcode, const std::string& argument);
 extern void SendPartyRequest2(const char* opcode, const std::string& first, const std::string& second);
+extern void SendSaveChunk(const char* opcode, const std::vector<std::string>& fields);
 #include "SaveTransfer.h"
 
 extern bool WriteCharSnapshot(const std::string& slot, const std::string& text);
@@ -1570,6 +1571,27 @@ namespace w3mp {
 		SaveTransfer::Reset();
 	}
 
+	static void WO_SceneStart(void* context, void* frame, void* result)
+	{
+		RedString voiceTag;
+		const int tagSize = ReadStringParameter(frame, voiceTag);
+		const float npcX = ReadFloatParameter(frame);
+		const float npcY = ReadFloatParameter(frame);
+		const float npcZ = ReadFloatParameter(frame);
+		const int kind = ReadIntParameter(frame);
+
+		AdvanceFrame(frame);
+
+		std::vector<std::string> fields;
+		fields.push_back(tagSize > 0 ? NarrowPayload(voiceTag) : std::string("-"));
+		fields.push_back(std::to_string(npcX));
+		fields.push_back(std::to_string(npcY));
+		fields.push_back(std::to_string(npcZ));
+		fields.push_back(std::to_string(kind));
+
+		SendSaveChunk("SCENE", fields);
+	}
+
 	static void WO_SavePurge(void* context, void* frame, void* result)
 	{
 		RedString marker;
@@ -2509,6 +2531,7 @@ namespace w3mp {
 		RegisterOne(L"WO_SaveError", reinterpret_cast<void*>(&WO_SaveError), "WO_SaveError");
 		RegisterOne(L"WO_SaveFile", reinterpret_cast<void*>(&WO_SaveFile), "WO_SaveFile");
 		RegisterOne(L"WO_SaveReset", reinterpret_cast<void*>(&WO_SaveReset), "WO_SaveReset");
+		RegisterOne(L"WO_SceneStart", reinterpret_cast<void*>(&WO_SceneStart), "WO_SceneStart");
 		RegisterOne(L"WO_SavePurge", reinterpret_cast<void*>(&WO_SavePurge), "WO_SavePurge");
 		RegisterOne(L"WO_SaveLeftovers", reinterpret_cast<void*>(&WO_SaveLeftovers), "WO_SaveLeftovers");
 		RegisterOne(L"WO_CharStore", reinterpret_cast<void*>(&WO_CharStore), "WO_CharStore");

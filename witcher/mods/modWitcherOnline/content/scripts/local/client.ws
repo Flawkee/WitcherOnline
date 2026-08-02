@@ -1,4 +1,4 @@
-﻿// Witcher Online by rejuvenate
+// Witcher Online by rejuvenate
 // https://www.nexusmods.com/profile/rejuvenate7
 struct r_ChillDef 
 { 
@@ -196,12 +196,50 @@ statemachine class r_MultiplayerClient
     private var coopSave : r_CoopSave;
     private var coopMode : bool;
     private var coopLeader : bool;
+    private var partyDialogReady : bool;
+    private var leaderChoiceLockApplied : bool;
+    private var dialogChoicesMeaningful : bool;
+    private var coopRoster : array<string>;
+    private var nextReadyNoticeAt : float;
+    private var wasInSceneLocal : bool;
+    private var sceneCheckAt : float;
+    private var sceneSawChoices : bool;
+    private var sceneJoinNeedsDialog : bool;
+    private var scenePendingUntil : float;
+    private var sceneCallIsStuck : bool;
+    private var sceneAnnounceAt : float;
+    private var nextStuckCallAt : float;
+    private var sceneProbeIndex : int;
+    private var SCENE_CALL_LIFETIME : float;
+    private var sceneJoinStage : int;
+    private var sceneJoinAt : float;
+    private var sceneJoinWho : string;
+    private var sceneJoinVoice : name;
+    private var sceneJoinNpcPos : Vector;
+    private var sceneSuppressUntil : float;
     private var coopOffered : bool;
     private var confirmPopupOpen : bool;
     private var pendingInviteFrom : string;
 
     default coopMode = false;
     default coopLeader = false;
+    default partyDialogReady = false;
+    default leaderChoiceLockApplied = false;
+    default dialogChoicesMeaningful = false;
+    default nextReadyNoticeAt = 0.0;
+    default wasInSceneLocal = false;
+    default sceneCheckAt = 0.0;
+    default sceneSawChoices = false;
+    default sceneJoinNeedsDialog = true;
+    default scenePendingUntil = 0.0;
+    default sceneCallIsStuck = false;
+    default sceneAnnounceAt = 0.0;
+    default nextStuckCallAt = 0.0;
+    default sceneProbeIndex = 0;
+    default SCENE_CALL_LIFETIME = 300.0;
+    default sceneJoinStage = 0;
+    default sceneJoinAt = 0.0;
+    default sceneSuppressUntil = 0.0;
     default coopOffered = false;
     default confirmPopupOpen = false;
     private var partyId : int;
@@ -493,122 +531,721 @@ statemachine class r_MultiplayerClient
         var total : int;
         var ready : int;
         var text : string;
-        var waitingName : string;
+        var leaderName : string;
         var remotePlayer : r_RemotePlayer;
-        var now : float;
-        var allPlayersInRange : bool;
+        var iAmLeader : bool;
 
-        now = theGame.GetEngineTimeAsSeconds();
-
-        if(inParty && joinedParty != username)
+        if(!isCoopSession())
         {
+            clearDialogReadyText();
+            partyDialogReady = false;
+            applyLeaderChoiceLock();
             return;
         }
 
-        if(!hasActiveDialogChoices())
-        {
-            if(leaderDialogReadyText != "")
-            {
-                clearDialogPickAlert();
-            }
+        iAmLeader = isPartyLeader();
+        leaderName = joinedParty;
 
-            leaderDialogReadyText = "";
-            leaderDialogAllReadyShown = false;
-            leaderDialogAllReadyClearAt = -999;
+        if(!hasActiveDialogChoices() || !dialogChoicesMeaningful)
+        {
+            clearDialogReadyText();
+            partyDialogReady = false;
+            applyLeaderChoiceLock();
             return;
         }
 
-        total = 0;
-        ready = 0;
-        waitingName = "";
-        allPlayersInRange = true;
+        total = 1;
+        ready = 1;
 
         for(i = 0; i < globalPlayers.Size(); i += 1)
         {
-            if(globalPlayers[i] && globalPlayers[i].inParty && globalPlayers[i].joinedParty == username)
+            if(!globalPlayers[i] || !globalPlayers[i].inParty)
             {
-                total += 1;
-
-                remotePlayer = hm_getRemotePlayer(playersByServerId, globalPlayers[i].serverPlayerId);
-
-                if(!isRemotePlayerCloseForDialogSync(remotePlayer))
-                {
-                    allPlayersInRange = false;
-                    break;
-                }
-
-                if(isFollowerCaughtUpToLeaderDialog(remotePlayer))
-                {
-                    ready += 1;
-                }
-                else if(waitingName == "")
-                {
-                    waitingName = globalPlayers[i].username;
-                }
-            }
-        }
-
-        if(!allPlayersInRange)
-        {
-            if(leaderDialogReadyText != "")
-            {
-                clearDialogPickAlert();
+                continue;
             }
 
-            leaderDialogReadyText = "";
-            leaderDialogAllReadyShown = false;
-            leaderDialogAllReadyClearAt = -999;
-
-            return;
-        }
-
-        if(total <= 0)
-        {
-            if(leaderDialogReadyText != "")
+            if(globalPlayers[i].username == username)
             {
-                clearDialogPickAlert();
+                continue;
             }
 
-            leaderDialogReadyText = "";
-            leaderDialogAllReadyShown = false;
-            leaderDialogAllReadyClearAt = -999;
-            return;
+            if(globalPlayers[i].joinedParty != leaderName)
+            {
+                continue;
+            }
+
+            if(!isInCoopRoster(globalPlayers[i].username))
+            {
+                continue;
+            }
+
+            total += 1;
+
+            remotePlayer = hm_getRemotePlayer(playersByServerId, globalPlayers[i].serverPlayerId);
+
+            if(isFollowerCaughtUpToLeaderDialog(remotePlayer))
+            {
+                ready += 1;
+            }
         }
 
         if(ready < total)
         {
-            leaderDialogAllReadyShown = false;
-            leaderDialogAllReadyClearAt = -999;
+            partyDialogReady = false;
+            applyLeaderChoiceLock();
 
-            text = "(" + IntToString(ready+1) + "/" + IntToString(total+1) + ") " + GetLocStringById(2111114103);
-
-            if(leaderDialogReadyText != text)
+            if(iAmLeader)
             {
-                leaderDialogReadyText = text;
-                showDialogPickAlert(text, false);
+                callStuckParty();
             }
 
-            return;
-        }
+            text = GetLocStringById(2111114301) + " (" + IntToString(ready) + "/" + IntToString(total) + ")";
 
-        if(!leaderDialogAllReadyShown)
-        {
-            leaderDialogAllReadyShown = true;
-            leaderDialogAllReadyClearAt = now + 2.0;
-
-            leaderDialogReadyText = "(" + IntToString(ready+1) + "/" + IntToString(total+1) + ") " + GetLocStringById(2111114104);
-            showDialogPickAlert(leaderDialogReadyText, true);
+            announceReadyText(text);
 
             return;
         }
 
-        if(leaderDialogAllReadyClearAt > 0 && now >= leaderDialogAllReadyClearAt)
-        {
-            clearDialogPickAlert();
+        partyDialogReady = true;
+        applyLeaderChoiceLock();
 
-            leaderDialogReadyText = "";
-            leaderDialogAllReadyClearAt = -999;
+        if(iAmLeader)
+        {
+            clearDialogReadyText();
+            return;
         }
+
+        text = GetLocStringById(2111114102) + " " + leaderName;
+
+        announceReadyText(text);
+    }
+
+    private function callStuckParty()
+    {
+        var anchor : CNewNPC;
+        var now : float;
+        var pos : Vector;
+        var tag : string;
+
+        now = theGame.GetEngineTimeAsSeconds();
+
+        if(now < nextStuckCallAt)
+        {
+            return;
+        }
+
+        nextStuckCallAt = now + 12.0;
+
+        pos = thePlayer.GetWorldPosition();
+        anchor = findSceneAnchorNpc(pos, 20.0);
+
+        if(anchor)
+        {
+            tag = NameToString(anchor.GetVoicetag());
+            pos = anchor.GetWorldPosition();
+        }
+
+        WO_SceneStart(tag, pos.X, pos.Y, pos.Z, 1);
+    }
+
+    private function announceReadyText(text : string)
+    {
+        var now : float;
+
+        now = theGame.GetEngineTimeAsSeconds();
+
+        if(leaderDialogReadyText != text)
+        {
+            leaderDialogReadyText = text;
+            nextReadyNoticeAt = 0.0;
+        }
+
+        if(now < nextReadyNoticeAt)
+        {
+            return;
+        }
+
+        nextReadyNoticeAt = now + 15.0;
+
+        theGame.GetGuiManager().ShowNotification(text);
+    }
+
+    private function clearDialogReadyText()
+    {
+        nextReadyNoticeAt = 0.0;
+
+        if(leaderDialogReadyText == "")
+        {
+            return;
+        }
+
+        leaderDialogReadyText = "";
+        leaderDialogAllReadyShown = false;
+        leaderDialogAllReadyClearAt = -999;
+
+        clearDialogPickAlert();
+    }
+
+    private function remoteChoicesMatch(a : array<wo_SSceneChoice>, b : array<wo_SSceneChoice>) : bool
+    {
+        var i : int;
+
+        if(a.Size() != b.Size() || a.Size() <= 0)
+        {
+            return false;
+        }
+
+        for(i = 0; i < a.Size(); i += 1)
+        {
+            if(a[i].emphasised != b[i].emphasised)
+            {
+                return false;
+            }
+
+            if(a[i].disabled != b[i].disabled)
+            {
+                return false;
+            }
+
+            if(a[i].dialogAction != b[i].dialogAction)
+            {
+                return false;
+            }
+
+            if(a[i].playGoChunk != b[i].playGoChunk)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    public function updateSceneWatch()
+    {
+        var inScene : bool;
+        var now : float;
+
+        if(!isCoopSession())
+        {
+            wasInSceneLocal = false;
+            sceneCheckAt = 0.0;
+            sceneSawChoices = false;
+            return;
+        }
+
+        now = theGame.GetEngineTimeAsSeconds();
+        inScene = theGame.IsDialogOrCutscenePlaying() || theGame.IsCurrentlyPlayingNonGameplayScene();
+
+        if(inScene && !wasInSceneLocal)
+        {
+            sceneCheckAt = now + 4.0;
+            sceneSawChoices = false;
+        }
+
+        if(!inScene)
+        {
+            sceneCheckAt = 0.0;
+            sceneSawChoices = false;
+        }
+
+        wasInSceneLocal = inScene;
+
+        if(sceneCheckAt <= 0.0 || now < sceneCheckAt)
+        {
+            return;
+        }
+
+        sceneCheckAt = 0.0;
+
+        if(sceneSawChoices)
+        {
+            WO_Note("[scene] scene offered choices, leaving the call to the choice rule");
+            return;
+        }
+
+        announceCutsceneIfInitiator();
+    }
+
+    private function announceCutsceneIfInitiator()
+    {
+        scheduleSceneAnnounce();
+    }
+
+    public function announceSceneIfInitiator()
+    {
+        scheduleSceneAnnounce();
+    }
+
+    private function scheduleSceneAnnounce()
+    {
+        var now : float;
+
+        if(!isCoopSession() || sceneJoinStage != 0 || sceneAnnounceAt > 0.0)
+        {
+            return;
+        }
+
+        now = theGame.GetEngineTimeAsSeconds();
+
+        if(now < sceneSuppressUntil)
+        {
+            return;
+        }
+
+        sceneSuppressUntil = now + 20.0;
+        sceneAnnounceAt = now + 1.0;
+    }
+
+    public function updateSceneAnnounce()
+    {
+        var anchor : CNewNPC;
+        var pos : Vector;
+        var tag : string;
+
+        if(sceneAnnounceAt <= 0.0)
+        {
+            return;
+        }
+
+        if(theGame.GetEngineTimeAsSeconds() < sceneAnnounceAt)
+        {
+            return;
+        }
+
+        sceneAnnounceAt = 0.0;
+
+        if(!isCoopSession() || sceneJoinStage != 0 || !thePlayer)
+        {
+            return;
+        }
+
+        pos = thePlayer.GetWorldPosition();
+        anchor = findSceneAnchorNpc(pos, 20.0);
+
+        if(anchor)
+        {
+            tag = NameToString(anchor.GetVoicetag());
+            pos = anchor.GetWorldPosition();
+        }
+
+        WO_Note("[scene] calling the party, anchor=" + tag + " choices=" + describeChoiceSet());
+
+        WO_SceneStart(tag, pos.X, pos.Y, pos.Z, 0);
+    }
+
+    private function describeChoiceSet() : string
+    {
+        var body : string;
+        var i : int;
+
+        for(i = 0; i < dialogChoices.Size(); i += 1)
+        {
+            if(i > 0)
+            {
+                body += ",";
+            }
+
+            body += IntToString(dialogActionToInt(dialogChoices[i].dialogAction));
+
+            if(dialogChoices[i].emphasised)
+            {
+                body += "e";
+            }
+
+            if(dialogChoices[i].previouslyChoosen)
+            {
+                body += "p";
+            }
+        }
+
+        return body;
+    }
+
+    private function findSceneAnchorNpc(centre : Vector, radius : float) : CNewNPC
+    {
+        var entities : array<CGameplayEntity>;
+        var npc : CNewNPC;
+        var best : CNewNPC;
+        var bestDist : float;
+        var dist : float;
+        var i : int;
+
+        FindGameplayEntitiesInSphere(entities, centre, radius, 32, '', FLAG_ExcludePlayer + FLAG_OnlyActors);
+
+        for(i = 0; i < entities.Size(); i += 1)
+        {
+            npc = (CNewNPC)entities[i];
+
+            if(!npc)
+            {
+                continue;
+            }
+
+            if(NameToString(npc.GetVoicetag()) == "")
+            {
+                continue;
+            }
+
+            dist = VecDistance(centre, npc.GetWorldPosition());
+
+            if(!best || dist < bestDist)
+            {
+                best = npc;
+                bestDist = dist;
+            }
+        }
+
+        return best;
+    }
+
+    public function onRemoteSceneStart(who : string, voiceTag : string, npcX : float, npcY : float, npcZ : float, kind : int)
+    {
+        var remotePlayer : r_RemotePlayer;
+        var body : string;
+        var dist : float;
+
+        if(!isCoopSession() || who == username)
+        {
+            return;
+        }
+
+        if(sceneJoinStage != 0)
+        {
+            return;
+        }
+
+        remotePlayer = mpghosts_getPlayer(who);
+
+        if(!remotePlayer)
+        {
+            return;
+        }
+
+        sceneJoinWho = who;
+        sceneJoinVoice = WO_ToName(voiceTag);
+        sceneJoinNpcPos = Vector(npcX, npcY, npcZ);
+        sceneCallIsStuck = (kind == 1);
+
+        scenePendingUntil = theGame.GetEngineTimeAsSeconds() + SCENE_CALL_LIFETIME;
+
+        updateScenePending();
+    }
+
+    public function updateScenePending()
+    {
+        var remotePlayer : r_RemotePlayer;
+        var body : string;
+        var dist : float;
+        var sameArea : bool;
+
+        if(scenePendingUntil <= 0.0)
+        {
+            return;
+        }
+
+        if(!isCoopSession() || sceneJoinWho == "" || sceneJoinStage != 0)
+        {
+            clearScenePending();
+            return;
+        }
+
+        remotePlayer = mpghosts_getPlayer(sceneJoinWho);
+
+        if(!remotePlayer)
+        {
+            clearScenePending();
+            return;
+        }
+
+        sameArea = (remotePlayer.area == theGame.GetCommonMapManager().GetCurrentArea());
+        dist = VecDistance(thePlayer.GetWorldPosition(), remotePlayer.pos);
+
+        if(inLocalScene() && sameArea && dist <= 5.0)
+        {
+            clearScenePending();
+            return;
+        }
+
+        if(theGame.GetEngineTimeAsSeconds() >= scenePendingUntil)
+        {
+            WO_Note("[scene] call from " + sceneJoinWho + " expired while busy");
+            clearScenePending();
+            return;
+        }
+
+        if(isBusyForSceneJoin())
+        {
+            return;
+        }
+
+        if(sceneCallIsStuck && inLocalScene())
+        {
+            thePlayer.StopAllScenes();
+
+            clearScenePending();
+
+            body = StrReplace(GetLocStringById(2111114305), "%s", sceneJoinWho);
+            showConfirmPopup(3, sceneJoinWho, GetLocStringById(2111114304), body);
+            return;
+        }
+
+        if(inLocalScene() || confirmPopupOpen)
+        {
+            return;
+        }
+
+        clearScenePending();
+
+        if(sameArea && dist <= 50.0)
+        {
+            beginSceneJoin();
+            return;
+        }
+
+        if(sceneCallIsStuck)
+        {
+            body = StrReplace(GetLocStringById(2111114305), "%s", sceneJoinWho);
+        }
+        else if(isPartyLeader())
+        {
+            body = StrReplace(GetLocStringById(2111114303), "%s", sceneJoinWho);
+        }
+        else
+        {
+            body = StrReplace(GetLocStringById(2111114302), "%s", sceneJoinWho);
+        }
+
+        showConfirmPopup(3, sceneJoinWho, GetLocStringById(2111114304), body);
+    }
+
+    private function clearScenePending()
+    {
+        scenePendingUntil = 0.0;
+    }
+
+    private function inLocalScene() : bool
+    {
+        return theGame.IsDialogOrCutscenePlaying() || theGame.IsCurrentlyPlayingNonGameplayScene();
+    }
+
+    private function isBusyForSceneJoin() : bool
+    {
+        if(!thePlayer)
+        {
+            return true;
+        }
+
+        return thePlayer.IsInCombat() || thePlayer.IsThreatened() || !thePlayer.IsAlive();
+    }
+
+    public function beginSceneJoin()
+    {
+        if(sceneJoinWho == "" || !isCoopSession())
+        {
+            return;
+        }
+
+        sceneSuppressUntil = theGame.GetEngineTimeAsSeconds() + 30.0;
+        sceneJoinStage = 1;
+    }
+
+    public function updateSceneJoin()
+    {
+        var now : float;
+
+        if(sceneJoinStage == 0)
+        {
+            return;
+        }
+
+        if(!isCoopSession())
+        {
+            sceneJoinStage = 0;
+            sceneJoinWho = "";
+            return;
+        }
+
+        now = theGame.GetEngineTimeAsSeconds();
+
+        if(sceneJoinStage == 1)
+        {
+            if(isBusyForSceneJoin())
+            {
+                return;
+            }
+
+            if(inLocalScene())
+            {
+                thePlayer.StopAllScenes();
+            }
+
+            mpghosts_teleport(sceneJoinWho);
+
+            sceneProbeIndex = 0;
+            sceneJoinAt = now + 0.5;
+            sceneJoinStage = 2;
+            return;
+        }
+
+        if(now < sceneJoinAt)
+        {
+            return;
+        }
+
+        if(inLocalScene())
+        {
+            sceneJoinStage = 0;
+            return;
+        }
+
+        if(sceneProbeIndex < 3)
+        {
+            sceneProbeIndex += 1;
+
+            tryStartSceneDialog();
+
+            sceneJoinAt = now + 0.5;
+            return;
+        }
+
+        sceneJoinStage = 0;
+
+        WO_Note("[scene] dialog did not start after 3 attempts, leaving it to the player");
+
+        notice(GetLocStringById(2111114306));
+    }
+
+    private function tryStartSceneDialog()
+    {
+        var anchor : CNewNPC;
+
+        anchor = findSceneAnchorNpc(sceneJoinNpcPos, 20.0);
+
+        if(!anchor || anchor.GetVoicetag() != sceneJoinVoice)
+        {
+            anchor = findSceneAnchorNpc(thePlayer.GetWorldPosition(), 20.0);
+        }
+
+        if(anchor)
+        {
+            anchor.PlayDialog();
+        }
+    }
+
+    public function isCoopSession() : bool
+    {
+        return inParty && (coopMode || coopLeader);
+    }
+
+    public function setCoopRoster(list : string)
+    {
+        coopRoster.Clear();
+
+        if(list == "")
+        {
+            return;
+        }
+
+        coopRoster = woSplit(list, ",");
+    }
+
+    public function isInCoopRoster(who : string) : bool
+    {
+        var i : int;
+
+        if(coopRoster.Size() == 0)
+        {
+            return true;
+        }
+
+        for(i = 0; i < coopRoster.Size(); i += 1)
+        {
+            if(coopRoster[i] == who)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    public function leaveCoopForMainMenu()
+    {
+        if(!coopMode && !coopLeader && !getCoopSave().isActive())
+        {
+            return;
+        }
+
+        if(coopMode)
+        {
+            WO_PartyCoopMode(false);
+        }
+
+        coopMode = false;
+        coopLeader = false;
+        coopOffered = false;
+        partyDialogReady = false;
+        dialogChoicesMeaningful = false;
+        sceneJoinStage = 0;
+        sceneJoinWho = "";
+        scenePendingUntil = 0.0;
+        coopRoster.Clear();
+
+        getCoopSave().abandonSession();
+
+        WO_Note("[coopsave] co-op cleared on returning to the main menu");
+    }
+
+    public function shouldLockDialogChoices() : bool
+    {
+        if(!isCoopSession())
+        {
+            return false;
+        }
+
+        if(!dialogChoicesMeaningful)
+        {
+            return false;
+        }
+
+        if(!isPartyLeader())
+        {
+            return true;
+        }
+
+        return !partyDialogReady;
+    }
+
+    private function applyLeaderChoiceLock()
+    {
+        var hud : CR4ScriptedHud;
+        var module : CR4HudModuleDialog;
+        var locked : bool;
+
+        locked = shouldLockDialogChoices();
+
+        if(locked == leaderChoiceLockApplied)
+        {
+            return;
+        }
+
+        hud = (CR4ScriptedHud)theGame.GetHud();
+
+        if(!hud)
+        {
+            return;
+        }
+
+        module = (CR4HudModuleDialog)hud.GetHudModule("DialogModule");
+
+        if(!module)
+        {
+            return;
+        }
+
+        leaderChoiceLockApplied = locked;
+        module.WO_RelockDialogChoices(dialogChoices, locked);
     }
 
     private function isFollowerCaughtUpToLeaderDialog(remotePlayer : r_RemotePlayer) : bool
@@ -640,8 +1277,28 @@ statemachine class r_MultiplayerClient
     {
         dialogChoices = val;
         dialogChoicesActive = val.Size() > 0;
+        dialogChoicesMeaningful = dialogChoicesActive && isMeaningfulChoiceSet(val);
+
+        if(dialogChoicesActive)
+        {
+            sceneSawChoices = true;
+        }
+
+        if(dialogChoicesActive && isCoopSession())
+        {
+            WO_Note("[scene] choices meaningful=" + dialogChoicesMeaningful
+                + " set=" + describeChoiceSet());
+        }
 
         currentDialogChoiceSetId += 1;
+
+        partyDialogReady = false;
+        leaderChoiceLockApplied = shouldLockDialogChoices();
+
+        if(dialogChoicesMeaningful)
+        {
+            announceSceneIfInitiator();
+        }
 
         if(dialogChoicesActive)
         {
@@ -705,6 +1362,11 @@ statemachine class r_MultiplayerClient
             return;
         }
 
+        if(!dialogChoicesMeaningful || isServiceDialogAction(dialogChoices[index].dialogAction))
+        {
+            return;
+        }
+
         lastSelectedDialogIndex = index;
         lastSelectedDialogCount = lastSelectedDialogCount + 1;
         lastSelectedDialogChoiceSetId = currentDialogChoiceSetId;
@@ -747,6 +1409,59 @@ statemachine class r_MultiplayerClient
     public function isApplyingSyncedDialogChoice() : bool
     {
         return applyingSyncedDialogChoice;
+    }
+
+    public function isServiceDialogAction(action : EDialogActionIcon) : bool
+    {
+        if(action == DialogAction_EXIT)             return true;
+        if(action == DialogAction_SHOPPING)         return true;
+        if(action == DialogAction_CRAFTING)         return true;
+        if(action == DialogAction_SMITH)            return true;
+        if(action == DialogAction_ARMORER)          return true;
+        if(action == DialogAction_RUNESMITH)        return true;
+        if(action == DialogAction_TEACHER)          return true;
+        if(action == DialogAction_HAIRCUT)          return true;
+        if(action == DialogAction_SHAVING)          return true;
+        if(action == DialogAction_STORAGE)          return true;
+        if(action == DialogAction_FAST_TRAVEL)      return true;
+        if(action == DialogAction_AUCTION)          return true;
+        if(action == DialogAction_HOUSE)            return true;
+        if(action == DialogAction_GETBACK)          return true;
+        if(action == DialogAction_BET)              return true;
+        if(action == DialogAction_GIFT)             return true;
+        if(action == DialogAction_CONTENT_MISSING)  return true;
+        if(action == DialogAction_GAME_DICES)       return true;
+        if(action == DialogAction_GAME_FIGHT)       return true;
+        if(action == DialogAction_GAME_WRESTLE)     return true;
+        if(action == DialogAction_GAME_DRINK)       return true;
+        if(action == DialogAction_GAME_DAGGER)      return true;
+        if(action == DialogAction_GAME_CARDS)       return true;
+
+        return false;
+    }
+
+    public function isMeaningfulChoiceSet(choices : array<SSceneChoice>) : bool
+    {
+        var story : int;
+        var unread : int;
+        var i : int;
+
+        for(i = 0; i < choices.Size(); i += 1)
+        {
+            if(isServiceDialogAction(choices[i].dialogAction))
+            {
+                continue;
+            }
+
+            story += 1;
+
+            if(!choices[i].previouslyChoosen)
+            {
+                unread += 1;
+            }
+        }
+
+        return story >= 2 && unread >= 1;
     }
 
     public function dialogActionToInt(action : EDialogActionIcon) : int
@@ -888,21 +1603,10 @@ statemachine class r_MultiplayerClient
             }
         }
 
-        if(hasActiveDialogChoices() && remotePlayer.menuName == "InCutscene" && remotePlayer.dialogChoices.Size() > 0 && isRemotePlayerCloseForDialogSync(remotePlayer)
-            && dialogChoicesMatch(dialogChoices, remotePlayer.dialogChoices) && !pendingSyncedDialogChoice && !(remotePlayer.lastDialogIndex >= 0 && remotePlayer.lastDialogCount > 0 && remotePlayer.lastDialogCount != remotePlayer.prevDialogCount))
+        if(!isCoopSession())
         {
-            text = GetLocStringById(2111114102) + " " + joinedParty;
-
-            if(leaderDialogReadyText != text)
-            {
-                leaderDialogReadyText = text;
-                showDialogPickAlert(text, false);
-            }
-        }
-        else if(leaderDialogReadyText != "")
-        {
-            leaderDialogReadyText = "";
-            clearDialogPickAlert();
+            cancelPendingSyncedDialogChoice();
+            return;
         }
 
         if(pendingSyncedDialogChoice)
@@ -992,6 +1696,11 @@ statemachine class r_MultiplayerClient
             return false;
         }
 
+        if(!dialogChoicesMeaningful || isServiceDialogAction(dialogChoices[index].dialogAction))
+        {
+            return false;
+        }
+
         if(dialogChoices[index].disabled)
         {
             return false;
@@ -1055,7 +1764,7 @@ statemachine class r_MultiplayerClient
 
         applyingSyncedDialogChoice = true;
 
-        module.OnDialogOptionAccepted(pendingSyncedDialogIndex);
+        module.WO_AcceptChoiceUnlocked(pendingSyncedDialogIndex);
 
         applyingSyncedDialogChoice = false;
 
@@ -1133,13 +1842,6 @@ statemachine class r_MultiplayerClient
             return;
         }
 
-        if(!isRemotePlayerCloseForDialogSync(remotePlayer))
-        {
-            consumeRemoteDialogChoice(remotePlayer);
-            return;
-        }
-
-
         if(!hasActiveDialogChoices())
         {
             // auto consume
@@ -1153,48 +1855,19 @@ statemachine class r_MultiplayerClient
             return;
         }
 
+        if(remotePlayer.lastDialogIndex >= dialogChoices.Size())
+        {
+            consumeRemoteDialogChoice(remotePlayer);
+            return;
+        }
+
+        if(!dialogChoicesMeaningful || isServiceDialogAction(dialogChoices[remotePlayer.lastDialogIndex].dialogAction))
+        {
+            consumeRemoteDialogChoice(remotePlayer);
+            return;
+        }
+
         startPendingSyncedDialogChoice(remotePlayer);
-    }
-
-    private function isRemotePlayerCloseForDialogSync(remotePlayer : r_RemotePlayer) : bool
-    {
-        var localPos : Vector;
-        var remotePos : Vector;
-        var horizontalDist : float;
-        var heightDiff : float;
-        var maxHorizontalDist : float;
-        var maxHeightDiff : float;
-
-        if(!remotePlayer)
-        {
-            return false;
-        }
-
-        maxHorizontalDist = 8.0;
-        maxHeightDiff = 3.0;
-
-        localPos = thePlayer.GetWorldPosition();
-        remotePos = remotePlayer.pos;
-
-        horizontalDist = VecDistance2D(localPos, remotePos);
-        heightDiff = localPos.Z - remotePos.Z;
-
-        if(heightDiff < 0.0)
-        {
-            heightDiff = -heightDiff;
-        }
-
-        if(horizontalDist > maxHorizontalDist)
-        {
-            return false;
-        }
-
-        if(heightDiff > maxHeightDiff)
-        {
-            return false;
-        }
-
-        return true;
     }
 
     private function sceneChoiceMatches(localChoice : SSceneChoice, remoteChoice : wo_SSceneChoice) : bool
@@ -1460,6 +2133,10 @@ statemachine class r_MultiplayerClient
                 coopMode = false;
                 coopLeader = false;
                 coopOffered = false;
+                sceneJoinStage = 0;
+                sceneJoinWho = "";
+                scenePendingUntil = 0.0;
+                coopRoster.Clear();
                 getCoopSave().endSession();
                 pendingInviteFrom = "";
                 partyTargetMissingSince = -1;
@@ -1618,6 +2295,19 @@ statemachine class r_MultiplayerClient
         if(kind == 2)
         {
             setCoopMode(approved);
+            return;
+        }
+
+        if(kind == 3)
+        {
+            if(approved)
+            {
+                beginSceneJoin();
+            }
+            else
+            {
+                sceneJoinWho = "";
+            }
         }
     }
 
@@ -1744,6 +2434,12 @@ statemachine class r_MultiplayerClient
         if(kind == "EXPIRED")
         {
             notice(StrReplace(GetLocStringById(2111114279), "%s", who));
+            return;
+        }
+
+        if(kind == "COOPWHO")
+        {
+            setCoopRoster(who == "-" ? "" : who);
             return;
         }
 
@@ -8116,6 +8812,10 @@ state WO_Tick in r_MultiplayerClient
             parent.checkPlayerChange();
             parent.updateWorldSync();
             parent.updateLeaderDialogReadyPopup();
+            parent.updateSceneWatch();
+            parent.updateSceneAnnounce();
+            parent.updateScenePending();
+            parent.updateSceneJoin();
             parent.updateEntityClassifier();
             parent.updateGhostRebuild();
             parent.updateGhostHostility();

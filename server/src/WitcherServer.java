@@ -632,6 +632,7 @@ public class WitcherServer
     {
         return "PRESP".equals(opcode)
                 || "PCOOP".equals(opcode)
+                || "SCENE".equals(opcode)
                 || "SAVEBEG".equals(opcode)
                 || "SAVECHK".equals(opcode)
                 || "SAVEEND".equals(opcode)
@@ -1256,6 +1257,12 @@ public class WitcherServer
                 partyRespond(session, fields.get(0), "1".equals(fields.get(1)));
             }
 
+            return;
+        }
+
+        if ("SCENE".equals(opcode))
+        {
+            relaySceneStart(session, fields);
             return;
         }
 
@@ -1972,6 +1979,8 @@ public class WitcherServer
                 sendPartyState(member, party);
             }
         }
+
+        refreshLeaderCoop(party);
     }
 
     private static void disbandParty(Party party)
@@ -2663,6 +2672,56 @@ public class WitcherServer
         }
     }
 
+    private static void relaySceneStart(PlayerSession session, List<String> fields)
+    {
+        final String senderKey = normalizeUsernameKey(session.username);
+        Party party = partyOf(senderKey);
+
+        if (party == null || fields.size() < 4)
+        {
+            return;
+        }
+
+        boolean anyCoop = false;
+
+        for (String memberKey : party.snapshot())
+        {
+            PlayerSession member = players.get(memberKey);
+
+            if (member != null && member.coopMode)
+            {
+                anyCoop = true;
+                break;
+            }
+        }
+
+        if (!anyCoop)
+        {
+            return;
+        }
+
+        List<String> payload = new ArrayList<>();
+        payload.add(session.username);
+        payload.addAll(fields);
+
+        for (String memberKey : party.snapshot())
+        {
+            if (memberKey.equals(senderKey))
+            {
+                continue;
+            }
+
+            PlayerSession member = players.get(memberKey);
+
+            if (member != null)
+            {
+                queueOutbound(member, "SCENE", payload);
+            }
+        }
+
+        dbg("SCENE %s started a scene, relayed to party #%d\n", senderKey, party.partyId);
+    }
+
     private static void notifyLeaderOfCoop(PlayerSession session)
     {
         refreshLeaderCoop(partyOf(normalizeUsernameKey(session.username)));
@@ -2702,6 +2761,49 @@ public class WitcherServer
         }
 
         queuePartyNotice(leader, anyCoop ? "COOPON" : "COOPOFF", "", "");
+
+        broadcastCoopRoster(party, anyCoop);
+    }
+
+    private static void broadcastCoopRoster(Party party, boolean anyCoop)
+    {
+        final String leaderKey = party.leader();
+        StringBuilder roster = new StringBuilder();
+
+        if (anyCoop)
+        {
+            for (String memberKey : party.snapshot())
+            {
+                PlayerSession member = players.get(memberKey);
+
+                if (member == null)
+                {
+                    continue;
+                }
+
+                if (member.coopMode || memberKey.equals(leaderKey))
+                {
+                    if (roster.length() > 0)
+                    {
+                        roster.append(",");
+                    }
+
+                    roster.append(member.username);
+                }
+            }
+        }
+
+        final String list = roster.toString();
+
+        for (String memberKey : party.snapshot())
+        {
+            PlayerSession member = players.get(memberKey);
+
+            if (member != null)
+            {
+                queuePartyNotice(member, "COOPWHO", list.isEmpty() ? "-" : list, "");
+            }
+        }
     }
 
     private static void queuePartyNotice(PlayerSession session, String kind, String who, String reason)
