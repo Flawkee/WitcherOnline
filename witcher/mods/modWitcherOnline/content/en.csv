@@ -288,10 +288,16 @@
 2111114285||wo_party_request_none|No pending party request from %s.
 2111114286||wo_coop_prompt_title|Enable Co-op Story Mode?
 2111114287||wo_coop_prompt_body|Joined <b>%s</b>'s party.<br>Co-op Story Mode syncs quest and story progress with the leader.<br>Your level, skills, items, gear and gwent cards stay yours.<br>Decline to keep world-sharing only.
-2111114288||wo_coop_enabled|Co-op Story Mode enabled. Quest progression now follows the party leader.
+2111114288||wo_coop_enabled|Co-op Story Mode active. Quest progress now follows the party leader.
 2111114289||wo_coop_declined|Co-op Story Mode declined. You are in world-sharing mode.
 2111114290||wo_party_approve_usage|Usage: approve(username) or reject(username)
 2111114291||wo_party_request_declined_self|You declined %s's party request.
 2111114292||wo_btn_approve|Approve
 2111114293||wo_btn_reject|Reject
 2111114294||wo_save_coop_tag|[CO-OP]
+2111114295||wo_coop_transfer_failed|Could not receive the party leader's game. Try again with coop(true) or rejoin the party.
+2111114296||wo_coop_adopting|Setting up Co-op Story Mode - a loading screen will appear shortly.
+2111114297||wo_coop_adopted|Co-op Story Mode active. Quest progress follows the party leader.
+2111114298||wo_coop_save_blocked|Saving is disabled during Co-op Story Mode.
+2111114299||wo_coop_load_blocked|Loading is disabled during Co-op Story Mode. Leave the party to load a game.
+2111114300||wo_coop_leader_active|Co-op Story Mode active - you are the party leader. Saving and loading are disabled.

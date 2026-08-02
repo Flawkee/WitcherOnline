@@ -700,7 +700,7 @@ std::string ReadCharSnapshot(const std::string& slot)
 
 		std::string raw = buffer.str();
 
-		if (raw.size() > 8 && raw.compare(0, 7, "WOSNAP1") == 0)
+		if (raw.size() >= 8 && raw.compare(0, 7, "WOSNAP1") == 0)
 			raw = SnapDecode(raw.substr(8));
 
 		Diagnostics::Log("char snapshot read: " + path.string() + " (" + std::to_string(raw.size()) + " bytes)");

@@ -1445,6 +1445,62 @@ namespace w3mp {
 			*static_cast<bool*>(result) = ok;
 	}
 
+	static std::atomic<bool> g_coopRestorePending{ false };
+
+	static std::mutex g_coopStashMutex;
+	static std::string g_coopCharStash;
+
+	static void WO_CoopStashChar(void* context, void* frame, void* result)
+	{
+		RedString body;
+		const int size = ReadStringParameter(frame, body);
+
+		AdvanceFrame(frame);
+
+		std::lock_guard<std::mutex> lock(g_coopStashMutex);
+		g_coopCharStash = (size > 0) ? NarrowPayload(body) : std::string();
+
+		Diagnostics::Log("coop character stashed (" + std::to_string(g_coopCharStash.size()) + " bytes)");
+
+		if (result)
+			*static_cast<bool*>(result) = !g_coopCharStash.empty();
+	}
+
+	static void WO_CoopFetchChar(void* context, void* frame, void* result)
+	{
+		AdvanceFrame(frame);
+
+		std::string body;
+
+		{
+			std::lock_guard<std::mutex> lock(g_coopStashMutex);
+			body.swap(g_coopCharStash);
+		}
+
+		WriteStringResult(result, body);
+	}
+
+	static void WO_CoopMarkRestore(void* context, void* frame, void* result)
+	{
+		AdvanceFrame(frame);
+
+		g_coopRestorePending.store(true);
+		Diagnostics::Log("coop restore armed");
+	}
+
+	static void WO_CoopTakeRestore(void* context, void* frame, void* result)
+	{
+		AdvanceFrame(frame);
+
+		const bool pending = g_coopRestorePending.exchange(false);
+
+		if (pending)
+			Diagnostics::Log("coop restore claimed");
+
+		if (result)
+			*static_cast<bool*>(result) = pending;
+	}
+
 	static void WO_SaveDirectory(void* context, void* frame, void* result)
 	{
 		AdvanceFrame(frame);
@@ -1514,6 +1570,28 @@ namespace w3mp {
 		SaveTransfer::Reset();
 	}
 
+	static void WO_SavePurge(void* context, void* frame, void* result)
+	{
+		RedString marker;
+		const int size = ReadStringParameter(frame, marker);
+
+		AdvanceFrame(frame);
+
+		if (result)
+			*static_cast<int*>(result) = SaveTransfer::PurgeIncoming(size > 0 ? NarrowPayload(marker) : std::string());
+	}
+
+	static void WO_SaveLeftovers(void* context, void* frame, void* result)
+	{
+		RedString marker;
+		const int size = ReadStringParameter(frame, marker);
+
+		AdvanceFrame(frame);
+
+		if (result)
+			*static_cast<int*>(result) = SaveTransfer::CountIncoming(size > 0 ? NarrowPayload(marker) : std::string());
+	}
+
 	static void WO_ToName(void* context, void* frame, void* result)
 	{
 		RedString text;
@@ -1536,8 +1614,8 @@ namespace w3mp {
 
 		bool ok = false;
 
-		if (slotSize > 0 && bodySize > 0)
-			ok = WriteCharSnapshot(NarrowPayload(slot), NarrowPayload(body));
+		if (slotSize > 0)
+			ok = WriteCharSnapshot(NarrowPayload(slot), bodySize > 0 ? NarrowPayload(body) : std::string());
 
 		if (result)
 			*static_cast<bool*>(result) = ok;
@@ -2420,6 +2498,10 @@ namespace w3mp {
 		RegisterOne(L"WO_SaveSend", reinterpret_cast<void*>(&WO_SaveSend), "WO_SaveSend");
 		RegisterOne(L"WO_SaveWant", reinterpret_cast<void*>(&WO_SaveWant), "WO_SaveWant");
 		RegisterOne(L"WO_SaveDirectory", reinterpret_cast<void*>(&WO_SaveDirectory), "WO_SaveDirectory");
+		RegisterOne(L"WO_CoopMarkRestore", reinterpret_cast<void*>(&WO_CoopMarkRestore), "WO_CoopMarkRestore");
+		RegisterOne(L"WO_CoopStashChar", reinterpret_cast<void*>(&WO_CoopStashChar), "WO_CoopStashChar");
+		RegisterOne(L"WO_CoopFetchChar", reinterpret_cast<void*>(&WO_CoopFetchChar), "WO_CoopFetchChar");
+		RegisterOne(L"WO_CoopTakeRestore", reinterpret_cast<void*>(&WO_CoopTakeRestore), "WO_CoopTakeRestore");
 		RegisterOne(L"WO_SaveNeededBy", reinterpret_cast<void*>(&WO_SaveNeededBy), "WO_SaveNeededBy");
 		RegisterOne(L"WO_SaveIncomingDir", reinterpret_cast<void*>(&WO_SaveIncomingDir), "WO_SaveIncomingDir");
 		RegisterOne(L"WO_SaveState", reinterpret_cast<void*>(&WO_SaveState), "WO_SaveState");
@@ -2427,6 +2509,8 @@ namespace w3mp {
 		RegisterOne(L"WO_SaveError", reinterpret_cast<void*>(&WO_SaveError), "WO_SaveError");
 		RegisterOne(L"WO_SaveFile", reinterpret_cast<void*>(&WO_SaveFile), "WO_SaveFile");
 		RegisterOne(L"WO_SaveReset", reinterpret_cast<void*>(&WO_SaveReset), "WO_SaveReset");
+		RegisterOne(L"WO_SavePurge", reinterpret_cast<void*>(&WO_SavePurge), "WO_SavePurge");
+		RegisterOne(L"WO_SaveLeftovers", reinterpret_cast<void*>(&WO_SaveLeftovers), "WO_SaveLeftovers");
 		RegisterOne(L"WO_CharStore", reinterpret_cast<void*>(&WO_CharStore), "WO_CharStore");
 		RegisterOne(L"WO_CharFetch", reinterpret_cast<void*>(&WO_CharFetch), "WO_CharFetch");
 		RegisterOne(L"WO_EntityProbe", reinterpret_cast<void*>(&WO_EntityProbe), "WO_EntityProbe");

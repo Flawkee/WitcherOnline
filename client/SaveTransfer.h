@@ -39,6 +39,10 @@ namespace w3mp {
 		std::string LastError();
 		std::string CompletedFile();
 
+		int PurgeIncoming(const std::string& marker);
+
+		int CountIncoming(const std::string& marker);
+
 		void Reset();
 	}
 }

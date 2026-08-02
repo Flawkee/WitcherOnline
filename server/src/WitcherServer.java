@@ -163,7 +163,7 @@ public class WitcherServer
     private static final int MAX_PACKET_FIELDS = 512;
 
     private static final long RATE_LIMIT_WINDOW_NANOS = 1_000_000_000L;
-    private static final int RATE_LIMIT_PACKETS_PER_WINDOW = 240;
+    private static final int RATE_LIMIT_PACKETS_PER_WINDOW = 600;
 
     private static final Map<String, RateLimitState> rateLimits = new ConcurrentHashMap<>();
 
@@ -1268,6 +1268,8 @@ public class WitcherServer
                 dbg("PARTY %s co-op mode %s\n",
                         normalizeUsernameKey(session.username),
                         session.coopMode ? "ENABLED" : "disabled");
+
+                notifyLeaderOfCoop(session);
             }
 
             return;
@@ -2034,12 +2036,14 @@ public class WitcherServer
         if (!usernameKey.equals(previousLeader))
         {
             broadcastParty(party);
+            refreshLeaderCoop(party);
             return;
         }
 
         dbg("PARTY #%d leader %s left, promoted %s\n", party.partyId, previousLeader, party.leader());
 
         broadcastParty(party);
+        refreshLeaderCoop(party);
     }
 
     private static final class SaveTarget
@@ -2065,7 +2069,7 @@ public class WitcherServer
         final Set<String> waiting = new HashSet<>();
     }
 
-    private static final int SAVE_RESEND_PER_TICK = 24;
+    private static final int SAVE_RESEND_PER_TICK = 5;
     private static final int OUTBOUND_QUEUE_LIMIT = 256;
     private static final int OUTBOUND_SAVE_HEADROOM = 16;
     private static final long SAVE_RELAY_RETAIN_NANOS = 60_000_000_000L;
@@ -2113,6 +2117,15 @@ public class WitcherServer
             beginTarget(relay, askerKey, true);
 
             dbg("SAVE relay #%d upload in flight, %s attached\n", relay.transferId, askerKey);
+            return;
+        }
+
+        if (relay != null && !relay.uploadComplete && !relay.waiting.isEmpty())
+        {
+            relay.waiting.add(askerKey);
+            relay.lastActivityNanos = now;
+
+            dbg("SAVE relay for party #%d already requested, %s queued\n", party.partyId, askerKey);
             return;
         }
 
@@ -2284,6 +2297,42 @@ public class WitcherServer
 
         if ("SAVEEND".equals(opcode))
         {
+            StringBuilder missing = new StringBuilder();
+            int missingCount = 0;
+
+            for (int i = 0; i < relay.totalChunks; i++)
+            {
+                if (relay.chunks[i] != null)
+                {
+                    continue;
+                }
+
+                missingCount++;
+
+                if (missingCount <= 200)
+                {
+                    if (missing.length() > 0)
+                    {
+                        missing.append(',');
+                    }
+
+                    missing.append(i);
+                }
+            }
+
+            if (missingCount > 0)
+            {
+                List<String> ask = new ArrayList<>();
+                ask.add(Integer.toString(transferId));
+                ask.add(missing.toString());
+
+                queueOutbound(sender, "SAVENACK", ask);
+
+                dbg("SAVE relay #%d incomplete upload, asked %s for %d missing chunks\n",
+                        transferId, senderKey, missingCount);
+                return;
+            }
+
             relay.uploadComplete = true;
 
             for (SaveTarget target : relay.targets.values())
@@ -2364,6 +2413,17 @@ public class WitcherServer
             }
 
             relay.waiting.remove(senderKey);
+
+            PlayerSession owner = players.get(relay.ownerKey);
+
+            if (owner != null)
+            {
+                List<String> ack = new ArrayList<>();
+                ack.add(Integer.toString(transferId));
+                ack.add("1");
+
+                queueOutbound(owner, "SAVEACK", ack);
+            }
 
             dbg("SAVE relay #%d delivered to %s, cache retained %ds\n",
                     transferId, senderKey, SAVE_RELAY_RETAIN_NANOS / 1000000000L);
@@ -2601,6 +2661,47 @@ public class WitcherServer
 
             dbg("PARTY request %s -> %s EXPIRED\n", request.requesterKey, request.targetKey);
         }
+    }
+
+    private static void notifyLeaderOfCoop(PlayerSession session)
+    {
+        refreshLeaderCoop(partyOf(normalizeUsernameKey(session.username)));
+    }
+
+    private static void refreshLeaderCoop(Party party)
+    {
+        if (party == null)
+        {
+            return;
+        }
+
+        final String leaderKey = party.leader();
+        PlayerSession leader = players.get(leaderKey);
+
+        if (leader == null)
+        {
+            return;
+        }
+
+        boolean anyCoop = false;
+
+        for (String memberKey : party.snapshot())
+        {
+            if (memberKey.equals(leaderKey))
+            {
+                continue;
+            }
+
+            PlayerSession member = players.get(memberKey);
+
+            if (member != null && member.coopMode)
+            {
+                anyCoop = true;
+                break;
+            }
+        }
+
+        queuePartyNotice(leader, anyCoop ? "COOPON" : "COOPOFF", "", "");
     }
 
     private static void queuePartyNotice(PlayerSession session, String kind, String who, String reason)

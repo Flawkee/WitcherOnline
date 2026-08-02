@@ -17,10 +17,11 @@ namespace w3mp {
 	namespace {
 
 		const size_t kChunkBytes = 1024;
-		const int kChunksPerPump = 24;
+		const int kChunksPerSecond = 150;
+		const int kMaxChunksPerPump = 64;
 		const int kMaxAttempts = 3;
 		const unsigned long long kNackIntervalMs = 1500;
-		const unsigned long long kStallTimeoutMs = 30000;
+		const unsigned long long kStallTimeoutMs = 45000;
 		const size_t kNackBatch = 200;
 
 		const char kB64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -40,6 +41,8 @@ namespace w3mp {
 		size_t g_sendCursor = 0;
 		std::vector<int> g_resendQueue;
 		unsigned long long g_lastActivityMs = 0;
+		unsigned long long g_lastSendMs = 0;
+		double g_sendCredit = 0.0;
 		bool g_sentEnd = false;
 
 		// receiver
@@ -50,6 +53,8 @@ namespace w3mp {
 		unsigned int g_expectedCrc = 0;
 		int g_haveCount = 0;
 		unsigned long long g_lastNackMs = 0;
+		unsigned long long g_lastChunkMs = 0;
+		bool g_endSeen = false;
 
 		std::string g_pendingRequest;
 
@@ -149,10 +154,14 @@ namespace w3mp {
 			g_received.clear();
 			g_have.clear();
 			g_sendCursor = 0;
+			g_lastSendMs = 0;
+			g_sendCredit = 0.0;
 			g_expectedChunks = 0;
 			g_expectedBytes = 0;
 			g_expectedCrc = 0;
 			g_haveCount = 0;
+			g_lastChunkMs = 0;
+			g_endSeen = false;
 			g_sentEnd = false;
 		}
 
@@ -270,7 +279,23 @@ namespace w3mp {
 
 		if (g_state == State::Sending)
 		{
-			int budget = kChunksPerPump;
+			if (g_lastSendMs == 0)
+				g_lastSendMs = now;
+
+			const unsigned long long elapsed = now - g_lastSendMs;
+			g_lastSendMs = now;
+
+			g_sendCredit += (static_cast<double>(elapsed) / 1000.0) * kChunksPerSecond;
+
+			if (g_sendCredit > kMaxChunksPerPump)
+				g_sendCredit = kMaxChunksPerPump;
+
+			int budget = static_cast<int>(g_sendCredit);
+
+			if (budget <= 0)
+				return;
+
+			g_sendCredit -= budget;
 
 			while (budget > 0 && !g_resendQueue.empty())
 			{
@@ -306,10 +331,13 @@ namespace w3mp {
 			if ((now - g_lastNackMs) < kNackIntervalMs)
 				return;
 
-			g_lastNackMs = now;
-
 			if (g_expectedChunks <= 0)
 				return;
+
+			if (!g_endSeen && g_lastChunkMs != 0 && (now - g_lastChunkMs) < kNackIntervalMs)
+				return;
+
+			g_lastNackMs = now;
 
 			std::string missing;
 			size_t listed = 0;
@@ -389,6 +417,7 @@ namespace w3mp {
 			g_have[index] = true;
 			++g_haveCount;
 			g_lastActivityMs = GetTickCount64();
+			g_lastChunkMs = g_lastActivityMs;
 			return;
 		}
 
@@ -431,8 +460,13 @@ namespace w3mp {
 			if (fields.empty() || atoi(fields[0].c_str()) != g_transferId)
 				return;
 
+			g_endSeen = true;
+
 			if (g_haveCount < g_expectedChunks)
+			{
+				g_lastNackMs = 0;
 				return;
+			}
 
 			std::string body;
 			body.reserve(static_cast<size_t>(g_expectedBytes));
@@ -534,6 +568,81 @@ namespace w3mp {
 	{
 		std::lock_guard<std::mutex> lock(g_mutex);
 		return g_completedFile;
+	}
+
+	namespace {
+
+		int SweepIncoming(const std::string& marker, bool remove)
+		{
+			std::string directory;
+
+			{
+				std::lock_guard<std::mutex> lock(g_mutex);
+				directory = g_incomingDir;
+			}
+
+			if (directory.empty() || marker.empty())
+				return 0;
+
+			WIN32_FIND_DATAA find;
+			const HANDLE handle = FindFirstFileA((directory + "\\*").c_str(), &find);
+
+			if (handle == INVALID_HANDLE_VALUE)
+				return 0;
+
+			std::string needle = marker;
+			for (char& c : needle)
+				c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+
+			int hits = 0;
+
+			do
+			{
+				if (find.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+					continue;
+
+				std::string name = find.cFileName;
+				for (char& c : name)
+					c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+
+				if (name.find(needle) == std::string::npos)
+					continue;
+
+				const std::string path = directory + "\\" + find.cFileName;
+
+				if (!remove)
+				{
+					hits++;
+					continue;
+				}
+
+				if (DeleteFileA(path.c_str()))
+				{
+					hits++;
+					Diagnostics::Log("purged transfer file " + path);
+				}
+				else
+				{
+					Diagnostics::Log("could not purge " + path
+						+ " (win32 error " + std::to_string(GetLastError()) + ")");
+				}
+			}
+			while (FindNextFileA(handle, &find));
+
+			FindClose(handle);
+
+			return hits;
+		}
+	}
+
+	int SaveTransfer::PurgeIncoming(const std::string& marker)
+	{
+		return SweepIncoming(marker, true);
+	}
+
+	int SaveTransfer::CountIncoming(const std::string& marker)
+	{
+		return SweepIncoming(marker, false);
 	}
 
 	void SaveTransfer::Reset()

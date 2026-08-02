@@ -12,9 +12,20 @@ class r_CoopSave
     private var manifestLoaded : bool;
     private var uploadPending : bool;
     private var uploadRequestedAt : float;
+    private var adoptStage : int;
+    private var adoptStartedAt : float;
+    private var adoptLoadAt : float;
+    private var resumeChecked : bool;
+    private var uploadedFile : string;
+    private var adoptAttempts : int;
+    private var vanillaBaseline : array<string>;
+    private var purgeUntil : float;
+    private var nextPurgeAt : float;
+    private var saveHoldUntil : float;
 
     private var SAVE_INTERVAL : float;
     private var SAVE_SETTLE   : float;
+    private var SAVE_TIMEOUT  : float;
 
     default active = false;
     default haveLock = false;
@@ -26,9 +37,19 @@ class r_CoopSave
     default manifestLoaded = false;
     default uploadPending = false;
     default uploadRequestedAt = 0.0;
+    default adoptStage = 0;
+    default adoptStartedAt = 0.0;
+    default adoptLoadAt = 0.0;
+    default adoptAttempts = 0;
+    default resumeChecked = false;
+
+    default purgeUntil = 0.0;
+    default nextPurgeAt = 0.0;
+    default saveHoldUntil = 0.0;
 
     default SAVE_INTERVAL = 300.0;
-    default SAVE_SETTLE = 3.0;
+    default SAVE_SETTLE = 1.0;
+    default SAVE_TIMEOUT = 60.0;
 
     public function isActive() : bool
     {
@@ -45,6 +66,7 @@ class r_CoopSave
         active = true;
         loadManifest();
         acquireLock();
+        captureVanillaBaseline();
 
         nextSaveAt = theGame.GetEngineTimeAsSeconds() + SAVE_INTERVAL;
 
@@ -55,11 +77,31 @@ class r_CoopSave
 
         if(!theGame.r_getMultiplayerClient().isPartyLeader())
         {
+            adoptAttempts = 0;
             WO_SaveReset();
             WO_SaveWant();
+            awaitIncomingSave();
 
             WO_Note("[coopsave] requested leader save");
         }
+    }
+
+    public function resumeSession()
+    {
+        if(active)
+        {
+            return;
+        }
+
+        active = true;
+        loadManifest();
+        acquireLock();
+        captureVanillaBaseline();
+
+        nextSaveAt = theGame.GetEngineTimeAsSeconds() + SAVE_INTERVAL;
+
+        WO_SaveIncomingDir(WO_SaveDirectory());
+        WO_Note("[coopsave] session resumed after adoption load");
     }
 
     public function endSession()
@@ -69,11 +111,89 @@ class r_CoopSave
             return;
         }
 
+        sweepVanillaSaves();
+
         active = false;
         savePending = false;
         releaseLock();
 
         WO_Note("[coopsave] session ended, saves unlocked");
+    }
+
+    private function isVanillaAutoSave(slotType : ESaveGameType) : bool
+    {
+        return slotType == SGT_AutoSave
+            || slotType == SGT_CheckPoint
+            || slotType == SGT_ForcedCheckPoint
+            || slotType == SGT_QuickSave;
+    }
+
+    private function captureVanillaBaseline()
+    {
+        var saves : array<SSavegameInfo>;
+        var i : int;
+
+        vanillaBaseline.Clear();
+
+        theGame.ListSavedGames(saves);
+
+        for(i = 0; i < saves.Size(); i += 1)
+        {
+            if(isVanillaAutoSave(saves[i].slotType))
+            {
+                vanillaBaseline.PushBack(saves[i].filename);
+            }
+        }
+    }
+
+    private function wasVanillaBefore(fileName : string) : bool
+    {
+        var i : int;
+
+        for(i = 0; i < vanillaBaseline.Size(); i += 1)
+        {
+            if(vanillaBaseline[i] == fileName)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function sweepVanillaSaves()
+    {
+        var saves : array<SSavegameInfo>;
+
+        theGame.ListSavedGames(saves);
+        sweepListedSaves(saves);
+    }
+
+    private function sweepListedSaves(saves : array<SSavegameInfo>)
+    {
+        var removed : int;
+        var i : int;
+
+        for(i = saves.Size() - 1; i >= 0; i -= 1)
+        {
+            if(!isVanillaAutoSave(saves[i].slotType))
+            {
+                continue;
+            }
+
+            if(wasVanillaBefore(saves[i].filename))
+            {
+                continue;
+            }
+
+            theGame.DeleteSavedGame(saves[i]);
+            removed += 1;
+        }
+
+        if(removed > 0)
+        {
+            WO_Note("[coopsave] discarded " + removed + " checkpoint/autosave(s) made during co-op");
+        }
     }
 
     private function acquireLock()
@@ -102,7 +222,12 @@ class r_CoopSave
     {
         var now : float;
 
+        resumeAfterLoad();
+        retireUploadedSave();
+        retryTransferPurge();
+
         serveSaveRequests();
+        updateAdoption();
 
         now = theGame.GetEngineTimeAsSeconds();
 
@@ -110,7 +235,10 @@ class r_CoopSave
         {
             if((now - pendingSince) >= SAVE_SETTLE)
             {
-                finishSave();
+                if(newSaveAppeared() || (now - pendingSince) >= SAVE_TIMEOUT)
+                {
+                    finishSave();
+                }
             }
 
             return;
@@ -121,10 +249,327 @@ class r_CoopSave
             return;
         }
 
+        if(adoptStage != 0 || now < saveHoldUntil)
+        {
+            return;
+        }
+
         if(now >= nextSaveAt)
         {
             beginSave(now);
         }
+    }
+
+    public function updateAdoption()
+    {
+        var transferState : int;
+        var now : float;
+
+        now = theGame.GetEngineTimeAsSeconds();
+
+        if(adoptStage == 1)
+        {
+            transferState = WO_SaveState();
+
+            if(transferState == 3)
+            {
+                beginAdoption();
+                return;
+            }
+
+            if(transferState == 4)
+            {
+                adoptStage = 0;
+                retryOrFail();
+                return;
+            }
+
+            if((now - adoptStartedAt) > 600.0)
+            {
+                adoptStage = 0;
+                retryOrFail();
+            }
+
+            return;
+        }
+
+        if(adoptStage == 2 && now >= adoptLoadAt)
+        {
+            adoptStage = 0;
+            performAdoptionLoad();
+        }
+    }
+
+    public function awaitIncomingSave()
+    {
+        adoptStage = 1;
+        adoptStartedAt = theGame.GetEngineTimeAsSeconds();
+    }
+
+    private function retryOrFail()
+    {
+        adoptAttempts += 1;
+
+        if(adoptAttempts >= 3)
+        {
+            notifyTransferFailed();
+            return;
+        }
+
+        WO_Note("[coopsave] transfer attempt " + adoptAttempts + " failed, retrying");
+
+        discardTransferSaves();
+        WO_SaveReset();
+        WO_SaveWant();
+        awaitIncomingSave();
+    }
+
+    private function retireUploadedSave()
+    {
+        var saves : array<SSavegameInfo>;
+        var i : int;
+
+        if(uploadedFile == "" || WO_SaveState() != 3)
+        {
+            return;
+        }
+
+        if(active)
+        {
+            uploadedFile = "";
+            return;
+        }
+
+        theGame.ListSavedGames(saves);
+
+        for(i = saves.Size() - 1; i >= 0; i -= 1)
+        {
+            if(saves[i].filename == uploadedFile)
+            {
+                theGame.DeleteSavedGame(saves[i]);
+                WO_Note("[coopsave] removed transfer save " + uploadedFile);
+                break;
+            }
+        }
+
+        forgetSave(uploadedFile);
+        sweepLeftovers(uploadedFile);
+
+        uploadedFile = "";
+        WO_SaveReset();
+    }
+
+    private function sweepLeftovers(marker : string)
+    {
+        var remaining : int;
+        var purged : int;
+
+        if(marker == "")
+        {
+            return;
+        }
+
+        remaining = WO_SaveLeftovers(marker);
+
+        if(remaining == 0)
+        {
+            return;
+        }
+
+        purged = WO_SavePurge(marker);
+
+        WO_Note("[coopsave] engine left " + remaining + " file(s) for " + marker
+            + ", purged " + purged);
+    }
+
+    private function discardTransferSaves()
+    {
+        var saves : array<SSavegameInfo>;
+        var removed : int;
+        var i : int;
+
+        theGame.ListSavedGames(saves);
+
+        for(i = saves.Size() - 1; i >= 0; i -= 1)
+        {
+            if(StrContains(StrLower(saves[i].filename), "woparty"))
+            {
+                theGame.DeleteSavedGame(saves[i]);
+                removed += 1;
+            }
+        }
+
+        WO_Note("[coopsave] engine delete removed " + removed + " transferred save(s), "
+            + WO_SaveLeftovers("woparty") + " file(s) left on disk");
+
+        purgeUntil = theGame.GetEngineTimeAsSeconds() + 180.0;
+        nextPurgeAt = 0.0;
+    }
+
+    private function retryTransferPurge()
+    {
+        var saves : array<SSavegameInfo>;
+        var now : float;
+        var i : int;
+
+        if(purgeUntil <= 0.0)
+        {
+            return;
+        }
+
+        now = theGame.GetEngineTimeAsSeconds();
+
+        if(now < nextPurgeAt)
+        {
+            return;
+        }
+
+        nextPurgeAt = now + 3.0;
+
+        if(WO_SaveLeftovers("woparty") == 0)
+        {
+            purgeUntil = 0.0;
+            WO_Note("[coopsave] transferred save cleared");
+            return;
+        }
+
+        if(now >= purgeUntil)
+        {
+            purgeUntil = 0.0;
+            WO_Note("[coopsave] gave up clearing the transferred save");
+            return;
+        }
+
+        theGame.ListSavedGames(saves);
+
+        for(i = saves.Size() - 1; i >= 0; i -= 1)
+        {
+            if(StrContains(StrLower(saves[i].filename), "woparty"))
+            {
+                theGame.DeleteSavedGame(saves[i]);
+            }
+        }
+
+        WO_SavePurge("woparty");
+    }
+
+    private function notifyTransferFailed()
+    {
+        var reason : string;
+
+        reason = WO_SaveError();
+
+        WO_Note("[coopsave] transfer failed: " + reason);
+
+        discardTransferSaves();
+
+        GetWitcherPlayer().DisplayHudMessage(GetLocStringById(2111114295));
+
+        theGame.r_getMultiplayerClient().setCoopMode(false);
+    }
+
+    private function beginAdoption()
+    {
+        var snapshot : r_CharSnapshot;
+        var body : string;
+
+        snapshot = new r_CharSnapshot in this;
+        body = snapshot.capture();
+
+        if(body == "")
+        {
+            WO_Note("[coopsave] character capture failed, aborting adoption");
+            notifyTransferFailed();
+            return;
+        }
+
+        if(!WO_CoopStashChar(body))
+        {
+            WO_Note("[coopsave] character stash failed, aborting adoption");
+            notifyTransferFailed();
+            return;
+        }
+
+        WO_Note("[coopsave] character captured (" + StrLen(body) + " bytes), loading leader save "
+            + WO_SaveFile());
+
+        adoptStage = 2;
+        adoptLoadAt = theGame.GetEngineTimeAsSeconds() + 2.0;
+    }
+
+    private function performAdoptionLoad()
+    {
+        var saves : array<SSavegameInfo>;
+        var wanted : string;
+        var i : int;
+
+        wanted = WO_SaveFile();
+
+        if(wanted == "")
+        {
+            return;
+        }
+
+        wanted = StrLower(wanted);
+
+        theGame.ListSavedGames(saves);
+
+        for(i = 0; i < saves.Size(); i += 1)
+        {
+            if(StrLower(saves[i].filename) == wanted)
+            {
+                WO_Note("[coopsave] loading " + saves[i].filename);
+
+                releaseLock();
+                WO_CoopMarkRestore();
+                theGame.LoadGameInit(saves[i], false);
+                return;
+            }
+        }
+
+        WO_Note("[coopsave] leader save " + wanted + " not listed by the engine");
+        notifyTransferFailed();
+    }
+
+    public function resumeAfterLoad()
+    {
+        var snapshot : r_CharSnapshot;
+        var body : string;
+        var report : string;
+
+        if(adoptStage != 0)
+        {
+            return;
+        }
+
+        if(!WO_CoopTakeRestore())
+        {
+            return;
+        }
+
+        body = WO_CoopFetchChar();
+
+        if(body == "")
+        {
+            WO_Note("[coopsave] no stored character to restore");
+            return;
+        }
+
+        snapshot = new r_CharSnapshot in this;
+        report = snapshot.restore(body);
+
+        WO_Note("[coopsave] character restored after adoption: " + report);
+
+        saveHoldUntil = theGame.GetEngineTimeAsSeconds() + SAVE_INTERVAL;
+        nextSaveAt = saveHoldUntil;
+
+        WO_Note("[coopsave] rolling save held until " + saveHoldUntil);
+
+        discardTransferSaves();
+
+        theGame.r_getMultiplayerClient().restoreCoopAfterLoad();
+
+        GetWitcherPlayer().DisplayHudMessage(GetLocStringById(2111114297));
     }
 
     private function serveSaveRequests()
@@ -140,6 +585,12 @@ class r_CoopSave
 
         if(!theGame.r_getMultiplayerClient().isPartyLeader())
         {
+            return;
+        }
+
+        if(savePending || uploadPending)
+        {
+            WO_Note("[coopsave] " + asker + " folded into the save already running");
             return;
         }
 
@@ -175,6 +626,7 @@ class r_CoopSave
 
         if(WO_SaveSend(WO_SaveDirectory() + "\\" + newest + ".sav"))
         {
+            uploadedFile = newest;
             WO_Note("[coopsave] uploading " + newest);
         }
         else
@@ -211,6 +663,24 @@ class r_CoopSave
         pendingSince = now;
 
         WO_Note("[coopsave] saving slot=" + slotIndex + " existing=" + beforeFiles.Size());
+    }
+
+    private function newSaveAppeared() : bool
+    {
+        var saves : array<SSavegameInfo>;
+        var i : int;
+
+        theGame.ListSavedGames(saves);
+
+        for(i = 0; i < saves.Size(); i += 1)
+        {
+            if(!wasPresentBefore(saves[i].filename))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function snapshotExisting()
@@ -253,8 +723,15 @@ class r_CoopSave
 
         theGame.ListSavedGames(saves);
 
+        sweepListedSaves(saves);
+
         for(i = 0; i < saves.Size(); i += 1)
         {
+            if(isVanillaAutoSave(saves[i].slotType))
+            {
+                continue;
+            }
+
             if(!wasPresentBefore(saves[i].filename))
             {
                 rememberSave(saves[i].filename);
@@ -360,6 +837,33 @@ class r_CoopSave
         }
 
         return false;
+    }
+
+    private function forgetSave(fileName : string)
+    {
+        var kept : array<string>;
+        var i : int;
+
+        if(fileName == "")
+        {
+            return;
+        }
+
+        for(i = 0; i < manifest.Size(); i += 1)
+        {
+            if(manifest[i] != fileName)
+            {
+                kept.PushBack(manifest[i]);
+            }
+        }
+
+        if(kept.Size() == manifest.Size())
+        {
+            return;
+        }
+
+        manifest = kept;
+        storeManifest();
     }
 
     private function rememberSave(fileName : string)

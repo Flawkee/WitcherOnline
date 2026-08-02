@@ -195,11 +195,13 @@ statemachine class r_MultiplayerClient
     private var joinedParty : string;
     private var coopSave : r_CoopSave;
     private var coopMode : bool;
+    private var coopLeader : bool;
     private var coopOffered : bool;
     private var confirmPopupOpen : bool;
     private var pendingInviteFrom : string;
 
     default coopMode = false;
+    default coopLeader = false;
     default coopOffered = false;
     default confirmPopupOpen = false;
     private var partyId : int;
@@ -1456,6 +1458,7 @@ statemachine class r_MultiplayerClient
                 inParty = false;
                 joinedParty = "";
                 coopMode = false;
+                coopLeader = false;
                 coopOffered = false;
                 getCoopSave().endSession();
                 pendingInviteFrom = "";
@@ -1656,13 +1659,60 @@ statemachine class r_MultiplayerClient
 
         if(enabled)
         {
+            notice(GetLocStringById(2111114296));
             getCoopSave().beginSession();
-            notice(GetLocStringById(2111114288));
         }
         else
         {
-            getCoopSave().endSession();
+            if(!coopLeader)
+            {
+                getCoopSave().endSession();
+            }
+
             notice(GetLocStringById(2111114289));
+        }
+    }
+
+    public function restoreCoopAfterLoad()
+    {
+        coopMode = true;
+        WO_PartyCoopMode(true);
+
+        getCoopSave().resumeSession();
+    }
+
+    public function setCoopLeader(enabled : bool)
+    {
+        WO_Note("[coopsave] leader co-op notice enabled=" + enabled
+            + " current=" + coopLeader + " inParty=" + inParty + " coopMode=" + coopMode);
+
+        if(coopLeader == enabled)
+        {
+            return;
+        }
+
+        if(enabled && !inParty)
+        {
+            return;
+        }
+
+        coopLeader = enabled;
+
+        if(enabled)
+        {
+            if(!coopMode)
+            {
+                getCoopSave().beginSession();
+                notice(GetLocStringById(2111114300));
+            }
+        }
+        else
+        {
+            if(!coopMode)
+            {
+                getCoopSave().endSession();
+                notice(GetLocStringById(2111114289));
+            }
         }
     }
 
@@ -1694,6 +1744,18 @@ statemachine class r_MultiplayerClient
         if(kind == "EXPIRED")
         {
             notice(StrReplace(GetLocStringById(2111114279), "%s", who));
+            return;
+        }
+
+        if(kind == "COOPON")
+        {
+            setCoopLeader(true);
+            return;
+        }
+
+        if(kind == "COOPOFF")
+        {
+            setCoopLeader(false);
             return;
         }
 
