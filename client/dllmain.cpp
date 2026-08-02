@@ -11,6 +11,8 @@
 #include <vector>
 #include <regex>
 #include <filesystem>
+#include <fstream>
+#include <sstream>
 #include "pugixml\pugixml.hpp"
 #include <unordered_map>
 #define ASIO_STANDALONE
@@ -555,6 +557,158 @@ void SendPartyRequest(const char* opcode, const std::string& argument)
 		fields.push_back("-");
 
 	SendUdpPacket(BuildPacket(opcode, BuildLocalPacketId(), fields), opcode);
+}
+
+static fs::path CharSlotPath(const std::string& slot)
+{
+	std::string safe;
+
+	for (size_t i = 0; i < slot.size() && safe.size() < 32; ++i)
+	{
+		const char c = slot[i];
+
+		if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_')
+			safe.push_back(c);
+	}
+
+	if (safe.empty())
+		safe = "default";
+
+	return getExecutablePath() / "WitcherOnline" / ("charsnap_" + safe + ".wosnap");
+}
+
+static const char kSnapAlphabet[] =
+	"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+static const unsigned char kSnapKey[] = { 0x5A, 0xC3, 0x1F, 0x76, 0xB8, 0x2E, 0x91, 0x4D };
+
+static void SnapScramble(std::string& data)
+{
+	for (size_t i = 0; i < data.size(); ++i)
+		data[i] = static_cast<char>(static_cast<unsigned char>(data[i]) ^ kSnapKey[i % sizeof(kSnapKey)]);
+}
+
+static std::string SnapEncode(const std::string& plain)
+{
+	std::string data = plain;
+	SnapScramble(data);
+
+	std::string encoded;
+	encoded.reserve(((data.size() + 2) / 3) * 4);
+
+	for (size_t i = 0; i < data.size(); i += 3)
+	{
+		const unsigned int b0 = static_cast<unsigned char>(data[i]);
+		const unsigned int b1 = (i + 1 < data.size()) ? static_cast<unsigned char>(data[i + 1]) : 0u;
+		const unsigned int b2 = (i + 2 < data.size()) ? static_cast<unsigned char>(data[i + 2]) : 0u;
+		const unsigned int triple = (b0 << 16) | (b1 << 8) | b2;
+
+		encoded.push_back(kSnapAlphabet[(triple >> 18) & 0x3F]);
+		encoded.push_back(kSnapAlphabet[(triple >> 12) & 0x3F]);
+		encoded.push_back((i + 1 < data.size()) ? kSnapAlphabet[(triple >> 6) & 0x3F] : '=');
+		encoded.push_back((i + 2 < data.size()) ? kSnapAlphabet[triple & 0x3F] : '=');
+	}
+
+	return encoded;
+}
+
+static std::string SnapDecode(const std::string& encoded)
+{
+	int lookup[256];
+
+	for (int i = 0; i < 256; ++i)
+		lookup[i] = -1;
+
+	for (int i = 0; i < 64; ++i)
+		lookup[static_cast<unsigned char>(kSnapAlphabet[i])] = i;
+
+	std::string data;
+	data.reserve((encoded.size() / 4) * 3);
+
+	unsigned int accum = 0;
+	int bits = 0;
+
+	for (size_t i = 0; i < encoded.size(); ++i)
+	{
+		const int value = lookup[static_cast<unsigned char>(encoded[i])];
+
+		if (value < 0)
+			continue;
+
+		accum = (accum << 6) | static_cast<unsigned int>(value);
+		bits += 6;
+
+		if (bits >= 8)
+		{
+			bits -= 8;
+			data.push_back(static_cast<char>((accum >> bits) & 0xFF));
+		}
+	}
+
+	SnapScramble(data);
+	return data;
+}
+
+bool WriteCharSnapshot(const std::string& slot, const std::string& text)
+{
+	try
+	{
+		const fs::path path = CharSlotPath(slot);
+
+		fs::create_directories(path.parent_path());
+
+		std::ofstream out(path, std::ios::out | std::ios::trunc | std::ios::binary);
+
+		if (!out.is_open())
+			return false;
+
+		const std::string encoded = SnapEncode(text);
+
+		out << "WOSNAP1" << '\n' << encoded;
+		out.close();
+
+		Diagnostics::Log("char snapshot written: " + path.string()
+			+ " (" + std::to_string(text.size()) + " raw -> " + std::to_string(encoded.size()) + " encoded)");
+		return true;
+	}
+	catch (const std::exception& e)
+	{
+		Diagnostics::Log(std::string("char snapshot write failed: ") + e.what());
+		return false;
+	}
+}
+
+std::string ReadCharSnapshot(const std::string& slot)
+{
+	try
+	{
+		const fs::path path = CharSlotPath(slot);
+
+		std::ifstream in(path, std::ios::in | std::ios::binary);
+
+		if (!in.is_open())
+		{
+			Diagnostics::Log("char snapshot missing: " + path.string());
+			return std::string();
+		}
+
+		std::ostringstream buffer;
+		buffer << in.rdbuf();
+		in.close();
+
+		std::string raw = buffer.str();
+
+		if (raw.size() > 8 && raw.compare(0, 7, "WOSNAP1") == 0)
+			raw = SnapDecode(raw.substr(8));
+
+		Diagnostics::Log("char snapshot read: " + path.string() + " (" + std::to_string(raw.size()) + " bytes)");
+		return raw;
+	}
+	catch (const std::exception& e)
+	{
+		Diagnostics::Log(std::string("char snapshot read failed: ") + e.what());
+		return std::string();
+	}
 }
 
 void SendPartyRequest2(const char* opcode, const std::string& first, const std::string& second)

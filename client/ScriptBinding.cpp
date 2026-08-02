@@ -15,6 +15,8 @@
 extern void ResetInboundDeltaCaches();
 extern void SendPartyRequest(const char* opcode, const std::string& argument);
 extern void SendPartyRequest2(const char* opcode, const std::string& first, const std::string& second);
+extern bool WriteCharSnapshot(const std::string& slot, const std::string& text);
+extern std::string ReadCharSnapshot(const std::string& slot);
 
 namespace w3mp {
 
@@ -1424,6 +1426,50 @@ namespace w3mp {
 			SendPartyRequest2("PRESP", NarrowPayload(text), approved ? "1" : "0");
 	}
 
+	static void WO_ToName(void* context, void* frame, void* result)
+	{
+		RedString text;
+		const int size = ReadStringParameter(frame, text);
+
+		AdvanceFrame(frame);
+
+		WriteNameResult(result, size > 0 ? NarrowPayload(text) : std::string());
+	}
+
+	static void WO_CharStore(void* context, void* frame, void* result)
+	{
+		RedString slot;
+		const int slotSize = ReadStringParameter(frame, slot);
+
+		RedString body;
+		const int bodySize = ReadStringParameter(frame, body);
+
+		AdvanceFrame(frame);
+
+		bool ok = false;
+
+		if (slotSize > 0 && bodySize > 0)
+			ok = WriteCharSnapshot(NarrowPayload(slot), NarrowPayload(body));
+
+		if (result)
+			*static_cast<bool*>(result) = ok;
+	}
+
+	static void WO_CharFetch(void* context, void* frame, void* result)
+	{
+		RedString slot;
+		const int slotSize = ReadStringParameter(frame, slot);
+
+		AdvanceFrame(frame);
+
+		std::string text;
+
+		if (slotSize > 0)
+			text = ReadCharSnapshot(NarrowPayload(slot));
+
+		WriteStringResult(result, text);
+	}
+
 	static void WO_PartyCoopMode(void* context, void* frame, void* result)
 	{
 		const bool enabled = ReadBoolParameter(frame);
@@ -2280,6 +2326,9 @@ namespace w3mp {
 		RegisterOne(L"WO_PartyLeave", reinterpret_cast<void*>(&WO_PartyLeave), "WO_PartyLeave");
 		RegisterOne(L"WO_PartyRespond", reinterpret_cast<void*>(&WO_PartyRespond), "WO_PartyRespond");
 		RegisterOne(L"WO_PartyCoopMode", reinterpret_cast<void*>(&WO_PartyCoopMode), "WO_PartyCoopMode");
+		RegisterOne(L"WO_ToName", reinterpret_cast<void*>(&WO_ToName), "WO_ToName");
+		RegisterOne(L"WO_CharStore", reinterpret_cast<void*>(&WO_CharStore), "WO_CharStore");
+		RegisterOne(L"WO_CharFetch", reinterpret_cast<void*>(&WO_CharFetch), "WO_CharFetch");
 		RegisterOne(L"WO_EntityProbe", reinterpret_cast<void*>(&WO_EntityProbe), "WO_EntityProbe");
 		RegisterOne(L"WO_EntityTemplatePath", reinterpret_cast<void*>(&WO_EntityTemplatePath), "WO_EntityTemplatePath");
 		RegisterOne(L"WO_FrameReport", reinterpret_cast<void*>(&WO_FrameReport), "WO_FrameReport");
