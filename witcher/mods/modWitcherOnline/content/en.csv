@@ -275,3 +275,22 @@
 2111114272||option_MPGhosts_NpcSyncMode|NPC Sync Mode
 2111114273||preset_value_npcsync_world|World
 2111114274||preset_value_npcsync_party|Party Only
+2111114275||wo_party_request_title|Party Invitation
+2111114276||wo_party_request_body|<b>%s</b> wants to form a party with you.<br>Nearby NPCs, monsters and animals will be synchronised between you.<br>This request expires in 2 minutes.
+2111114277||wo_party_request_sent|Party request sent to %s. Waiting for approval (2 minutes).
+2111114278||wo_party_request_rejected|%s declined your party request.
+2111114279||wo_party_request_expired|Your party request to %s expired.
+2111114280||wo_party_request_expired_in|The party request from %s expired.
+2111114281||wo_party_request_failed_offline|%s is not online.
+2111114282||wo_party_request_failed_full|That party is already full.
+2111114283||wo_party_request_failed_pending|You already have a pending request to %s.
+2111114284||wo_party_request_failed_same|You are already in a party with %s.
+2111114285||wo_party_request_none|No pending party request from %s.
+2111114286||wo_coop_prompt_title|Enable Co-op Story Mode?
+2111114287||wo_coop_prompt_body|Joined <b>%s</b>'s party.<br>Co-op Story Mode syncs quest and story progress with the leader.<br>Your level, skills, items, gear and gwent cards stay yours.<br>Decline to keep world-sharing only.
+2111114288||wo_coop_enabled|Co-op Story Mode enabled. Quest progression now follows the party leader.
+2111114289||wo_coop_declined|Co-op Story Mode declined. You are in world-sharing mode.
+2111114290||wo_party_approve_usage|Usage: approve(username) or reject(username)
+2111114291||wo_party_request_declined_self|You declined %s's party request.
+2111114292||wo_btn_approve|Approve
+2111114293||wo_btn_reject|Reject

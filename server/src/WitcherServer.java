@@ -44,6 +44,23 @@ public class WitcherServer
     private static final java.util.concurrent.atomic.AtomicInteger nextPartyId =
             new java.util.concurrent.atomic.AtomicInteger(1);
     private static final long PARTY_RESEND_NANOS = 2_000_000_000L;
+    private static final long PARTY_REQUEST_TIMEOUT_NANOS = 120_000_000_000L;
+
+    private static final Map<String, PartyRequest> partyRequests = new ConcurrentHashMap<>();
+
+    private static final class PartyRequest
+    {
+        final String requesterKey;
+        final String targetKey;
+        final long expiresAtNanos;
+
+        PartyRequest(String requesterKey, String targetKey, long expiresAtNanos)
+        {
+            this.requesterKey = requesterKey;
+            this.targetKey = targetKey;
+            this.expiresAtNanos = expiresAtNanos;
+        }
+    }
     private static long lastPartyResendNanos = 0L;
 
     private static final AtomicBoolean running = new AtomicBoolean(true);
@@ -612,7 +629,9 @@ public class WitcherServer
 
     private static boolean isUpdateOpcode(String opcode)
     {
-        return "MOVE".equals(opcode)
+        return "PRESP".equals(opcode)
+                || "PCOOP".equals(opcode)
+                || "MOVE".equals(opcode)
                 || "UPDATE1A".equals(opcode)
                 || "UPDATE1B".equals(opcode)
                 || "UPDATE2A".equals(opcode)
@@ -1210,7 +1229,31 @@ public class WitcherServer
         {
             if (!fields.isEmpty())
             {
-                partyJoin(session, fields.get(0));
+                partyRequest(session, fields.get(0));
+            }
+
+            return;
+        }
+
+        if ("PRESP".equals(opcode))
+        {
+            if (fields.size() >= 2)
+            {
+                partyRespond(session, fields.get(0), "1".equals(fields.get(1)));
+            }
+
+            return;
+        }
+
+        if ("PCOOP".equals(opcode))
+        {
+            if (!fields.isEmpty())
+            {
+                session.coopMode = "1".equals(fields.get(0));
+
+                dbg("PARTY %s co-op mode %s\n",
+                        normalizeUsernameKey(session.username),
+                        session.coopMode ? "ENABLED" : "disabled");
             }
 
             return;
@@ -1611,6 +1654,8 @@ public class WitcherServer
                     ownerOnline.add(session.playerId);
                 }
 
+                purgeExpiredPartyRequests(now);
+
                 NpcRegistry.applyUnackedDamage(now);
                 NpcRegistry.pruneStale(ownerOnline, now);
                 NpcRegistry.recomputeScaling(sessions, NpcRegistry.HIT_RANGE_SQUARED);
@@ -1927,6 +1972,7 @@ public class WitcherServer
             if (member != null)
             {
                 member.partyId = 0;
+                member.coopMode = false;
                 sendPartyState(member, null);
             }
         }
@@ -1955,8 +2001,11 @@ public class WitcherServer
         if (leaver != null)
         {
             leaver.partyId = 0;
+            leaver.coopMode = false;
             sendPartyState(leaver, null);
         }
+
+        dropPartyRequestsFor(usernameKey);
 
         dbg("PARTY #%d %s left (%s)\n", party.partyId, usernameKey, reason);
 
@@ -1975,6 +2024,151 @@ public class WitcherServer
         dbg("PARTY #%d leader %s left, promoted %s\n", party.partyId, previousLeader, party.leader());
 
         broadcastParty(party);
+    }
+
+    private static void partyRequest(PlayerSession actor, String targetName)
+    {
+        String actorKey = normalizeUsernameKey(actor.username);
+        String targetKey = normalizeUsernameKey(targetName);
+        long now = System.nanoTime();
+
+        if (targetKey.isEmpty() || targetKey.equals(actorKey))
+        {
+            return;
+        }
+
+        PlayerSession target = players.get(targetKey);
+
+        if (target == null)
+        {
+            queuePartyNotice(actor, "REQFAIL", targetName, "offline");
+            return;
+        }
+
+        Party targetParty = partyOf(targetKey);
+        Party actorParty = partyOf(actorKey);
+
+        if (targetParty != null && actorParty != null && targetParty.partyId == actorParty.partyId)
+        {
+            queuePartyNotice(actor, "REQFAIL", target.username, "same");
+            return;
+        }
+
+        if (targetParty != null && targetParty.size() >= Party.MAX_MEMBERS)
+        {
+            queuePartyNotice(actor, "REQFAIL", target.username, "full");
+            return;
+        }
+
+        purgeExpiredPartyRequests(now);
+
+        if (partyRequests.containsKey(partyRequestKey(actorKey, targetKey)))
+        {
+            queuePartyNotice(actor, "REQFAIL", target.username, "pending");
+            return;
+        }
+
+        partyRequests.put(partyRequestKey(actorKey, targetKey),
+                new PartyRequest(actorKey, targetKey, now + PARTY_REQUEST_TIMEOUT_NANOS));
+
+        queuePartyNotice(target, "REQUEST", actor.username, "");
+        queuePartyNotice(actor, "REQSENT", target.username, "");
+
+        dbg("PARTY request %s -> %s (expires in %ds)\n",
+                actorKey, targetKey, PARTY_REQUEST_TIMEOUT_NANOS / 1_000_000_000L);
+    }
+
+    private static void partyRespond(PlayerSession actor, String requesterName, boolean approved)
+    {
+        String actorKey = normalizeUsernameKey(actor.username);
+        String requesterKey = normalizeUsernameKey(requesterName);
+        long now = System.nanoTime();
+
+        purgeExpiredPartyRequests(now);
+
+        PartyRequest request = partyRequests.remove(partyRequestKey(requesterKey, actorKey));
+
+        if (request == null)
+        {
+            queuePartyNotice(actor, "RESPFAIL", requesterName, "none");
+            return;
+        }
+
+        PlayerSession requester = players.get(requesterKey);
+
+        if (requester == null)
+        {
+            queuePartyNotice(actor, "RESPFAIL", requesterName, "offline");
+            return;
+        }
+
+        if (!approved)
+        {
+            queuePartyNotice(requester, "REJECTED", actor.username, "");
+            dbg("PARTY request %s -> %s REJECTED\n", requesterKey, actorKey);
+            return;
+        }
+
+        dbg("PARTY request %s -> %s APPROVED\n", requesterKey, actorKey);
+
+        partyJoin(requester, actor.username);
+    }
+
+    private static String partyRequestKey(String requesterKey, String targetKey)
+    {
+        return requesterKey + ">" + targetKey;
+    }
+
+    private static void dropPartyRequestsFor(String usernameKey)
+    {
+        for (PartyRequest request : new ArrayList<>(partyRequests.values()))
+        {
+            if (request.requesterKey.equals(usernameKey) || request.targetKey.equals(usernameKey))
+            {
+                partyRequests.remove(partyRequestKey(request.requesterKey, request.targetKey));
+            }
+        }
+    }
+
+    private static void purgeExpiredPartyRequests(long now)
+    {
+        for (PartyRequest request : new ArrayList<>(partyRequests.values()))
+        {
+            if (now < request.expiresAtNanos)
+            {
+                continue;
+            }
+
+            partyRequests.remove(partyRequestKey(request.requesterKey, request.targetKey));
+
+            PlayerSession requester = players.get(request.requesterKey);
+            PlayerSession target = players.get(request.targetKey);
+
+            if (requester != null)
+            {
+                queuePartyNotice(requester, "EXPIRED",
+                        target != null ? target.username : request.targetKey, "");
+            }
+
+            if (target != null)
+            {
+                queuePartyNotice(target, "EXPIREDIN",
+                        requester != null ? requester.username : request.requesterKey, "");
+            }
+
+            dbg("PARTY request %s -> %s EXPIRED\n", request.requesterKey, request.targetKey);
+        }
+    }
+
+    private static void queuePartyNotice(PlayerSession session, String kind, String who, String reason)
+    {
+        List<String> fields = new ArrayList<>();
+
+        fields.add(kind);
+        fields.add(who == null ? "" : who);
+        fields.add(reason == null ? "" : reason);
+
+        queueOutbound(session, "PINVITE", fields);
     }
 
     private static void partyJoin(PlayerSession actor, String targetName)

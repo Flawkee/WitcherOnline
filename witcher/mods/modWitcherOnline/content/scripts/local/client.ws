@@ -193,6 +193,14 @@ statemachine class r_MultiplayerClient
     // party
     private var inParty : bool;
     private var joinedParty : string;
+    private var coopMode : bool;
+    private var coopOffered : bool;
+    private var confirmPopupOpen : bool;
+    private var pendingInviteFrom : string;
+
+    default coopMode = false;
+    default coopOffered = false;
+    default confirmPopupOpen = false;
     private var partyId : int;
     private var nextWeatherSyncAt : float;
     default nextWeatherSyncAt = -999;
@@ -1446,6 +1454,9 @@ statemachine class r_MultiplayerClient
             {
                 inParty = false;
                 joinedParty = "";
+                coopMode = false;
+                coopOffered = false;
+                pendingInviteFrom = "";
                 partyTargetMissingSince = -1;
                 partyTargetWasMissing = false;
 
@@ -1470,6 +1481,12 @@ statemachine class r_MultiplayerClient
         partyId = newPartyId;
         inParty = true;
         joinedParty = leaderName;
+        pendingInviteFrom = "";
+
+        if(leaderName != username)
+        {
+            offerCoopMode(leaderName);
+        }
 
         for(i = seenPartyPlayers.Size() - 1; i >= 0; i -= 1)
         {
@@ -1552,6 +1569,179 @@ statemachine class r_MultiplayerClient
     public function isPartyLeader() : bool
     {
         return inParty && joinedParty == username;
+    }
+
+    public function showConfirmPopup(kind : int, subject : string, title : string, body : string)
+    {
+        var data : WitcherOnline_ConfirmPopup;
+
+        data = new WitcherOnline_ConfirmPopup in this;
+        data.wo_kind = kind;
+        data.wo_subject = subject;
+        data.SetMessageTitle(title);
+        data.SetMessageText(body);
+        data.PauseGame = false;
+        data.BlurBackground = false;
+
+        confirmPopupOpen = true;
+
+        theGame.RequestMenu('PopupMenu', data);
+    }
+
+    public function closeConfirmPopup()
+    {
+        if(!confirmPopupOpen)
+        {
+            return;
+        }
+
+        confirmPopupOpen = false;
+
+        theGame.CloseMenu('PopupMenu');
+    }
+
+    public function onConfirmPopupResult(kind : int, subject : string, approved : bool)
+    {
+        confirmPopupOpen = false;
+
+        if(kind == 1)
+        {
+            respondToInvite(subject, approved);
+            return;
+        }
+
+        if(kind == 2)
+        {
+            setCoopMode(approved);
+        }
+    }
+
+    private function notice(text : string)
+    {
+        GetWitcherPlayer().DisplayHudMessage(text);
+    }
+
+    public function respondToInvite(requester : string, approved : bool)
+    {
+        closeConfirmPopup();
+
+        pendingInviteFrom = "";
+
+        WO_PartyRespond(requester, approved);
+
+        if(!approved)
+        {
+            notice(StrReplace(GetLocStringById(2111114291), "%s", requester));
+        }
+    }
+
+    public function isCoopMode() : bool
+    {
+        return inParty && coopMode;
+    }
+
+    public function setCoopMode(enabled : bool)
+    {
+        closeConfirmPopup();
+
+        if(!inParty)
+        {
+            return;
+        }
+
+        coopMode = enabled;
+        WO_PartyCoopMode(enabled);
+
+        if(enabled)
+        {
+            notice(GetLocStringById(2111114288));
+        }
+        else
+        {
+            notice(GetLocStringById(2111114289));
+        }
+    }
+
+    public function onPartyInvite(kind : string, who : string, reason : string)
+    {
+        var body : string;
+
+        if(kind == "REQUEST")
+        {
+            pendingInviteFrom = who;
+
+            body = StrReplace(GetLocStringById(2111114276), "%s", who);
+            showConfirmPopup(1, who, GetLocStringById(2111114275), body);
+            return;
+        }
+
+        if(kind == "REQSENT")
+        {
+            notice(StrReplace(GetLocStringById(2111114277), "%s", who));
+            return;
+        }
+
+        if(kind == "REJECTED")
+        {
+            notice(StrReplace(GetLocStringById(2111114278), "%s", who));
+            return;
+        }
+
+        if(kind == "EXPIRED")
+        {
+            notice(StrReplace(GetLocStringById(2111114279), "%s", who));
+            return;
+        }
+
+        if(kind == "EXPIREDIN")
+        {
+            pendingInviteFrom = "";
+            closeConfirmPopup();
+            notice(StrReplace(GetLocStringById(2111114280), "%s", who));
+            return;
+        }
+
+        if(kind == "REQFAIL")
+        {
+            if(reason == "offline")
+            {
+                notice(StrReplace(GetLocStringById(2111114281), "%s", who));
+            }
+            else if(reason == "full")
+            {
+                notice(GetLocStringById(2111114282));
+            }
+            else if(reason == "pending")
+            {
+                notice(StrReplace(GetLocStringById(2111114283), "%s", who));
+            }
+            else if(reason == "same")
+            {
+                notice(StrReplace(GetLocStringById(2111114284), "%s", who));
+            }
+
+            return;
+        }
+
+        if(kind == "RESPFAIL")
+        {
+            notice(StrReplace(GetLocStringById(2111114285), "%s", who));
+        }
+    }
+
+    public function offerCoopMode(leaderName : string)
+    {
+        var body : string;
+
+        if(coopOffered || leaderName == "" || leaderName == username)
+        {
+            return;
+        }
+
+        coopOffered = true;
+
+        body = StrReplace(GetLocStringById(2111114287), "%s", leaderName);
+        showConfirmPopup(2, leaderName, GetLocStringById(2111114286), body);
     }
 
     public function isPartyLeaderName(playerName : string) : bool
@@ -7557,6 +7747,34 @@ exec function teleport(user : string)
     mpghosts_teleport(user);
 }
 
+class WitcherOnline_ConfirmPopup extends ConfirmationPopupData
+{
+    public var wo_kind    : int;
+    public var wo_subject : string;
+
+    default wo_kind = 0;
+
+    protected function OnUserAccept() : void
+    {
+        theGame.r_getMultiplayerClient().onConfirmPopupResult(wo_kind, wo_subject, true);
+    }
+
+    protected function OnUserDecline() : void
+    {
+        theGame.r_getMultiplayerClient().onConfirmPopupResult(wo_kind, wo_subject, false);
+    }
+
+    protected function GetAcceptText() : string
+    {
+        return "wo_btn_approve";
+    }
+
+    protected function GetDeclineText() : string
+    {
+        return "wo_btn_reject";
+    }
+}
+
 class WitcherOnline_PopupData extends BookPopupFeedback {
 
 	public function GetGFxData(parentFlashValueStorage : CScriptedFlashValueStorage) : CScriptedFlashObject {
@@ -7960,4 +8178,31 @@ exec function join(val : string)
 exec function leave()
 {
     theGame.r_getMultiplayerClient().leaveParty();
+}
+
+exec function approve(val : string)
+{
+    if(val == "")
+    {
+        GetWitcherPlayer().DisplayHudMessage(GetLocStringById(2111114290));
+        return;
+    }
+
+    theGame.r_getMultiplayerClient().respondToInvite(val, true);
+}
+
+exec function reject(val : string)
+{
+    if(val == "")
+    {
+        GetWitcherPlayer().DisplayHudMessage(GetLocStringById(2111114290));
+        return;
+    }
+
+    theGame.r_getMultiplayerClient().respondToInvite(val, false);
+}
+
+exec function coop(enabled : bool)
+{
+    theGame.r_getMultiplayerClient().setCoopMode(enabled);
 }

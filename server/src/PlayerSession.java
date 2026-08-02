@@ -66,6 +66,7 @@ public class PlayerSession
     public volatile int scaleSetId = 0;
 
     public volatile int partyId = 0;
+    public volatile boolean coopMode = false;
     public volatile int npcSyncMode = 0;
     public volatile int rttMs = UNKNOWN_RTT_MS;
     public volatile long lastReleaseNanos = 0L;

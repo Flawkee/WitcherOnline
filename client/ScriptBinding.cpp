@@ -14,6 +14,7 @@
 
 extern void ResetInboundDeltaCaches();
 extern void SendPartyRequest(const char* opcode, const std::string& argument);
+extern void SendPartyRequest2(const char* opcode, const std::string& first, const std::string& second);
 
 namespace w3mp {
 
@@ -1411,6 +1412,27 @@ namespace w3mp {
 		SendPartyRequest("PLEAVE", std::string());
 	}
 
+	static void WO_PartyRespond(void* context, void* frame, void* result)
+	{
+		RedString text;
+		const int size = ReadStringParameter(frame, text);
+		const bool approved = ReadBoolParameter(frame);
+
+		AdvanceFrame(frame);
+
+		if (size > 0)
+			SendPartyRequest2("PRESP", NarrowPayload(text), approved ? "1" : "0");
+	}
+
+	static void WO_PartyCoopMode(void* context, void* frame, void* result)
+	{
+		const bool enabled = ReadBoolParameter(frame);
+
+		AdvanceFrame(frame);
+
+		SendPartyRequest("PCOOP", enabled ? std::string("1") : std::string("0"));
+	}
+
 	static void WO_SetPaused(void* context, void* frame, void* result)
 	{
 		const bool paused = ReadBoolParameter(frame);
@@ -2256,6 +2278,8 @@ namespace w3mp {
 		RegisterOne(L"WO_NpcSyncMode", reinterpret_cast<void*>(&WO_NpcSyncMode), "WO_NpcSyncMode");
 		RegisterOne(L"WO_PartyJoin", reinterpret_cast<void*>(&WO_PartyJoin), "WO_PartyJoin");
 		RegisterOne(L"WO_PartyLeave", reinterpret_cast<void*>(&WO_PartyLeave), "WO_PartyLeave");
+		RegisterOne(L"WO_PartyRespond", reinterpret_cast<void*>(&WO_PartyRespond), "WO_PartyRespond");
+		RegisterOne(L"WO_PartyCoopMode", reinterpret_cast<void*>(&WO_PartyCoopMode), "WO_PartyCoopMode");
 		RegisterOne(L"WO_EntityProbe", reinterpret_cast<void*>(&WO_EntityProbe), "WO_EntityProbe");
 		RegisterOne(L"WO_EntityTemplatePath", reinterpret_cast<void*>(&WO_EntityTemplatePath), "WO_EntityTemplatePath");
 		RegisterOne(L"WO_FrameReport", reinterpret_cast<void*>(&WO_FrameReport), "WO_FrameReport");

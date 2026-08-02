@@ -21,6 +21,8 @@ import function WO_SetPaused(paused : bool);
 import function WO_ResetDeltas();
 import function WO_PartyJoin(target : string);
 import function WO_PartyLeave();
+import function WO_PartyRespond(target : string, approved : bool);
+import function WO_PartyCoopMode(enabled : bool);
 import function WO_EntityProbe(target : CEntity) : string;
 import function WO_EntityTemplatePath(target : CEntity) : string;
 import function WO_NpcBeginOwned();
@@ -222,6 +224,10 @@ function WO_PumpInbound(maxMessages : int)
                 WO_ApplyParty();
                 break;
 
+            case 14:
+                WO_ApplyPartyInvite();
+                break;
+
 
 
             default:
@@ -259,6 +265,11 @@ function WO_ApplyVisibility()
     }
 
     theGame.r_getMultiplayerClient().applyVisibility(ids, scopeIds);
+}
+
+function WO_ApplyPartyInvite()
+{
+    theGame.r_getMultiplayerClient().onPartyInvite(WO_Str(0), WO_Str(1), WO_Str(2));
 }
 
 function WO_ApplyParty()

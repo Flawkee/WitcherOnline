@@ -557,6 +557,16 @@ void SendPartyRequest(const char* opcode, const std::string& argument)
 	SendUdpPacket(BuildPacket(opcode, BuildLocalPacketId(), fields), opcode);
 }
 
+void SendPartyRequest2(const char* opcode, const std::string& first, const std::string& second)
+{
+	std::vector<std::string> fields;
+
+	fields.push_back(first.empty() ? "-" : first);
+	fields.push_back(second.empty() ? "-" : second);
+
+	SendUdpPacket(BuildPacket(opcode, BuildLocalPacketId(), fields), opcode);
+}
+
 void ResetInboundDeltaCaches()
 {
 	std::lock_guard<std::mutex> lock(g_deltaMutex);
@@ -777,6 +787,7 @@ static void HandleServerPacket(const std::string& msg)
 	if (!isNpcOpcode
 		&& opcode != "PVIS"
 		&& opcode != "PARTY"
+		&& opcode != "PINVITE"
 		&& opcode != "MOVE" && opcode != "UPDATE1A" && opcode != "UPDATE1B" && opcode != "UPDATE2A" && opcode != "UPDATE2B" && opcode != "UPDATE3" && opcode != "UPDATE4")
 		return;
 
@@ -815,6 +826,12 @@ static void HandleServerPacket(const std::string& msg)
 	if (opcode == "PARTY")
 	{
 		QueueInbound(InboundOpcode::PartyState, playerId, 0, playerUsername, std::move(fields));
+		return;
+	}
+
+	if (opcode == "PINVITE")
+	{
+		QueueInbound(InboundOpcode::PartyInvite, playerId, 0, playerUsername, std::move(fields));
 		return;
 	}
 

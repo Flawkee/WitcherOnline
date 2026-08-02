@@ -20,7 +20,8 @@ namespace w3mp {
 		NpcEnd = 10,
 		NpcHit = 11,
 		Visibility = 12,
-		PartyState = 13
+		PartyState = 13,
+		PartyInvite = 14
 	};
 
 	enum class ClientStatus
