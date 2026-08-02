@@ -16,6 +16,8 @@ struct r_SEntityClassSample
     var tags         : string;
     var syncEligible : bool;
     var hostileNow   : bool;
+    var questTag     : string;
+    var questEnemy   : bool;
 }
 
 class r_EntityClassifier
@@ -304,6 +306,8 @@ class r_EntityClassifier
         sample.tags = "-";
         sample.syncEligible = false;
         sample.hostileNow = false;
+        sample.questTag = "";
+        sample.questEnemy = false;
 
         if(!npc)
         {
@@ -346,6 +350,8 @@ class r_EntityClassifier
         {
             sample.entityClass = REC_Quest;
             sample.reason = "quest tag " + questTag;
+            sample.questTag = questTag;
+            sample.questEnemy = questEnemyNow(npc, sample.hostileNow);
             return;
         }
 
@@ -409,6 +415,35 @@ class r_EntityClassifier
         classify(npc, sample);
 
         return sample.syncEligible;
+    }
+
+    private function questEnemyNow(npc : CNewNPC, hostile : bool) : bool
+    {
+        if(!hostile || !npc.IsAlive())
+        {
+            return false;
+        }
+
+        if(!npc.GetVisibility() || !npc.GetGameplayVisibility())
+        {
+            return false;
+        }
+
+        return npc.IsMonster() || isFightCapable(npc);
+    }
+
+    public function questEnemyTag(npc : CNewNPC) : string
+    {
+        var sample : r_SEntityClassSample;
+
+        classify(npc, sample);
+
+        if(!sample.questEnemy)
+        {
+            return "";
+        }
+
+        return sample.questTag;
     }
 
     public function update()
