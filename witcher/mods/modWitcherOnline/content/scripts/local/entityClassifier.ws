@@ -417,6 +417,36 @@ class r_EntityClassifier
         return sample.syncEligible;
     }
 
+    public function looksQuestBound(npc : CNewNPC) : bool
+    {
+        var tags : array<name>;
+        var matched : string;
+
+        if(!npc)
+        {
+            return false;
+        }
+
+        tags = npc.GetTags();
+
+        if(hasQuestTag(tags, matched))
+        {
+            return true;
+        }
+
+        if(looksLikeQuestName(NameToString(npc.GetAppearance())))
+        {
+            return true;
+        }
+
+        if(looksLikeQuestName(npc.GetName()))
+        {
+            return true;
+        }
+
+        return npc.IsVIP();
+    }
+
     private function questEnemyNow(npc : CNewNPC, hostile : bool) : bool
     {
         if(!hostile || !npc.IsAlive())

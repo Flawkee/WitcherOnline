@@ -16,7 +16,9 @@ class r_TrackedNpc
     public var lastPerform : int;
     public var baseMaxHealth : float;
     public var appliedScale : int;
+    public var questTag   : string;
 
+    default questTag = "";
     default baseMaxHealth = -1.0;
     default appliedScale = 1000;
     default lastAttackType = -1;
@@ -51,7 +53,11 @@ class r_Replica
     public var baseMaxHealth : float;
     public var appliedScale  : int;
     public var appliedHostile : int;
+    public var questTag      : string;
+    public var boundLocal    : bool;
 
+    default questTag = "";
+    default boundLocal = false;
     default baseMaxHealth = -1.0;
     default appliedScale = 1000;
     default appliedHostile = -1;
@@ -616,6 +622,8 @@ class r_NpcSync
         {
             nextScanAt = now + SCAN_INTERVAL;
             scanOwned(now);
+            scanQuestEnemies(now);
+            updateQuestBindings();
         }
 
         if(now >= nextAggroAt)
@@ -1015,7 +1023,37 @@ class r_NpcSync
             return false;
         }
 
-        return classifier.isSyncEligible(npc);
+        if(!classifier.isSyncEligible(npc))
+        {
+            return false;
+        }
+
+        if(classifier.looksQuestBound(npc))
+        {
+            noteQuestLeak(npc, classifier);
+            return false;
+        }
+
+        return true;
+    }
+
+    private function noteQuestLeak(npc : CNewNPC, classifier : r_EntityClassifier)
+    {
+        var sample : r_SEntityClassSample;
+
+        if(!debugLogging)
+        {
+            return;
+        }
+
+        classifier.classify(npc, sample);
+
+        WO_Note("[npc_quest] blocked from world sync app=" + NameToString(npc.GetAppearance())
+            + " name=" + npc.GetName()
+            + " class=" + (int)sample.entityClass
+            + " reason=" + sample.reason
+            + " eligible=" + sample.syncEligible
+            + " tags=" + sample.tags);
     }
 
     private function findTrackedByActor(actor : CNewNPC) : int
@@ -1282,6 +1320,297 @@ class r_NpcSync
                 + " code=" + typeCode
                 + " app=" + NameToString(record.appearance)
                 + " localCount=" + localCount);
+        }
+    }
+
+    private function coopActive() : bool
+    {
+        return theGame.r_getMultiplayerClient().isCoopSession();
+    }
+
+    private function isQuestBoundActor(npc : CNewNPC) : bool
+    {
+        return npc.HasTag('WOQuestBound');
+    }
+
+    private function findQuestTrackedByTag(questTag : string) : int
+    {
+        var i : int;
+
+        for(i = 0; i < tracked.Size(); i += 1)
+        {
+            if(tracked[i].questTag == questTag)
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
+    private function findQuestReplicaByTag(questTag : string) : int
+    {
+        var i : int;
+
+        for(i = 0; i < replicas.Size(); i += 1)
+        {
+            if(replicas[i].questTag == questTag)
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
+    private function scanQuestEnemies(now : float)
+    {
+        var entities : array<CGameplayEntity>;
+        var classifier : r_EntityClassifier;
+        var record : r_TrackedNpc;
+        var npc : CNewNPC;
+        var questTag : string;
+        var guid : int;
+        var index : int;
+        var i : int;
+
+        if(!coopActive())
+        {
+            for(i = tracked.Size() - 1; i >= 0; i -= 1)
+            {
+                if(tracked[i].questTag != "")
+                {
+                    tracked.Erase(i);
+                }
+            }
+
+            return;
+        }
+
+        classifier = theGame.r_getMultiplayerClient().getEntityClassifier();
+
+        for(i = tracked.Size() - 1; i >= 0; i -= 1)
+        {
+            if(tracked[i].questTag == "")
+            {
+                continue;
+            }
+
+            if(findQuestReplicaByTag(tracked[i].questTag) >= 0)
+            {
+                dbg("npc_quest", "owned tag=" + tracked[i].questTag + " now bound as replica, releasing claim");
+                tracked.Erase(i);
+                continue;
+            }
+
+            if(!tracked[i].actor || classifier.questEnemyTag(tracked[i].actor) == "")
+            {
+                dbg("npc_quest", "dropped tag=" + tracked[i].questTag);
+                tracked.Erase(i);
+            }
+        }
+
+        FindGameplayEntitiesInSphere(entities, thePlayer.GetWorldPosition(), KEEP_RADIUS, 512,,,,'CNewNPC');
+
+        for(i = 0; i < entities.Size(); i += 1)
+        {
+            npc = (CNewNPC)entities[i];
+
+            if(!npc || npc == thePlayer || isReplicaActor(npc) || isQuestBoundActor(npc))
+            {
+                continue;
+            }
+
+            if(!npc.IsAlive() || npc.GetAttitude(thePlayer) != AIA_Hostile)
+            {
+                continue;
+            }
+
+            questTag = classifier.questEnemyTag(npc);
+
+            if(questTag == "")
+            {
+                continue;
+            }
+
+            if(findQuestReplicaByTag(questTag) >= 0)
+            {
+                continue;
+            }
+
+            guid = npc.GetGuidHash();
+
+            if(guid == 0)
+            {
+                continue;
+            }
+
+            index = findQuestTrackedByTag(questTag);
+
+            if(index >= 0)
+            {
+                tracked[index].lastSeenAt = now;
+
+                if(tracked[index].actor != npc || tracked[index].npcId != guid)
+                {
+                    tracked[index].actor = npc;
+                    tracked[index].npcId = guid;
+                    tracked[index].appearance = npc.GetAppearance();
+
+                    dbg("npc_quest", "owned tag=" + questTag + " rebound to guid=" + guid);
+                }
+
+                continue;
+            }
+
+            if(tracked.Size() >= MAX_TRACKED)
+            {
+                continue;
+            }
+
+            record = new r_TrackedNpc in this;
+            record.npcId = guid;
+            record.actor = npc;
+            record.appearance = npc.GetAppearance();
+            record.typeCode = "quest:" + questTag;
+            record.questTag = questTag;
+            record.lastSeenAt = now;
+            record.lastHp = -1;
+            record.offerLocalCount = 1;
+
+            tracked.PushBack(record);
+
+            dbg("npc_quest", "offered tag=" + questTag + " guid=" + guid);
+        }
+    }
+
+    private function bindQuestReplica(record : r_Replica) : bool
+    {
+        var entities : array<CGameplayEntity>;
+        var classifier : r_EntityClassifier;
+        var npc : CNewNPC;
+        var index : int;
+        var i : int;
+
+        if(record.questTag == "")
+        {
+            return false;
+        }
+
+        classifier = theGame.r_getMultiplayerClient().getEntityClassifier();
+
+        FindGameplayEntitiesInSphere(entities, thePlayer.GetWorldPosition(), KEEP_RADIUS, 512,,,,'CNewNPC');
+
+        for(i = 0; i < entities.Size(); i += 1)
+        {
+            npc = (CNewNPC)entities[i];
+
+            if(!npc || npc == thePlayer || isReplicaActor(npc) || isQuestBoundActor(npc))
+            {
+                continue;
+            }
+
+            if(!npc.IsAlive())
+            {
+                continue;
+            }
+
+            if(classifier.questEnemyTag(npc) != record.questTag)
+            {
+                continue;
+            }
+
+            index = findQuestTrackedByTag(record.questTag);
+
+            if(index >= 0)
+            {
+                tracked.Erase(index);
+            }
+
+            npc.AddTag('WOQuestBound');
+            npc.AddTag('WOReplica');
+            npc.SetImmortalityMode(AIM_Immortal, AIC_Default, true);
+            npc.SetAttackableByPlayerRuntime(true);
+            npc.SetCanPlayHitAnim(true);
+
+            record.actor = npc;
+            record.localGuid = npc.GetGuidHash();
+            record.boundLocal = true;
+            record.prepared = true;
+            record.appearance = npc.GetAppearance();
+            record.lastLocalHp = healthPermille(npc);
+
+            dbg("npc_quest", "bound canonical=" + record.canonicalId
+                + " tag=" + record.questTag + " guid=" + record.localGuid);
+
+            return true;
+        }
+
+        return false;
+    }
+
+    private function unbindQuestReplica(record : r_Replica)
+    {
+        if(record.actor)
+        {
+            if(record.aiForceId >= 0)
+            {
+                record.actor.CancelAIBehavior(record.aiForceId);
+                record.aiForceId = -1;
+            }
+
+            record.actor.RemoveTag('WOQuestBound');
+            record.actor.RemoveTag('WOReplica');
+            record.actor.SetImmortalityMode(AIM_None, AIC_Default, true);
+
+            dbg("npc_quest", "released canonical=" + record.canonicalId + " tag=" + record.questTag);
+        }
+
+        record.actor = NULL;
+        record.boundLocal = false;
+        record.prepared = false;
+    }
+
+    private function updateQuestBindings()
+    {
+        var i : int;
+
+        for(i = replicas.Size() - 1; i >= 0; i -= 1)
+        {
+            if(replicas[i].questTag == "")
+            {
+                continue;
+            }
+
+            if(!coopActive())
+            {
+                unbindQuestReplica(replicas[i]);
+                WO_NpcForget(replicas[i].canonicalId);
+                replicas.Erase(i);
+                continue;
+            }
+
+            if(!replicas[i].actor)
+            {
+                if(bindQuestReplica(replicas[i]))
+                {
+                    dbg("npc_quest", "rebound after entity swap tag=" + replicas[i].questTag);
+                }
+
+                continue;
+            }
+
+            if(!replicas[i].actor.IsAlive())
+            {
+                continue;
+            }
+
+            if(replicas[i].actor.GetAttitude(thePlayer) != AIA_Hostile)
+            {
+                unbindQuestReplica(replicas[i]);
+                WO_NpcForget(replicas[i].canonicalId);
+                replicas.Erase(i);
+            }
         }
     }
 
@@ -1570,6 +1899,11 @@ class r_NpcSync
                 return false;
             }
 
+            if(theGame.r_getMultiplayerClient().getEntityClassifier().looksQuestBound(npc))
+            {
+                return false;
+            }
+
             npc.Destroy();
             return true;
         }
@@ -1606,6 +1940,15 @@ class r_NpcSync
 
             if(index >= 0)
             {
+                if(tracked[index].questTag != "")
+                {
+                    tracked.Erase(index);
+                    statDropped += 1;
+
+                    dbg("npc_quest", "released owned quest enemy guid=" + guid);
+                    continue;
+                }
+
                 if(tracked[index].actor)
                 {
                     tracked[index].actor.Destroy();
@@ -1757,6 +2100,23 @@ class r_NpcSync
         appearance = WO_NpcAppearance(commandIndex);
         path = typeCode;
 
+        if(StrLeft(typeCode, 6) == "quest:")
+        {
+            record = new r_Replica in this;
+            record.canonicalId = canonicalId;
+            record.questTag = StrAfterFirst(typeCode, "quest:");
+            record.typeCode = typeCode;
+            record.appearance = appearance;
+
+            if(bindQuestReplica(record))
+            {
+                WO_NpcBind(commandIndex, record.localGuid);
+            }
+
+            replicas.PushBack(record);
+            return;
+        }
+
         if(path == "")
         {
             statNoTemplate += 1;
@@ -1876,6 +2236,12 @@ class r_NpcSync
             return;
         }
 
+        if(record.questTag != "")
+        {
+            unbindQuestReplica(record);
+            return;
+        }
+
         if(record.actor)
         {
             if(record.aiForceId >= 0)
@@ -1929,12 +2295,14 @@ class r_NpcSync
 
         npc.SetImmortalityMode(AIM_None, AIC_Default, true);
         npc.RemoveTag('WOReplica');
+        npc.RemoveTag('WOQuestBound');
 
         owned = new r_TrackedNpc in this;
         owned.npcId = npc.GetGuidHash();
         owned.actor = npc;
         owned.appearance = npc.GetAppearance();
         owned.typeCode = record.typeCode;
+        owned.questTag = record.questTag;
         owned.lastSeenAt = now;
         owned.lastHp = -1;
 

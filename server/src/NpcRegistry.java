@@ -86,6 +86,7 @@ public final class NpcRegistry
         public volatile long pendingDamageSince;
         public volatile int scaleMilli = NpcScaling.SCALE_UNIT;
         public volatile int scalePlayerCount = 1;
+        public volatile int questPartyId;
 
         final ArrayDeque<Sample> history = new ArrayDeque<>();
 
@@ -167,6 +168,24 @@ public final class NpcRegistry
     private static long ownerKey(int ownerPlayerId, int ownerLocalGuid)
     {
         return (((long) ownerPlayerId) << 32) | (ownerLocalGuid & 0xFFFFFFFFL);
+    }
+
+    public static boolean isQuestFoe(Npc npc)
+    {
+        return npc.typeCode != null && npc.typeCode.startsWith("quest:");
+    }
+
+    private static Npc findLiveQuestSlot(String typeCode, int partyId)
+    {
+        for (Npc npc : npcs.values())
+        {
+            if (npc.alive && npc.questPartyId == partyId && typeCode.equals(npc.typeCode))
+            {
+                return npc;
+            }
+        }
+
+        return null;
     }
 
     public static String describeNpc(Npc npc)
@@ -420,14 +439,77 @@ public final class NpcRegistry
         }
 
         final long key = ownerKey(ownerPlayerId, ownerLocalGuid);
+        final boolean questFoe = typeCode != null && typeCode.startsWith("quest:");
         Integer canonicalId = ownerGuidToCanonical.get(key);
         Npc npc = (canonicalId == null) ? null : npcs.get(canonicalId);
 
-        if (npc != null && (!npc.appearance.equals(appearance) || !npc.typeCode.equals(typeCode)))
+        if (npc != null && !questFoe
+                && (!npc.appearance.equals(appearance) || !npc.typeCode.equals(typeCode)))
         {
             npcs.remove(npc.npcId);
             ownerGuidToCanonical.remove(key);
             npc = null;
+        }
+
+        if (questFoe)
+        {
+            final int partyId = WitcherServer.questPartyOf(ownerPlayerId);
+
+            if (partyId <= 0)
+            {
+                return null;
+            }
+
+            if (npc == null || !npc.alive)
+            {
+                Npc slot = findLiveQuestSlot(typeCode, partyId);
+
+                if (slot != null && slot.ownerPlayerId != 0 && slot.ownerPlayerId != ownerPlayerId)
+                {
+                    return null;
+                }
+
+                if (slot != null)
+                {
+                    if (slot.ownerPlayerId != 0)
+                    {
+                        ownerGuidToCanonical.remove(ownerKey(slot.ownerPlayerId, slot.ownerLocalGuid));
+                    }
+
+                    slot.ownerPlayerId = ownerPlayerId;
+                    slot.ownerLocalGuid = ownerLocalGuid;
+                    slot.handoverTarget = 0;
+                    slot.handoverSentNanos = 0L;
+                    slot.handoverAttempts = 0;
+                    slot.lastUpdateNanos = now;
+                    ownerGuidToCanonical.put(key, slot.npcId);
+
+                    npc = slot;
+
+                    WitcherServer.dbg("QFOE %s slot #%d rebound to %s guid=%d\n",
+                            typeCode, slot.npcId, WitcherServer.describePlayerId(ownerPlayerId), ownerLocalGuid);
+                }
+                else
+                {
+                    if ((flags & 1) == 0 || hpPermille <= 0)
+                    {
+                        return null;
+                    }
+
+                    npc = new Npc(nextCanonicalId.getAndIncrement());
+                    npc.ownerPlayerId = ownerPlayerId;
+                    npc.ownerLocalGuid = ownerLocalGuid;
+                    npc.typeCode = typeCode;
+                    npc.appearance = appearance;
+                    npc.questPartyId = partyId;
+                    npcs.put(npc.npcId, npc);
+                    ownerGuidToCanonical.put(key, npc.npcId);
+                    statAdmitted.incrementAndGet();
+
+                    WitcherServer.dbg("QFOE %s slot #%d created by %s guid=%d\n",
+                            typeCode, npc.npcId, WitcherServer.describePlayerId(ownerPlayerId), ownerLocalGuid);
+                }
+            }
         }
 
         boolean isNew = (npc == null);

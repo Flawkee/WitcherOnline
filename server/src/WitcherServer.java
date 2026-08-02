@@ -2765,6 +2765,45 @@ public class WitcherServer
                 senderKey, fields.get(0), fields.get(1), sent);
     }
 
+    static int questPartyOf(int playerId)
+    {
+        PlayerSession session = sessionByPlayerId(playerId);
+
+        if (session == null || session.partyId <= 0)
+        {
+            return 0;
+        }
+
+        Party party = parties.get(session.partyId);
+
+        if (party == null)
+        {
+            return 0;
+        }
+
+        for (String memberKey : party.snapshot())
+        {
+            PlayerSession member = players.get(memberKey);
+
+            if (member != null && member.coopMode)
+            {
+                return session.partyId;
+            }
+        }
+
+        return 0;
+    }
+
+    static boolean questVisibleTo(PlayerSession session, NpcRegistry.Npc npc)
+    {
+        if (session.partyId <= 0 || session.partyId != npc.questPartyId)
+        {
+            return false;
+        }
+
+        return questPartyOf(session.playerId) == session.partyId;
+    }
+
     private static void notifyLeaderOfCoop(PlayerSession session)
     {
         refreshLeaderCoop(partyOf(normalizeUsernameKey(session.username)));
@@ -2952,6 +2991,12 @@ public class WitcherServer
 
         for (NpcRegistry.Npc npc : visible)
         {
+            if (NpcRegistry.isQuestFoe(npc) && !questVisibleTo(session, npc)
+                    && !session.knownNpcs.contains(npc.npcId))
+            {
+                continue;
+            }
+
             if (!npc.alive && !session.knownNpcs.contains(npc.npcId))
             {
                 continue;
