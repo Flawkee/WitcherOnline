@@ -193,6 +193,7 @@ statemachine class r_MultiplayerClient
     // party
     private var inParty : bool;
     private var joinedParty : string;
+    private var coopSave : r_CoopSave;
     private var coopMode : bool;
     private var coopOffered : bool;
     private var confirmPopupOpen : bool;
@@ -1456,6 +1457,7 @@ statemachine class r_MultiplayerClient
                 joinedParty = "";
                 coopMode = false;
                 coopOffered = false;
+                getCoopSave().endSession();
                 pendingInviteFrom = "";
                 partyTargetMissingSince = -1;
                 partyTargetWasMissing = false;
@@ -1654,10 +1656,12 @@ statemachine class r_MultiplayerClient
 
         if(enabled)
         {
+            getCoopSave().beginSession();
             notice(GetLocStringById(2111114288));
         }
         else
         {
+            getCoopSave().endSession();
             notice(GetLocStringById(2111114289));
         }
     }
@@ -4404,9 +4408,20 @@ statemachine class r_MultiplayerClient
         return npcSync;
     }
 
+    public function getCoopSave() : r_CoopSave
+    {
+        if(!coopSave)
+        {
+            coopSave = new r_CoopSave in this;
+        }
+
+        return coopSave;
+    }
+
     public function updateNpcSync()
     {
         getNpcSync().update();
+        getCoopSave().update();
     }
 
     public function pumpTransport()
