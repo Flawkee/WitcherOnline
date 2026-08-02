@@ -208,6 +208,8 @@ statemachine class r_MultiplayerClient
     private var scenePendingUntil : float;
     private var sceneCallIsStuck : bool;
     private var sceneAnnounceAt : float;
+    private var applyingRemoteQuestItem : bool;
+    private var questItemProbe : r_CharSnapshot;
     private var nextStuckCallAt : float;
     private var sceneProbeIndex : int;
     private var SCENE_CALL_LIFETIME : float;
@@ -234,6 +236,7 @@ statemachine class r_MultiplayerClient
     default scenePendingUntil = 0.0;
     default sceneCallIsStuck = false;
     default sceneAnnounceAt = 0.0;
+    default applyingRemoteQuestItem = false;
     default nextStuckCallAt = 0.0;
     default sceneProbeIndex = 0;
     default SCENE_CALL_LIFETIME = 300.0;
@@ -1131,6 +1134,135 @@ statemachine class r_MultiplayerClient
         {
             anchor.PlayDialog();
         }
+    }
+
+    public function reportQuestItemPickup(inv : CInventoryComponent, id : SItemUniqueId, quantity : int)
+    {
+        var itemName : name;
+
+        if(!isCoopSession() || applyingRemoteQuestItem)
+        {
+            return;
+        }
+
+        if(!inv || !GetWitcherPlayer() || inv != GetWitcherPlayer().GetInventory())
+        {
+            return;
+        }
+
+        if(!questItemProbe)
+        {
+            questItemProbe = new r_CharSnapshot in this;
+        }
+
+        if(!questItemProbe.isQuestBoundItem(inv, id))
+        {
+            return;
+        }
+
+        itemName = inv.GetItemName(id);
+
+        if(NameToString(itemName) == "")
+        {
+            return;
+        }
+
+        if(quantity <= 0)
+        {
+            quantity = 1;
+        }
+
+        WO_Note("[qsync] picked up quest item " + itemName + " x" + quantity);
+
+        WO_QuestItem(0, NameToString(itemName), quantity);
+    }
+
+    public function reportNoticeBoardQuest(questFact : string, noteItem : name)
+    {
+        if(!isCoopSession() || applyingRemoteQuestItem)
+        {
+            return;
+        }
+
+        if(questFact == "" || questFact == "flaw")
+        {
+            return;
+        }
+
+        WO_Note("[qsync] contract taken, fact " + questFact + " note=" + noteItem);
+
+        WO_QuestItem(1, questFact, 1);
+
+        if(NameToString(noteItem) != "")
+        {
+            WO_QuestItem(0, NameToString(noteItem), 1);
+        }
+    }
+
+    public function onRemoteQuestItem(who : string, kind : int, subject : string, quantity : int)
+    {
+        if(!isCoopSession() || who == username || subject == "")
+        {
+            return;
+        }
+
+        if(kind == 1)
+        {
+            applyRemoteQuestFact(subject);
+            return;
+        }
+
+        applyRemoteQuestItem(subject, quantity);
+    }
+
+    private function applyRemoteQuestFact(questFact : string)
+    {
+        if(FactsDoesExist(questFact))
+        {
+            WO_Note("[qsync] fact " + questFact + " already set, skipped");
+            return;
+        }
+
+        FactsAdd(questFact);
+
+        WO_Note("[qsync] fact " + questFact + " added from party");
+    }
+
+    private function applyRemoteQuestItem(subject : string, quantity : int)
+    {
+        var inv : CInventoryComponent;
+        var itemName : name;
+
+        if(!GetWitcherPlayer())
+        {
+            return;
+        }
+
+        inv = GetWitcherPlayer().GetInventory();
+
+        if(!inv)
+        {
+            return;
+        }
+
+        itemName = WO_ToName(subject);
+
+        if(inv.GetItemQuantityByName(itemName) > 0)
+        {
+            WO_Note("[qsync] already holding " + subject + ", skipped");
+            return;
+        }
+
+        if(quantity <= 0)
+        {
+            quantity = 1;
+        }
+
+        applyingRemoteQuestItem = true;
+        inv.AddAnItem(itemName, quantity, true, true);
+        applyingRemoteQuestItem = false;
+
+        WO_Note("[qsync] added " + subject + " x" + quantity + " from party");
     }
 
     public function isCoopSession() : bool

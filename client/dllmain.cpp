@@ -983,6 +983,7 @@ static void HandleServerPacket(const std::string& msg)
 		&& opcode != "PARTY"
 		&& opcode != "PINVITE"
 		&& opcode != "SCENE"
+		&& opcode != "QITEM"
 		&& opcode != "MOVE" && opcode != "UPDATE1A" && opcode != "UPDATE1B" && opcode != "UPDATE2A" && opcode != "UPDATE2B" && opcode != "UPDATE3" && opcode != "UPDATE4")
 		return;
 
@@ -1033,6 +1034,12 @@ static void HandleServerPacket(const std::string& msg)
 	if (opcode == "SCENE")
 	{
 		QueueInbound(InboundOpcode::SceneStart, playerId, 0, playerUsername, std::move(fields));
+		return;
+	}
+
+	if (opcode == "QITEM")
+	{
+		QueueInbound(InboundOpcode::QuestItem, playerId, 0, playerUsername, std::move(fields));
 		return;
 	}
 

@@ -214,6 +214,71 @@ timer function r_showWelcome(dt : float, id : int)
     }
 }
 
+@wrapMethod(CInventoryComponent)
+function AddAnItem(item : name, optional quantity : int, optional dontInformGui : bool, optional dontMarkAsNew : bool, optional showAsRewardInUIHax : bool) : array<SItemUniqueId>
+{
+    var added : array<SItemUniqueId>;
+    var client : r_MultiplayerClient;
+    var i : int;
+
+    added = wrappedMethod(item, quantity, dontInformGui, dontMarkAsNew, showAsRewardInUIHax);
+
+    client = theGame.r_multiplayerClient;
+
+    if(client)
+    {
+        for(i = 0; i < added.Size(); i += 1)
+        {
+            client.reportQuestItemPickup(this, added[i], quantity);
+        }
+    }
+
+    return added;
+}
+
+@wrapMethod(CInventoryComponent)
+function GiveItemTo(otherInventory : CInventoryComponent, itemId : SItemUniqueId, optional quantity : int, optional refreshNewFlag : bool, optional forceTransferNoDrops : bool, optional informGUI : bool) : SItemUniqueId
+{
+    var moved : SItemUniqueId;
+    var client : r_MultiplayerClient;
+
+    moved = wrappedMethod(otherInventory, itemId, quantity, refreshNewFlag, forceTransferNoDrops, informGUI);
+
+    client = theGame.r_multiplayerClient;
+
+    if(client)
+    {
+        client.reportQuestItemPickup(otherInventory, moved, quantity);
+    }
+
+    return moved;
+}
+
+@wrapMethod(W3NoticeBoard)
+function AcceptNewQuest(errandName : string) : bool
+{
+    var client : r_MultiplayerClient;
+    var taken : bool;
+    var i : int;
+
+    client = theGame.r_multiplayerClient;
+
+    if(client)
+    {
+        for(i = 0; i < addedNotes.Size(); i += 1)
+        {
+            if(addedNotes[i].errandStringKey == errandName && addedNotes[i].errandPosition >= 0)
+            {
+                client.reportNoticeBoardQuest(addedNotes[i].newQuestFact, addedNotes[i].addedItemName);
+            }
+        }
+    }
+
+    taken = wrappedMethod(errandName);
+
+    return taken;
+}
+
 @wrapMethod(CR4GuiManager)
 function OnEnteredMainMenu()
 {

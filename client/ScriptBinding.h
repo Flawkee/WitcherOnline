@@ -22,7 +22,8 @@ namespace w3mp {
 		Visibility = 12,
 		PartyState = 13,
 		PartyInvite = 14,
-		SceneStart = 15
+		SceneStart = 15,
+		QuestItem = 16
 	};
 
 	enum class ClientStatus

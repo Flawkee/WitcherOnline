@@ -232,6 +232,11 @@ class r_CharSnapshot
         return inv.ItemHasTag(id, 'Trophy') || inv.IsItemTrophy(id);
     }
 
+    public function isQuestBoundItem(inv : CInventoryComponent, id : SItemUniqueId) : bool
+    {
+        return isQuestBound(inv, id);
+    }
+
     private function isQuestBound(inv : CInventoryComponent, id : SItemUniqueId) : bool
     {
         var dm : CDefinitionsManagerAccessor;

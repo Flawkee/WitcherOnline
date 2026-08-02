@@ -298,7 +298,7 @@
 2111114295||wo_coop_transfer_failed|Could not receive the party leader's game. Try again with coop(true) or rejoin the party.
 2111114296||wo_coop_adopting|Setting up Co-op Story Mode - a loading screen will appear shortly.
 2111114297||wo_coop_adopted|Co-op Story Mode active. Quest progress follows the party leader.
-2111114298||wo_coop_save_blocked|Saving is disabled during Co-op Story Mode.
+2111114298||wo_coop_save_blocked|Saving is disabled during Co-op Story Mode. A Co-op save is written automatically every 5 minutes.
 2111114299||wo_coop_load_blocked|Loading is disabled during Co-op Story Mode. Leave the party to load a game.
 2111114300||wo_coop_leader_active|Co-op Story Mode active - you are the party leader. Saving and loading are disabled.
 2111114301||wo_dlg_wait_party|Waiting for all party members

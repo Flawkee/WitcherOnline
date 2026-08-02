@@ -633,6 +633,7 @@ public class WitcherServer
         return "PRESP".equals(opcode)
                 || "PCOOP".equals(opcode)
                 || "SCENE".equals(opcode)
+                || "QITEM".equals(opcode)
                 || "SAVEBEG".equals(opcode)
                 || "SAVECHK".equals(opcode)
                 || "SAVEEND".equals(opcode)
@@ -1263,6 +1264,12 @@ public class WitcherServer
         if ("SCENE".equals(opcode))
         {
             relaySceneStart(session, fields);
+            return;
+        }
+
+        if ("QITEM".equals(opcode))
+        {
+            relayQuestItem(session, fields);
             return;
         }
 
@@ -2720,6 +2727,42 @@ public class WitcherServer
         }
 
         dbg("SCENE %s started a scene, relayed to party #%d\n", senderKey, party.partyId);
+    }
+
+    private static void relayQuestItem(PlayerSession session, List<String> fields)
+    {
+        final String senderKey = normalizeUsernameKey(session.username);
+        Party party = partyOf(senderKey);
+
+        if (party == null || fields.size() < 3)
+        {
+            return;
+        }
+
+        List<String> payload = new ArrayList<>();
+        payload.add(session.username);
+        payload.addAll(fields);
+
+        int sent = 0;
+
+        for (String memberKey : party.snapshot())
+        {
+            if (memberKey.equals(senderKey))
+            {
+                continue;
+            }
+
+            PlayerSession member = players.get(memberKey);
+
+            if (member != null)
+            {
+                queueOutbound(member, "QITEM", payload);
+                sent++;
+            }
+        }
+
+        dbg("QITEM %s kind=%s subject=%s relayed to %d\n",
+                senderKey, fields.get(0), fields.get(1), sent);
     }
 
     private static void notifyLeaderOfCoop(PlayerSession session)
