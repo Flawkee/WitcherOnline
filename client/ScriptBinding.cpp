@@ -15,8 +15,11 @@
 extern void ResetInboundDeltaCaches();
 extern void SendPartyRequest(const char* opcode, const std::string& argument);
 extern void SendPartyRequest2(const char* opcode, const std::string& first, const std::string& second);
+#include "SaveTransfer.h"
+
 extern bool WriteCharSnapshot(const std::string& slot, const std::string& text);
 extern std::string ReadCharSnapshot(const std::string& slot);
+extern std::string ResolveSaveDirectory();
 
 namespace w3mp {
 
@@ -1426,6 +1429,91 @@ namespace w3mp {
 			SendPartyRequest2("PRESP", NarrowPayload(text), approved ? "1" : "0");
 	}
 
+	static void WO_SaveSend(void* context, void* frame, void* result)
+	{
+		RedString path;
+		const int size = ReadStringParameter(frame, path);
+
+		AdvanceFrame(frame);
+
+		bool ok = false;
+
+		if (size > 0)
+			ok = SaveTransfer::BeginSend(NarrowPayload(path));
+
+		if (result)
+			*static_cast<bool*>(result) = ok;
+	}
+
+	static void WO_SaveDirectory(void* context, void* frame, void* result)
+	{
+		AdvanceFrame(frame);
+
+		WriteStringResult(result, ResolveSaveDirectory());
+	}
+
+	static void WO_SaveWant(void* context, void* frame, void* result)
+	{
+		AdvanceFrame(frame);
+
+		SaveTransfer::RequestSave();
+	}
+
+	static void WO_SaveNeededBy(void* context, void* frame, void* result)
+	{
+		AdvanceFrame(frame);
+
+		WriteStringResult(result, SaveTransfer::TakePendingRequest());
+	}
+
+	static void WO_SaveIncomingDir(void* context, void* frame, void* result)
+	{
+		RedString dir;
+		const int size = ReadStringParameter(frame, dir);
+
+		AdvanceFrame(frame);
+
+		if (size > 0)
+			SaveTransfer::SetIncomingPath(NarrowPayload(dir));
+	}
+
+	static void WO_SaveState(void* context, void* frame, void* result)
+	{
+		AdvanceFrame(frame);
+
+		if (result)
+			*static_cast<int*>(result) = static_cast<int>(SaveTransfer::Status());
+	}
+
+	static void WO_SaveProgress(void* context, void* frame, void* result)
+	{
+		AdvanceFrame(frame);
+
+		if (result)
+			*static_cast<int*>(result) = SaveTransfer::ProgressPermille();
+	}
+
+	static void WO_SaveError(void* context, void* frame, void* result)
+	{
+		AdvanceFrame(frame);
+
+		WriteStringResult(result, SaveTransfer::LastError());
+	}
+
+	static void WO_SaveFile(void* context, void* frame, void* result)
+	{
+		AdvanceFrame(frame);
+
+		WriteStringResult(result, SaveTransfer::CompletedFile());
+	}
+
+	static void WO_SaveReset(void* context, void* frame, void* result)
+	{
+		AdvanceFrame(frame);
+
+		SaveTransfer::Reset();
+	}
+
 	static void WO_ToName(void* context, void* frame, void* result)
 	{
 		RedString text;
@@ -2202,6 +2290,8 @@ namespace w3mp {
 		g_tickCount.fetch_add(1);
 		g_lastScriptTickMs.store(GetTickCount64());
 
+		SaveTransfer::Pump();
+
 		int gather = 0;
 
 		if (g_connected.load())
@@ -2327,6 +2417,16 @@ namespace w3mp {
 		RegisterOne(L"WO_PartyRespond", reinterpret_cast<void*>(&WO_PartyRespond), "WO_PartyRespond");
 		RegisterOne(L"WO_PartyCoopMode", reinterpret_cast<void*>(&WO_PartyCoopMode), "WO_PartyCoopMode");
 		RegisterOne(L"WO_ToName", reinterpret_cast<void*>(&WO_ToName), "WO_ToName");
+		RegisterOne(L"WO_SaveSend", reinterpret_cast<void*>(&WO_SaveSend), "WO_SaveSend");
+		RegisterOne(L"WO_SaveWant", reinterpret_cast<void*>(&WO_SaveWant), "WO_SaveWant");
+		RegisterOne(L"WO_SaveDirectory", reinterpret_cast<void*>(&WO_SaveDirectory), "WO_SaveDirectory");
+		RegisterOne(L"WO_SaveNeededBy", reinterpret_cast<void*>(&WO_SaveNeededBy), "WO_SaveNeededBy");
+		RegisterOne(L"WO_SaveIncomingDir", reinterpret_cast<void*>(&WO_SaveIncomingDir), "WO_SaveIncomingDir");
+		RegisterOne(L"WO_SaveState", reinterpret_cast<void*>(&WO_SaveState), "WO_SaveState");
+		RegisterOne(L"WO_SaveProgress", reinterpret_cast<void*>(&WO_SaveProgress), "WO_SaveProgress");
+		RegisterOne(L"WO_SaveError", reinterpret_cast<void*>(&WO_SaveError), "WO_SaveError");
+		RegisterOne(L"WO_SaveFile", reinterpret_cast<void*>(&WO_SaveFile), "WO_SaveFile");
+		RegisterOne(L"WO_SaveReset", reinterpret_cast<void*>(&WO_SaveReset), "WO_SaveReset");
 		RegisterOne(L"WO_CharStore", reinterpret_cast<void*>(&WO_CharStore), "WO_CharStore");
 		RegisterOne(L"WO_CharFetch", reinterpret_cast<void*>(&WO_CharFetch), "WO_CharFetch");
 		RegisterOne(L"WO_EntityProbe", reinterpret_cast<void*>(&WO_EntityProbe), "WO_EntityProbe");

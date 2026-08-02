@@ -10,6 +10,8 @@ class r_CoopSave
     private var manifest     : array<string>;
     private var beforeFiles  : array<string>;
     private var manifestLoaded : bool;
+    private var uploadPending : bool;
+    private var uploadRequestedAt : float;
 
     private var SAVE_INTERVAL : float;
     private var SAVE_SETTLE   : float;
@@ -22,6 +24,8 @@ class r_CoopSave
     default savePending = false;
     default pendingSince = 0.0;
     default manifestLoaded = false;
+    default uploadPending = false;
+    default uploadRequestedAt = 0.0;
 
     default SAVE_INTERVAL = 300.0;
     default SAVE_SETTLE = 3.0;
@@ -44,7 +48,18 @@ class r_CoopSave
 
         nextSaveAt = theGame.GetEngineTimeAsSeconds() + SAVE_INTERVAL;
 
-        WO_Note("[coopsave] session started, saves locked, interval=" + SAVE_INTERVAL);
+        WO_SaveIncomingDir(WO_SaveDirectory());
+
+        WO_Note("[coopsave] session started, saves locked, interval=" + SAVE_INTERVAL
+            + " saveDir=" + WO_SaveDirectory());
+
+        if(!theGame.r_getMultiplayerClient().isPartyLeader())
+        {
+            WO_SaveReset();
+            WO_SaveWant();
+
+            WO_Note("[coopsave] requested leader save");
+        }
     }
 
     public function endSession()
@@ -87,10 +102,7 @@ class r_CoopSave
     {
         var now : float;
 
-        if(!active)
-        {
-            return;
-        }
+        serveSaveRequests();
 
         now = theGame.GetEngineTimeAsSeconds();
 
@@ -104,9 +116,70 @@ class r_CoopSave
             return;
         }
 
+        if(!active)
+        {
+            return;
+        }
+
         if(now >= nextSaveAt)
         {
             beginSave(now);
+        }
+    }
+
+    private function serveSaveRequests()
+    {
+        var asker : string;
+
+        asker = WO_SaveNeededBy();
+
+        if(asker == "")
+        {
+            return;
+        }
+
+        if(!theGame.r_getMultiplayerClient().isPartyLeader())
+        {
+            return;
+        }
+
+        WO_Note("[coopsave] leader asked to supply a save for " + asker);
+
+        uploadPending = true;
+        uploadRequestedAt = theGame.GetEngineTimeAsSeconds();
+
+        beginSave(theGame.GetEngineTimeAsSeconds());
+    }
+
+    private function publishLatestSave()
+    {
+        var saves : array<SSavegameInfo>;
+        var newest : string;
+        var i : int;
+
+        theGame.ListSavedGames(saves);
+
+        for(i = 0; i < saves.Size(); i += 1)
+        {
+            if(isCoopSave(saves[i].filename))
+            {
+                newest = saves[i].filename;
+            }
+        }
+
+        if(newest == "")
+        {
+            WO_Note("[coopsave] no co-op save to upload");
+            return;
+        }
+
+        if(WO_SaveSend(WO_SaveDirectory() + "\\" + newest + ".sav"))
+        {
+            WO_Note("[coopsave] uploading " + newest);
+        }
+        else
+        {
+            WO_Note("[coopsave] upload failed to start: " + WO_SaveError());
         }
     }
 
@@ -198,7 +271,17 @@ class r_CoopSave
         }
 
         pruneManifest(saves);
-        acquireLock();
+
+        if(uploadPending)
+        {
+            uploadPending = false;
+            publishLatestSave();
+        }
+
+        if(active)
+        {
+            acquireLock();
+        }
 
         nextSaveAt = theGame.GetEngineTimeAsSeconds() + SAVE_INTERVAL;
     }
@@ -328,6 +411,23 @@ class r_CoopSave
     public function refreshManifest()
     {
         loadManifest();
+    }
+}
+
+function WitcherOnline_RefreshCoopSaves()
+{
+    var client : r_MultiplayerClient;
+
+    if(!theGame)
+    {
+        return;
+    }
+
+    client = theGame.r_getMultiplayerClient();
+
+    if(client)
+    {
+        client.getCoopSave().refreshManifest();
     }
 }
 

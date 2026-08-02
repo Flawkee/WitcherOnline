@@ -4,6 +4,7 @@ import com.sun.net.httpserver.HttpServer;
 
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
+import java.util.ArrayDeque;
 import java.util.Base64;
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -631,6 +632,12 @@ public class WitcherServer
     {
         return "PRESP".equals(opcode)
                 || "PCOOP".equals(opcode)
+                || "SAVEBEG".equals(opcode)
+                || "SAVECHK".equals(opcode)
+                || "SAVEEND".equals(opcode)
+                || "SAVENACK".equals(opcode)
+                || "SAVEACK".equals(opcode)
+                || "SAVEWANT".equals(opcode)
                 || "MOVE".equals(opcode)
                 || "UPDATE1A".equals(opcode)
                 || "UPDATE1B".equals(opcode)
@@ -1235,6 +1242,13 @@ public class WitcherServer
             return;
         }
 
+        if ("SAVEBEG".equals(opcode) || "SAVECHK".equals(opcode) || "SAVEEND".equals(opcode)
+                || "SAVENACK".equals(opcode) || "SAVEACK".equals(opcode) || "SAVEWANT".equals(opcode))
+        {
+            relaySaveTransfer(session, opcode, fields);
+            return;
+        }
+
         if ("PRESP".equals(opcode))
         {
             if (fields.size() >= 2)
@@ -1655,6 +1669,8 @@ public class WitcherServer
                 }
 
                 purgeExpiredPartyRequests(now);
+                purgeStaleSaveRelays(now);
+                pumpSaveRelays();
 
                 NpcRegistry.applyUnackedDamage(now);
                 NpcRegistry.pruneStale(ownerOnline, now);
@@ -2024,6 +2040,433 @@ public class WitcherServer
         dbg("PARTY #%d leader %s left, promoted %s\n", party.partyId, previousLeader, party.leader());
 
         broadcastParty(party);
+    }
+
+    private static final class SaveTarget
+    {
+        final ArrayDeque<Integer> queue = new ArrayDeque<>();
+        final Set<Integer> queued = new HashSet<>();
+        boolean begun;
+        boolean endPending;
+        boolean live;
+    }
+
+    private static final class SaveRelay
+    {
+        int partyId;
+        int transferId;
+        String ownerKey;
+        int totalChunks;
+        byte[][] chunks;
+        List<String> beginFields;
+        boolean uploadComplete;
+        long lastActivityNanos;
+        final Map<String, SaveTarget> targets = new ConcurrentHashMap<>();
+        final Set<String> waiting = new HashSet<>();
+    }
+
+    private static final int SAVE_RESEND_PER_TICK = 24;
+    private static final int OUTBOUND_QUEUE_LIMIT = 256;
+    private static final int OUTBOUND_SAVE_HEADROOM = 16;
+    private static final long SAVE_RELAY_RETAIN_NANOS = 60_000_000_000L;
+    private static final long SAVE_RELAY_TIMEOUT_NANOS = 300_000_000_000L;
+
+    private static final Map<Integer, SaveRelay> saveRelays = new ConcurrentHashMap<>();
+
+    private static void saveWanted(PlayerSession asker)
+    {
+        String askerKey = normalizeUsernameKey(asker.username);
+        Party party = partyOf(askerKey);
+
+        if (party == null)
+        {
+            return;
+        }
+
+        String leaderKey = party.leader();
+
+        if (askerKey.equals(leaderKey))
+        {
+            return;
+        }
+
+        long now = System.nanoTime();
+        SaveRelay relay = saveRelays.get(party.partyId);
+
+        if (relay != null && relay.uploadComplete
+                && (now - relay.lastActivityNanos) <= SAVE_RELAY_RETAIN_NANOS)
+        {
+            long ageSeconds = (now - relay.lastActivityNanos) / 1000000000L;
+
+            relay.lastActivityNanos = now;
+            beginTarget(relay, askerKey, true);
+
+            dbg("SAVE relay #%d reused from cache for %s (age %ds)\n",
+                    relay.transferId, askerKey, ageSeconds);
+            return;
+        }
+
+        if (relay != null && !relay.uploadComplete && relay.beginFields != null)
+        {
+            relay.waiting.add(askerKey);
+            relay.lastActivityNanos = now;
+            beginTarget(relay, askerKey, true);
+
+            dbg("SAVE relay #%d upload in flight, %s attached\n", relay.transferId, askerKey);
+            return;
+        }
+
+        PlayerSession leader = players.get(leaderKey);
+
+        if (leader == null)
+        {
+            return;
+        }
+
+        if (relay == null)
+        {
+            relay = new SaveRelay();
+            relay.partyId = party.partyId;
+            relay.ownerKey = leaderKey;
+            saveRelays.put(party.partyId, relay);
+        }
+
+        relay.waiting.add(askerKey);
+        relay.lastActivityNanos = now;
+
+        List<String> fields = new ArrayList<>();
+        fields.add(asker.username);
+
+        queueOutbound(leader, "SAVENEED", fields);
+
+        dbg("SAVE requested from leader %s for %s\n", leaderKey, askerKey);
+    }
+
+    private static void beginTarget(SaveRelay relay, String memberKey, boolean fullPush)
+    {
+        PlayerSession member = players.get(memberKey);
+
+        if (member == null || relay.beginFields == null)
+        {
+            return;
+        }
+
+        SaveTarget target = relay.targets.get(memberKey);
+
+        if (target == null)
+        {
+            target = new SaveTarget();
+            relay.targets.put(memberKey, target);
+        }
+
+        target.live = true;
+
+        if (!target.begun)
+        {
+            queueOutbound(member, "SAVEBEG", relay.beginFields);
+            target.begun = true;
+        }
+
+        if (fullPush)
+        {
+            for (int i = 0; i < relay.totalChunks; i++)
+            {
+                if (relay.chunks[i] != null && target.queued.add(i))
+                {
+                    target.queue.addLast(i);
+                }
+            }
+
+            target.endPending = relay.uploadComplete;
+        }
+    }
+
+    private static void relaySaveTransfer(PlayerSession sender, String opcode, List<String> fields)
+    {
+        String senderKey = normalizeUsernameKey(sender.username);
+        Party party = partyOf(senderKey);
+
+        if (party == null)
+        {
+            return;
+        }
+
+        long now = System.nanoTime();
+
+        if ("SAVEWANT".equals(opcode))
+        {
+            saveWanted(sender);
+            return;
+        }
+
+        if (fields.isEmpty())
+        {
+            return;
+        }
+
+        Integer transferId = parseIntegerOrNull(fields.get(0));
+
+        if (transferId == null)
+        {
+            return;
+        }
+
+        if ("SAVEBEG".equals(opcode))
+        {
+            Integer totalChunks = fields.size() > 1 ? parseIntegerOrNull(fields.get(1)) : null;
+
+            if (totalChunks == null || totalChunks <= 0 || totalChunks > 200000)
+            {
+                return;
+            }
+
+            SaveRelay relay = saveRelays.get(party.partyId);
+
+            if (relay == null)
+            {
+                relay = new SaveRelay();
+                relay.partyId = party.partyId;
+                saveRelays.put(party.partyId, relay);
+            }
+
+            relay.transferId = transferId;
+            relay.ownerKey = senderKey;
+            relay.totalChunks = totalChunks;
+            relay.chunks = new byte[totalChunks][];
+            relay.beginFields = new ArrayList<>(fields);
+            relay.uploadComplete = false;
+            relay.lastActivityNanos = now;
+            relay.targets.clear();
+
+            for (String memberKey : relay.waiting)
+            {
+                beginTarget(relay, memberKey, false);
+            }
+
+            dbg("SAVE relay #%d upload started by %s chunks=%d waiting=%d\n",
+                    transferId, senderKey, totalChunks, relay.waiting.size());
+            return;
+        }
+
+        SaveRelay relay = saveRelays.get(party.partyId);
+
+        if (relay == null || relay.transferId != transferId)
+        {
+            return;
+        }
+
+        relay.lastActivityNanos = now;
+
+        if ("SAVECHK".equals(opcode))
+        {
+            Integer index = fields.size() > 1 ? parseIntegerOrNull(fields.get(1)) : null;
+
+            if (index == null || index < 0 || index >= relay.totalChunks || fields.size() < 3)
+            {
+                return;
+            }
+
+            if (relay.chunks[index] == null)
+            {
+                relay.chunks[index] = fields.get(2).getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+            }
+
+            for (SaveTarget target : relay.targets.values())
+            {
+                if (target.live && target.queued.add(index))
+                {
+                    target.queue.addLast(index);
+                }
+            }
+
+            return;
+        }
+
+        if ("SAVEEND".equals(opcode))
+        {
+            relay.uploadComplete = true;
+
+            for (SaveTarget target : relay.targets.values())
+            {
+                if (target.live)
+                {
+                    target.endPending = true;
+                }
+            }
+
+            dbg("SAVE relay #%d upload complete, cached\n", transferId);
+            return;
+        }
+
+        if ("SAVENACK".equals(opcode))
+        {
+            SaveTarget target = relay.targets.get(senderKey);
+
+            if (target == null || fields.size() < 2)
+            {
+                return;
+            }
+
+            int queued = 0;
+            int unknown = 0;
+
+            for (String piece : fields.get(1).split(","))
+            {
+                Integer index = parseIntegerOrNull(piece.trim());
+
+                if (index == null || index < 0 || index >= relay.totalChunks)
+                {
+                    continue;
+                }
+
+                if (relay.chunks[index] == null)
+                {
+                    unknown++;
+                    continue;
+                }
+
+                if (target.queued.add(index))
+                {
+                    target.queue.addLast(index);
+                    queued++;
+                }
+            }
+
+            if (relay.uploadComplete)
+            {
+                target.endPending = true;
+            }
+
+            if (unknown > 0)
+            {
+                PlayerSession owner = players.get(relay.ownerKey);
+
+                if (owner != null)
+                {
+                    queueOutbound(owner, "SAVENACK", fields);
+                }
+            }
+
+            dbg("SAVE relay #%d queued %d resends for %s (%d not cached)\n",
+                    transferId, queued, senderKey, unknown);
+            return;
+        }
+
+        if ("SAVEACK".equals(opcode))
+        {
+            SaveTarget target = relay.targets.get(senderKey);
+
+            if (target != null)
+            {
+                target.live = false;
+                target.queue.clear();
+                target.queued.clear();
+            }
+
+            relay.waiting.remove(senderKey);
+
+            dbg("SAVE relay #%d delivered to %s, cache retained %ds\n",
+                    transferId, senderKey, SAVE_RELAY_RETAIN_NANOS / 1000000000L);
+        }
+    }
+
+    private static void pumpSaveRelays()
+    {
+        for (SaveRelay relay : saveRelays.values())
+        {
+            for (Map.Entry<String, SaveTarget> entry : relay.targets.entrySet())
+            {
+                SaveTarget target = entry.getValue();
+
+                if (!target.live || (target.queue.isEmpty() && !target.endPending))
+                {
+                    continue;
+                }
+
+                PlayerSession member = players.get(entry.getKey());
+
+                if (member == null)
+                {
+                    continue;
+                }
+
+                // Leave headroom so save chunks never starve gameplay traffic,
+                // and never enqueue past the cap where queueOutbound silently drops.
+                int space = OUTBOUND_QUEUE_LIMIT - member.pendingOutbound.size() - OUTBOUND_SAVE_HEADROOM;
+                int budget = Math.min(SAVE_RESEND_PER_TICK, space);
+
+                if (budget <= 0)
+                {
+                    continue;
+                }
+
+                while (budget > 0 && !target.queue.isEmpty())
+                {
+                    int index = target.queue.pollFirst();
+                    target.queued.remove(index);
+
+                    byte[] payload = relay.chunks[index];
+
+                    if (payload == null)
+                    {
+                        continue;
+                    }
+
+                    List<String> out = new ArrayList<>();
+                    out.add(Integer.toString(relay.transferId));
+                    out.add(Integer.toString(index));
+                    out.add(new String(payload, java.nio.charset.StandardCharsets.US_ASCII));
+
+                    queueOutbound(member, "SAVECHK", out);
+                    budget--;
+                }
+
+                if (target.queue.isEmpty() && target.endPending)
+                {
+                    List<String> endFields = new ArrayList<>();
+                    endFields.add(Integer.toString(relay.transferId));
+
+                    queueOutbound(member, "SAVEEND", endFields);
+                    target.endPending = false;
+                }
+            }
+        }
+    }
+
+    private static void purgeStaleSaveRelays(long now)
+    {
+        for (SaveRelay relay : new ArrayList<>(saveRelays.values()))
+        {
+            boolean busy = false;
+
+            for (SaveTarget target : relay.targets.values())
+            {
+                if (target.live)
+                {
+                    busy = true;
+                    break;
+                }
+            }
+
+            long idle = now - relay.lastActivityNanos;
+
+            if (busy)
+            {
+                if (idle > SAVE_RELAY_TIMEOUT_NANOS)
+                {
+                    saveRelays.remove(relay.partyId);
+                    dbg("SAVE relay #%d timed out mid-transfer, dropped\n", relay.transferId);
+                }
+
+                continue;
+            }
+
+            if (idle > SAVE_RELAY_RETAIN_NANOS)
+            {
+                saveRelays.remove(relay.partyId);
+                dbg("SAVE relay #%d retention expired, cache dropped\n", relay.transferId);
+            }
+        }
     }
 
     private static void partyRequest(PlayerSession actor, String targetName)
@@ -2861,7 +3304,7 @@ public class WitcherServer
         Object[] packet;
         int guard = 0;
 
-        while ((packet = session.pendingOutbound.poll()) != null && guard < 32)
+        while ((packet = session.pendingOutbound.poll()) != null && guard < 64)
         {
             guard++;
 
@@ -2874,7 +3317,7 @@ public class WitcherServer
 
     static void queueOutbound(PlayerSession session, String opcode, List<String> fields)
     {
-        if (session == null || session.pendingOutbound.size() >= 64)
+        if (session == null || session.pendingOutbound.size() >= OUTBOUND_QUEUE_LIMIT)
         {
             return;
         }

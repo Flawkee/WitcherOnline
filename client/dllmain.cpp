@@ -3,6 +3,7 @@
 #include "Diagnostics.h"
 #include "ScriptBinding.h"
 #include "NpcNet.h"
+#include "SaveTransfer.h"
 #include <windows.h>
 #include <thread>
 #include <atomic>
@@ -13,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <shlobj.h>
 #include "pugixml\pugixml.hpp"
 #include <unordered_map>
 #define ASIO_STANDALONE
@@ -711,6 +713,40 @@ std::string ReadCharSnapshot(const std::string& slot)
 	}
 }
 
+std::string ResolveSaveDirectory()
+{
+	PWSTR docs = nullptr;
+
+	if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Documents, 0, nullptr, &docs)))
+	{
+		const fs::path base = fs::path(docs) / "The Witcher 3" / "gamesaves";
+		CoTaskMemFree(docs);
+
+		std::error_code ec;
+
+		if (fs::exists(base, ec))
+			return base.string();
+	}
+
+	char profile[MAX_PATH]{};
+
+	if (GetEnvironmentVariableA("USERPROFILE", profile, MAX_PATH) > 0)
+	{
+		const fs::path fallback = fs::path(profile) / "Documents" / "The Witcher 3" / "gamesaves";
+		std::error_code ec;
+
+		if (fs::exists(fallback, ec))
+			return fallback.string();
+	}
+
+	return std::string();
+}
+
+void SendSaveChunk(const char* opcode, const std::vector<std::string>& fields)
+{
+	SendUdpPacket(BuildPacket(opcode, BuildLocalPacketId(), fields), opcode);
+}
+
 void SendPartyRequest2(const char* opcode, const std::string& first, const std::string& second)
 {
 	std::vector<std::string> fields;
@@ -928,6 +964,9 @@ static void HandleServerPacket(const std::string& msg)
 
 	const bool isNpcOpcode = opcode == "NPCOWN";
 
+	const bool isSaveOpcode = opcode == "SAVEBEG" || opcode == "SAVECHK" || opcode == "SAVEEND"
+		|| opcode == "SAVENACK" || opcode == "SAVEACK" || opcode == "SAVENEED";
+
 	if (isNetOpcode)
 	{
 		if (parts.size() < 3)
@@ -939,6 +978,7 @@ static void HandleServerPacket(const std::string& msg)
 	}
 
 	if (!isNpcOpcode
+		&& !isSaveOpcode
 		&& opcode != "PVIS"
 		&& opcode != "PARTY"
 		&& opcode != "PINVITE"
@@ -986,6 +1026,12 @@ static void HandleServerPacket(const std::string& msg)
 	if (opcode == "PINVITE")
 	{
 		QueueInbound(InboundOpcode::PartyInvite, playerId, 0, playerUsername, std::move(fields));
+		return;
+	}
+
+	if (isSaveOpcode)
+	{
+		SaveTransfer::OnPacket(opcode, fields);
 		return;
 	}
 
