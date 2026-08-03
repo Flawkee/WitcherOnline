@@ -23,6 +23,7 @@ class r_CoopSave
     private var nextPurgeAt : float;
     private var saveHoldUntil : float;
     private var nextGateReportAt : float;
+    private var lastSavedFile : string;
 
     private var SAVE_INTERVAL : float;
     private var SAVE_SETTLE   : float;
@@ -48,6 +49,7 @@ class r_CoopSave
     default nextPurgeAt = 0.0;
     default saveHoldUntil = 0.0;
     default nextGateReportAt = 0.0;
+    default lastSavedFile = "";
 
     default SAVE_INTERVAL = 300.0;
     default SAVE_SETTLE = 1.0;
@@ -633,11 +635,16 @@ class r_CoopSave
         var newest : string;
         var i : int;
 
+        if(lastSavedFile != "" && trySend(lastSavedFile))
+        {
+            return;
+        }
+
         theGame.ListSavedGames(saves);
 
         for(i = 0; i < saves.Size(); i += 1)
         {
-            if(isCoopSave(saves[i].filename))
+            if(saves[i].filename != lastSavedFile && isCoopSave(saves[i].filename))
             {
                 newest = saves[i].filename;
             }
@@ -649,15 +656,33 @@ class r_CoopSave
             return;
         }
 
-        if(WO_SaveSend(WO_SaveDirectory() + "\\" + newest + ".sav"))
-        {
-            uploadedFile = newest;
-            WO_Note("[coopsave] uploading " + newest);
-        }
-        else
+        if(!trySend(newest))
         {
             WO_Note("[coopsave] upload failed to start: " + WO_SaveError());
         }
+    }
+
+    private function trySend(fileName : string) : bool
+    {
+        var stem : string;
+        var length : int;
+
+        stem = fileName;
+        length = StrLen(stem);
+
+        if(length > 4 && StrLower(StrMid(stem, length - 4, 4)) == ".sav")
+        {
+            stem = StrMid(stem, 0, length - 4);
+        }
+
+        if(WO_SaveSend(WO_SaveDirectory() + "\\" + stem + ".sav"))
+        {
+            uploadedFile = fileName;
+            WO_Note("[coopsave] uploading " + stem);
+            return true;
+        }
+
+        return false;
     }
 
     public function saveNow()
@@ -760,6 +785,7 @@ class r_CoopSave
             if(!wasPresentBefore(saves[i].filename))
             {
                 rememberSave(saves[i].filename);
+                lastSavedFile = saves[i].filename;
                 added += 1;
 
                 WO_Note("[coopsave] saved file=" + saves[i].filename
@@ -801,7 +827,7 @@ class r_CoopSave
 
             for(j = 0; j < saves.Size(); j += 1)
             {
-                if(saves[j].filename == manifest[i])
+                if(normalizeSaveName(saves[j].filename) == normalizeSaveName(manifest[i]))
                 {
                     found = true;
                     break;
@@ -839,8 +865,25 @@ class r_CoopSave
         return -1;
     }
 
+    private function normalizeSaveName(fileName : string) : string
+    {
+        var body : string;
+        var length : int;
+
+        body = StrLower(fileName);
+        length = StrLen(body);
+
+        if(length > 4 && StrMid(body, length - 4, 4) == ".sav")
+        {
+            body = StrMid(body, 0, length - 4);
+        }
+
+        return body;
+    }
+
     public function isCoopSave(fileName : string) : bool
     {
+        var wanted : string;
         var i : int;
 
         if(fileName == "")
@@ -853,9 +896,11 @@ class r_CoopSave
             loadManifest();
         }
 
+        wanted = normalizeSaveName(fileName);
+
         for(i = 0; i < manifest.Size(); i += 1)
         {
-            if(manifest[i] == fileName)
+            if(normalizeSaveName(manifest[i]) == wanted)
             {
                 return true;
             }
@@ -867,6 +912,7 @@ class r_CoopSave
     private function forgetSave(fileName : string)
     {
         var kept : array<string>;
+        var wanted : string;
         var i : int;
 
         if(fileName == "")
@@ -874,9 +920,11 @@ class r_CoopSave
             return;
         }
 
+        wanted = normalizeSaveName(fileName);
+
         for(i = 0; i < manifest.Size(); i += 1)
         {
-            if(manifest[i] != fileName)
+            if(normalizeSaveName(manifest[i]) != wanted)
             {
                 kept.PushBack(manifest[i]);
             }
@@ -898,7 +946,7 @@ class r_CoopSave
             return;
         }
 
-        manifest.PushBack(fileName);
+        manifest.PushBack(normalizeSaveName(fileName));
         storeManifest();
     }
 
