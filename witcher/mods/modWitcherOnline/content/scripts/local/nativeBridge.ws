@@ -66,6 +66,7 @@ import function WO_NpcTarget(index : int) : int;
 import function WO_NpcType(index : int) : string;
 import function WO_NpcAppearance(index : int) : name;
 import function WO_NpcBind(index : int, localGuid : int);
+import function WO_NpcBindId(canonicalId : int, localGuid : int);
 import function WO_NpcForget(canonicalId : int);
 import function WO_NpcTake(canonicalId : int, localGuid : int);
 import function WO_NpcUnspawnable(canonicalId : int);

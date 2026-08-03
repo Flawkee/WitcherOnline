@@ -521,6 +521,9 @@ class r_NpcAggro
         var ids      : array<int>;
         var actors   : array<CActor>;
         var healths  : array<float>;
+        var questIds : array<int>;
+        var questActors : array<CActor>;
+        var questHealths : array<float>;
         var npc      : CNewNPC;
         var localId  : int;
         var index    : int;
@@ -554,6 +557,13 @@ class r_NpcAggro
         actors.PushBack(thePlayer);
         healths.PushBack(healthFraction(thePlayer.GetHealthPercents()));
 
+        if(client.isQuestCoopPlayer(localId))
+        {
+            questIds.PushBack(localId);
+            questActors.PushBack(thePlayer);
+            questHealths.PushBack(healthFraction(thePlayer.GetHealthPercents()));
+        }
+
         players = client.getPlayers();
 
         for(i = 0; i < players.Size(); i += 1)
@@ -581,6 +591,13 @@ class r_NpcAggro
             ids.PushBack(players[i].serverPlayerId);
             actors.PushBack(players[i].ghost);
             healths.PushBack(healthFraction(players[i].health));
+
+            if(client.isQuestCoopPlayer(players[i].serverPlayerId))
+            {
+                questIds.PushBack(players[i].serverPlayerId);
+                questActors.PushBack(players[i].ghost);
+                questHealths.PushBack(healthFraction(players[i].health));
+            }
         }
 
         for(i = 0; i < trackedList.Size(); i += 1)
@@ -594,7 +611,8 @@ class r_NpcAggro
 
             index = indexOfState(trackedList[i].npcId);
 
-            if(!npc.IsAlive() || !npc.IsInCombat())
+            if(!npc.IsAlive()
+                || (trackedList[i].questTag == "" && !npc.IsInCombat()))
             {
                 if(index >= 0)
                 {
@@ -612,7 +630,15 @@ class r_NpcAggro
             }
 
             states[index].lastUpdateAt = now;
-            evaluate(states[index], npc, now, dt, ids, actors, healths);
+
+            if(trackedList[i].questTag != "")
+            {
+                evaluate(states[index], npc, now, dt, questIds, questActors, questHealths);
+            }
+            else
+            {
+                evaluate(states[index], npc, now, dt, ids, actors, healths);
+            }
 
             trackedList[i].cachedForcedTarget = states[index].forcedTargetId;
         }

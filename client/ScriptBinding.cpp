@@ -2126,6 +2126,15 @@ namespace w3mp {
 		NpcNet::Bind(index, localGuid);
 	}
 
+	static void WO_NpcBindId(void* context, void* frame, void* result)
+	{
+		const int canonicalId = ReadIntParameter(frame);
+		const int localGuid = ReadIntParameter(frame);
+		AdvanceFrame(frame);
+
+		NpcNet::BindCanonical(canonicalId, localGuid);
+	}
+
 	static void WO_NpcForget(void* context, void* frame, void* result)
 	{
 		const int canonicalId = ReadIntParameter(frame);
@@ -2584,6 +2593,7 @@ namespace w3mp {
 		RegisterOne(L"WO_NpcType", reinterpret_cast<void*>(&WO_NpcType), "WO_NpcType");
 		RegisterOne(L"WO_NpcAppearance", reinterpret_cast<void*>(&WO_NpcAppearance), "WO_NpcAppearance");
 		RegisterOne(L"WO_NpcBind", reinterpret_cast<void*>(&WO_NpcBind), "WO_NpcBind");
+		RegisterOne(L"WO_NpcBindId", reinterpret_cast<void*>(&WO_NpcBindId), "WO_NpcBindId");
 		RegisterOne(L"WO_NpcForget", reinterpret_cast<void*>(&WO_NpcForget), "WO_NpcForget");
 		RegisterOne(L"WO_NpcTake", reinterpret_cast<void*>(&WO_NpcTake), "WO_NpcTake");
 		RegisterOne(L"WO_NpcUnspawnable", reinterpret_cast<void*>(&WO_NpcUnspawnable), "WO_NpcUnspawnable");

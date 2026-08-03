@@ -696,6 +696,9 @@ namespace w3mp {
 					sample.hpPermille = ParseInt(fields, base + 8);
 					sample.flags = ParseInt(fields, base + 9);
 					sample.targetPlayerId = ParseInt(fields, base + 10);
+
+					if ((sample.flags & 1) == 0 || sample.hpPermille <= 0)
+						replica.dead = true;
 				}
 				else
 				{
@@ -1023,10 +1026,13 @@ namespace w3mp {
 					break;
 
 				const int canonicalId = ParseInt(fields, base);
-				auto it = g_replicas.find(canonicalId);
+				if (canonicalId <= 0)
+					continue;
 
-				if (it != g_replicas.end())
-					it->second.dead = true;
+				Replica& replica = g_replicas[canonicalId];
+				replica.canonicalId = canonicalId;
+				replica.dead = true;
+				replica.lastPacketMs = ServerNow();
 			}
 
 			return;
@@ -1274,6 +1280,8 @@ namespace w3mp {
 
 			for (auto& pair : g_owned)
 			{
+				g_scales.erase(pair.first);
+
 				if (!pair.second.registered)
 					continue;
 
@@ -1328,6 +1336,7 @@ namespace w3mp {
 				if (it->second.registered)
 					g_ownedRemoved.push_back(it->first);
 
+				g_scales.erase(it->first);
 				it = g_owned.erase(it);
 			}
 
@@ -1372,6 +1381,7 @@ namespace w3mp {
 		for (auto it = g_replicas.begin(); it != g_replicas.end();)
 		{
 			Replica& replica = it->second;
+			const bool questReplica = replica.typeCode.rfind("quest:", 0) == 0;
 
 			if (replica.despawn)
 			{
@@ -1411,7 +1421,7 @@ namespace w3mp {
 				continue;
 			}
 
-			if ((serverNow - replica.lastPacketMs) > kReplicaStaleMs)
+			if (!questReplica && (serverNow - replica.lastPacketMs) > kReplicaStaleMs)
 			{
 				if (replica.localGuid != 0 || replica.spawnEmitted)
 				{
@@ -1454,9 +1464,15 @@ namespace w3mp {
 
 			if (replica.localGuid == 0)
 			{
-				if (replica.dead)
+				if (replica.dead && !questReplica)
 				{
 					it = g_replicas.erase(it);
+					continue;
+				}
+
+				if (replica.dead && replica.deathEmitted)
+				{
+					++it;
 					continue;
 				}
 
@@ -1632,7 +1648,31 @@ namespace w3mp {
 			return;
 
 		it->second.localGuid = localGuid;
+		it->second.spawnAttempts = 0;
+		it->second.spawnRequested = false;
+		it->second.unspawnable = false;
 		g_commands[index].localGuid = localGuid;
+	}
+
+	void NpcNet::BindCanonical(int canonicalId, int localGuid)
+	{
+		std::lock_guard<std::mutex> lock(g_mutex);
+
+		auto it = g_replicas.find(canonicalId);
+
+		if (it == g_replicas.end())
+			return;
+
+		it->second.localGuid = localGuid;
+		it->second.spawnAttempts = 0;
+		it->second.spawnRequested = false;
+		it->second.unspawnable = false;
+
+		if (localGuid == 0)
+		{
+			it->second.wantedAtMs = 0;
+			it->second.promote = false;
+		}
 	}
 
 	void NpcNet::Forget(int canonicalId)
@@ -1649,6 +1689,15 @@ namespace w3mp {
 			return;
 
 		g_replicas.erase(canonicalId);
+
+		auto scale = g_scales.find(canonicalId);
+
+		if (scale != g_scales.end())
+		{
+			const int scaleMilli = scale->second;
+			g_scales.erase(scale);
+			g_scales[localGuid] = scaleMilli;
+		}
 
 		std::vector<std::string> fields;
 		fields.push_back("1");

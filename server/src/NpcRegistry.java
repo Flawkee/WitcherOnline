@@ -225,11 +225,11 @@ public final class NpcRegistry
         return npc.typeCode != null && npc.typeCode.startsWith("quest:");
     }
 
-    private static Npc findLiveQuestSlot(String typeCode, int partyId)
+    private static Npc findQuestSlot(String typeCode, int partyId)
     {
         for (Npc npc : npcs.values())
         {
-            if (npc.alive && npc.questPartyId == partyId && typeCode.equals(npc.typeCode))
+            if (npc.questPartyId == partyId && typeCode.equals(npc.typeCode))
             {
                 return npc;
             }
@@ -510,12 +510,38 @@ public final class NpcRegistry
                 return null;
             }
 
-            if (npc == null || !npc.alive)
+            if (npc != null && npc.questPartyId != partyId)
             {
-                Npc slot = findLiveQuestSlot(typeCode, partyId);
+                unregister(npc);
+                ownerGuidToCanonical.remove(key);
+                npc = null;
+            }
+
+            Npc slot = findQuestSlot(typeCode, partyId);
+
+            if ((npc != null && !npc.alive) || (slot != null && !slot.alive))
+            {
+                Npc tombstone = (npc != null && !npc.alive) ? npc : slot;
+
+                WitcherServer.dbg("QFOE %s dead slot #%d rejected from %s guid=%d\n",
+                        typeCode,
+                        tombstone.npcId,
+                        WitcherServer.describePlayerId(ownerPlayerId),
+                        ownerLocalGuid);
+
+                statRejectedDuplicate.incrementAndGet();
+                return null;
+            }
+
+            if (npc == null)
+            {
 
                 if (slot != null && slot.ownerPlayerId != 0 && slot.ownerPlayerId != ownerPlayerId)
                 {
+                    WitcherServer.dbg("QFOE %s claim rejected from %s; owned by %s\n",
+                            typeCode,
+                            WitcherServer.describePlayerId(ownerPlayerId),
+                            WitcherServer.describePlayerId(slot.ownerPlayerId));
                     return null;
                 }
 
@@ -646,6 +672,18 @@ public final class NpcRegistry
             return null;
         }
 
+        if (isQuestFoe(npc)
+                && !WitcherServer.questVisibleTo(WitcherServer.sessionByPlayerId(ownerPlayerId), npc))
+        {
+            releaseOwned(ownerPlayerId, ownerLocalGuid, now);
+
+            WitcherServer.dbg("QFOE %s released by ineligible owner %s\n",
+                    npc.typeCode,
+                    WitcherServer.describePlayerId(ownerPlayerId));
+
+            return null;
+        }
+
         applyState(npc, npc.area, x, y, z, heading, hpPermille, flags, targetPlayerId, snapshotMs, now);
 
         return npc;
@@ -664,6 +702,18 @@ public final class NpcRegistry
             long snapshotMs,
             long now)
     {
+        final PlayerSession targetSession = targetPlayerId == 0
+                ? null
+                : WitcherServer.sessionByPlayerId(targetPlayerId);
+
+        if (targetPlayerId != 0
+                && (targetSession == null
+                    || targetSession.paused
+                    || (isQuestFoe(npc) && !WitcherServer.questVisibleTo(targetSession, npc))))
+        {
+            targetPlayerId = 0;
+        }
+
         final int previousTarget = npc.targetPlayerId;
         final boolean wasAlive = npc.alive;
         final int previousArea = npc.area;
@@ -735,6 +785,24 @@ public final class NpcRegistry
         }
 
         ownerGuidToCanonical.remove(key);
+
+        if (isQuestFoe(npc) && !npc.alive)
+        {
+            npc.ownerPlayerId = 0;
+            npc.ownerLocalGuid = 0;
+            npc.handoverTarget = 0;
+            npc.handoverSentNanos = 0L;
+            npc.handoverAttempts = 0;
+            npc.handoverBlockedUntil = 0L;
+            npc.releasedByPlayerId = 0;
+            npc.releasedLocalGuid = 0;
+
+            WitcherServer.dbg("QFOE %s slot #%d TOMBSTONED after owner despawn\n",
+                    npc.typeCode, npc.npcId);
+
+            return true;
+        }
+
         unregister(npc);
 
         WitcherServer.dbg("NPC %s DESPAWNED | owner=%s spot=%s\n",
@@ -766,10 +834,32 @@ public final class NpcRegistry
     {
         for (Npc npc : npcs.values())
         {
+            if (!npc.alive && isQuestFoe(npc))
+            {
+                continue;
+            }
+
             if (!npc.alive && npc.deathBroadcast && (now - npc.deadSinceNanos) > DEAD_RETENTION_NANOS)
             {
                 unregister(npc);
                 ownerGuidToCanonical.remove(ownerKey(npc.ownerPlayerId, npc.ownerLocalGuid));
+                continue;
+            }
+
+            if (isQuestFoe(npc) && npc.ownerPlayerId != 0
+                    && !WitcherServer.questVisibleTo(
+                            WitcherServer.sessionByPlayerId(npc.ownerPlayerId), npc))
+            {
+                int ownerId = npc.ownerPlayerId;
+                int ownerGuid = npc.ownerLocalGuid;
+
+                if (releaseOwned(ownerId, ownerGuid, now))
+                {
+                    WitcherServer.dbg("QFOE %s owner %s left co-op roster\n",
+                            npc.typeCode,
+                            WitcherServer.describePlayerId(ownerId));
+                }
+
                 continue;
             }
 
@@ -787,6 +877,16 @@ public final class NpcRegistry
 
             if (npc.ownerPlayerId != 0 && ownerOnline.contains(npc.ownerPlayerId))
             {
+                if ((now - npc.lastUpdateNanos) > NPC_STALE_NANOS)
+                {
+                    unregister(npc);
+                    ownerGuidToCanonical.remove(ownerKey(npc.ownerPlayerId, npc.ownerLocalGuid));
+
+                    WitcherServer.dbg("NPC %s EVICTED (online owner silent %.0fs)\n",
+                            describeNpc(npc),
+                            (now - npc.lastUpdateNanos) / 1_000_000_000.0);
+                }
+
                 continue;
             }
 
@@ -915,7 +1015,9 @@ public final class NpcRegistry
                 continue;
             }
 
-            if (npc.deathBroadcast && (now - npc.deadSinceNanos) > DEATH_BROADCAST_WINDOW_NANOS)
+            if (!isQuestFoe(npc)
+                    && npc.deathBroadcast
+                    && (now - npc.deadSinceNanos) > DEATH_BROADCAST_WINDOW_NANOS)
             {
                 continue;
             }
@@ -929,6 +1031,68 @@ public final class NpcRegistry
         }
 
         return pending;
+    }
+
+    public static void requestDeathReplay(Npc npc, int playerId, long now)
+    {
+        if (npc == null || npc.alive || !isQuestFoe(npc) || playerId <= 0)
+        {
+            return;
+        }
+
+        npc.deathSends.remove(playerId);
+        npc.lastDeathSendNanos = 0L;
+        lastDeathNanos = now;
+    }
+
+    public static int requestQuestDeathReplay(PlayerSession session, long now)
+    {
+        if (session == null)
+        {
+            return 0;
+        }
+
+        int count = 0;
+
+        for (Npc npc : npcs.values())
+        {
+            if (npc.alive
+                    || !isQuestFoe(npc)
+                    || !session.knownNpcs.contains(npc.boxedId)
+                    || !WitcherServer.questVisibleTo(session, npc))
+            {
+                continue;
+            }
+
+            requestDeathReplay(npc, session.playerId, now);
+            count++;
+        }
+
+        return count;
+    }
+
+    public static int removeQuestParty(int partyId)
+    {
+        if (partyId <= 0)
+        {
+            return 0;
+        }
+
+        int removed = 0;
+
+        for (Npc npc : npcs.values())
+        {
+            if (!isQuestFoe(npc) || npc.questPartyId != partyId)
+            {
+                continue;
+            }
+
+            ownerGuidToCanonical.remove(ownerKey(npc.ownerPlayerId, npc.ownerLocalGuid));
+            unregister(npc);
+            removed++;
+        }
+
+        return removed;
     }
 
     public static List<Npc> visibleTo(PlayerSession session, double enterSquared, double leaveSquared)
@@ -990,6 +1154,11 @@ public final class NpcRegistry
         if (viewer == null || npc == null)
         {
             return false;
+        }
+
+        if (isQuestFoe(npc))
+        {
+            return WitcherServer.questVisibleTo(viewer, npc);
         }
 
         referenceId = (npc.ownerPlayerId != 0) ? npc.ownerPlayerId : npc.releasedByPlayerId;
@@ -1098,6 +1267,29 @@ public final class NpcRegistry
         }
 
         return targeted;
+    }
+
+    public static int clearTargetsForPlayer(int playerId)
+    {
+        int cleared = 0;
+
+        if (playerId <= 0)
+        {
+            return cleared;
+        }
+
+        for (Npc npc : npcs.values())
+        {
+            if (npc.targetPlayerId != playerId)
+            {
+                continue;
+            }
+
+            npc.targetPlayerId = 0;
+            cleared++;
+        }
+
+        return cleared;
     }
 
     public static List<int[]> planHandovers(List<PlayerSession> sessions, double radiusSquared, long now)

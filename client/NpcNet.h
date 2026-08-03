@@ -79,6 +79,7 @@ namespace w3mp {
 		static int Pull();
 		static const ReplicaCommand* Command(int index);
 		static void Bind(int index, int localGuid);
+		static void BindCanonical(int canonicalId, int localGuid);
 		static void Forget(int canonicalId);
 		static void Take(int canonicalId, int localGuid);
 		static void MarkUnspawnable(int canonicalId);

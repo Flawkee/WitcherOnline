@@ -1078,19 +1078,34 @@ public class WitcherServer
                     continue;
                 }
 
-                NpcRegistry.Npc admitted = NpcRegistry.upsert(
-                        session.playerId,
-                        guid,
-                        area,
-                        sanitizeToken(fields.get(base + 2)),
-                        sanitizeToken(fields.get(base + 3)),
-                        x, y, z, heading,
-                        clampPermille(hp),
-                        flags,
-                        target,
-                        localCount,
-                        stamp,
-                        now);
+                String rawTypeCode = fields.get(base + 2);
+                String typeCode = sanitizeNpcTypeToken(rawTypeCode);
+                boolean rejectedQuestType = rawTypeCode != null
+                        && rawTypeCode.trim().startsWith("quest:")
+                        && "-".equals(typeCode);
+                NpcRegistry.Npc admitted = null;
+
+                if (rejectedQuestType)
+                {
+                    dbg("QFOE invalid type rejected from %s guid=%d\n",
+                            describePlayerId(session.playerId), guid);
+                }
+                else
+                {
+                    admitted = NpcRegistry.upsert(
+                            session.playerId,
+                            guid,
+                            area,
+                            typeCode,
+                            sanitizeToken(fields.get(base + 3)),
+                            x, y, z, heading,
+                            clampPermille(hp),
+                            flags,
+                            target,
+                            localCount,
+                            stamp,
+                            now);
+                }
 
                 if (admitted == null)
                 {
@@ -1375,6 +1390,27 @@ public class WitcherServer
             if (session.paused != nowPaused)
             {
                 session.paused = nowPaused;
+
+                if (nowPaused)
+                {
+                    int cleared = NpcRegistry.clearTargetsForPlayer(session.playerId);
+
+                    if (cleared > 0)
+                    {
+                        dbg("NPC targets cleared for paused %s: %d\n",
+                                describePlayerId(session.playerId), cleared);
+                    }
+                }
+                else
+                {
+                    int replayed = NpcRegistry.requestQuestDeathReplay(session, now);
+
+                    if (replayed > 0)
+                    {
+                        dbg("QFOE replay queued for resumed %s: %d deaths\n",
+                                describePlayerId(session.playerId), replayed);
+                    }
+                }
 
                 dbg("PLAYER %s %s\n",
                         describePlayerId(session.playerId),
@@ -1729,6 +1765,13 @@ public class WitcherServer
             return;
         }
 
+        if (NpcRegistry.isQuestFoe(npc) && !questVisibleTo(attacker, npc))
+        {
+            rejectHit(attacker, eventId, npc.hpPermille, "outside co-op roster");
+            npcHitsRejected.incrementAndGet();
+            return;
+        }
+
         if (!npc.alive)
         {
             rejectHit(attacker, eventId, 0, "already dead");
@@ -1845,6 +1888,35 @@ public class WitcherServer
         }
 
         return trimmed;
+    }
+
+    static String sanitizeNpcTypeToken(String value)
+    {
+        if (value == null)
+        {
+            return "-";
+        }
+
+        String trimmed = value.trim();
+
+        if (!trimmed.startsWith("quest:"))
+        {
+            return sanitizeToken(trimmed);
+        }
+
+        if (trimmed.length() > 160)
+        {
+            return "-";
+        }
+
+        String questTag = sanitizeToken(trimmed.substring("quest:".length()));
+
+        if ("-".equals(questTag))
+        {
+            return "-";
+        }
+
+        return "quest:" + questTag;
     }
 
     private static void npcLoop(DatagramSocket socket)
@@ -2213,6 +2285,13 @@ public class WitcherServer
         }
 
         parties.remove(party.partyId);
+
+        int removedQuestFoes = NpcRegistry.removeQuestParty(party.partyId);
+
+        if (removedQuestFoes > 0)
+        {
+            dbg("QFOE party #%d state cleared: %d slots\n", party.partyId, removedQuestFoes);
+        }
 
         dbg("PARTY #%d disbanded\n", party.partyId);
     }
@@ -3050,39 +3129,64 @@ public class WitcherServer
     {
         PlayerSession session = sessionByPlayerId(playerId);
 
-        if (session == null || session.partyId <= 0)
+        if (session == null || !isQuestCoopParticipant(session, session.partyId))
         {
             return 0;
         }
 
-        Party party = parties.get(session.partyId);
-
-        if (party == null)
-        {
-            return 0;
-        }
-
-        for (String memberKey : party.snapshot())
-        {
-            PlayerSession member = players.get(memberKey);
-
-            if (member != null && member.coopMode)
-            {
-                return session.partyId;
-            }
-        }
-
-        return 0;
+        return session.partyId;
     }
 
-    static boolean questVisibleTo(PlayerSession session, NpcRegistry.Npc npc)
+    static boolean isQuestCoopParticipant(PlayerSession session, int partyId)
     {
-        if (session.partyId <= 0 || session.partyId != npc.questPartyId)
+        if (session == null || partyId <= 0 || session.partyId != partyId)
         {
             return false;
         }
 
-        return questPartyOf(session.playerId) == session.partyId;
+        Party party = parties.get(partyId);
+
+        if (party == null)
+        {
+            return false;
+        }
+
+        final String leaderKey = party.leader();
+        boolean active = false;
+
+        for (String memberKey : party.snapshot())
+        {
+            if (memberKey.equals(leaderKey))
+            {
+                continue;
+            }
+
+            PlayerSession member = players.get(memberKey);
+
+            if (member != null && member.coopMode)
+            {
+                active = true;
+                break;
+            }
+        }
+
+        if (!active)
+        {
+            return false;
+        }
+
+        final String sessionKey = normalizeUsernameKey(session.username);
+        return sessionKey.equals(leaderKey) || session.coopMode;
+    }
+
+    static boolean questVisibleTo(PlayerSession session, NpcRegistry.Npc npc)
+    {
+        if (session == null || npc == null || session.partyId != npc.questPartyId)
+        {
+            return false;
+        }
+
+        return isQuestCoopParticipant(session, npc.questPartyId);
     }
 
     private static void notifyLeaderOfCoop(PlayerSession session)
@@ -3262,8 +3366,6 @@ public class WitcherServer
                 session, NPC_INTEREST_RADIUS_SQUARED, NPC_INTEREST_LEAVE_SQUARED);
         Set<Integer> desired = new HashSet<>();
 
-        int viewerQuestParty = -2;
-
         List<String> spawn = new ArrayList<>();
         List<String> move = new ArrayList<>();
         int spawnCount = 0;
@@ -3273,22 +3375,14 @@ public class WitcherServer
 
         for (NpcRegistry.Npc npc : visible)
         {
-            if (NpcRegistry.isQuestFoe(npc) && !session.knownNpcs.contains(npc.npcId))
+            if (NpcRegistry.isQuestFoe(npc) && !questVisibleTo(session, npc))
             {
-                if (viewerQuestParty == -2)
-                {
-                    viewerQuestParty = questPartyOf(session.playerId);
-                }
-
-                if (session.partyId <= 0
-                        || session.partyId != npc.questPartyId
-                        || viewerQuestParty != session.partyId)
-                {
-                    continue;
-                }
+                continue;
             }
 
-            if (!npc.alive && !session.knownNpcs.contains(npc.npcId))
+            if (!npc.alive
+                    && !NpcRegistry.isQuestFoe(npc)
+                    && !session.knownNpcs.contains(npc.npcId))
             {
                 continue;
             }
@@ -3297,6 +3391,11 @@ public class WitcherServer
 
             if (session.knownNpcs.add(npc.npcId))
             {
+                if (!npc.alive && NpcRegistry.isQuestFoe(npc))
+                {
+                    NpcRegistry.requestDeathReplay(npc, session.playerId, nowNanos);
+                }
+
                 if (spawnPackets >= NPC_SPAWN_PACKETS_PER_TICK)
                 {
                     session.knownNpcs.remove(npc.npcId);
@@ -3535,7 +3634,9 @@ public class WitcherServer
 
             for (PlayerSession session : sessions)
             {
-                if (session.playerId == npc.ownerPlayerId || !session.knownNpcs.contains(npc.npcId))
+                if (session.paused
+                        || session.playerId == npc.ownerPlayerId
+                        || !session.knownNpcs.contains(npc.npcId))
                 {
                     continue;
                 }

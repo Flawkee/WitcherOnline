@@ -1302,6 +1302,35 @@ statemachine class r_MultiplayerClient
         return false;
     }
 
+    public function isQuestCoopPlayer(playerId : int) : bool
+    {
+        var remote : r_RemotePlayer;
+
+        if(!isCoopSession() || playerId <= 0)
+        {
+            return false;
+        }
+
+        if(playerId == getServerId())
+        {
+            return true;
+        }
+
+        if(coopRoster.Size() == 0)
+        {
+            return false;
+        }
+
+        remote = getPlayerByServerId(playerId);
+
+        if(!remote)
+        {
+            return false;
+        }
+
+        return isInCoopRoster(remote.username);
+    }
+
     public function leaveCoopForMainMenu()
     {
         if(!coopMode && !coopLeader && !getCoopSave().isActive())

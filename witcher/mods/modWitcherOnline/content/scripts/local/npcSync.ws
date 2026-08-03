@@ -59,16 +59,20 @@ class r_Replica
     public var baseMaxHealth : float;
     public var appliedScale  : int;
     public var appliedHostile : int;
+    public var authorityHostile : int;
     public var questTag      : string;
     public var boundLocal    : bool;
     public var hasTicket     : bool;
+    public var authorityReady : bool;
 
     default questTag = "";
     default boundLocal = false;
     default hasTicket = false;
+    default authorityReady = false;
     default baseMaxHealth = -1.0;
     default appliedScale = 1000;
     default appliedHostile = -1;
+    default authorityHostile = -1;
     default lastActionSeq = -1;
     default lastActionAt = 0.0;
     default pendingActionAt = -1.0;
@@ -198,11 +202,14 @@ class r_NpcSync
     private var SCALE_INTERVAL : float;
     private var DEBUG_INTERVAL : float;
     private var HARD_SNAP      : float;
+    private var QUEST_HARD_SNAP : float;
     private var FREE_RADIUS    : float;
+    private var QUEST_FREE_RADIUS : float;
     private var ACTION_FREE_RADIUS : float;
     private var ACTION_FREE_WINDOW : float;
     private var ACTION_COMMAND_WINDOW : float;
     private var SLIDE_WINDOW   : float;
+    private var QUEST_SLIDE_WINDOW : float;
     private var HEALTH_TOLERANCE : float;
     private var PREDICT_GRACE  : float;
     private var RESERVATION_RADIUS : float;
@@ -230,11 +237,14 @@ class r_NpcSync
     default SCALE_INTERVAL = 0.5;
     default DEBUG_INTERVAL = 2.0;
     default HARD_SNAP = 15.0;
+    default QUEST_HARD_SNAP = 45.0;
     default FREE_RADIUS = 2.0;
+    default QUEST_FREE_RADIUS = 0.75;
     default ACTION_FREE_RADIUS = 6.0;
     default ACTION_FREE_WINDOW = 1.5;
     default ACTION_COMMAND_WINDOW = 1.2;
     default SLIDE_WINDOW = 0.03;
+    default QUEST_SLIDE_WINDOW = 0.12;
     default HEALTH_TOLERANCE = 0.05;
     default PREDICT_GRACE = 1.5;
     default RESERVATION_RADIUS = 30.0;
@@ -629,6 +639,11 @@ class r_NpcSync
             destroyReplica(replicas[i]);
         }
 
+        for(i = 0; i < tracked.Size(); i += 1)
+        {
+            releaseTrackedState(tracked[i]);
+        }
+
         replicas.Clear();
         tracked.Clear();
         rejectedGuids.Clear();
@@ -739,7 +754,7 @@ class r_NpcSync
             }
 
             scanQuestEnemies(now);
-            updateQuestBindings();
+            updateQuestBindings(now);
         }
 
         if(now >= nextAggroAt)
@@ -816,6 +831,11 @@ class r_NpcSync
 
         if(suspended)
         {
+            for(i = 0; i < tracked.Size(); i += 1)
+            {
+                releaseTrackedState(tracked[i]);
+            }
+
             tracked.Clear();
             statSuspends += 1;
 
@@ -987,6 +1007,7 @@ class r_NpcSync
         {
             if(tracked[i].questTag == "")
             {
+                releaseTrackedState(tracked[i]);
                 tracked.Erase(i);
                 released += 1;
             }
@@ -1004,6 +1025,14 @@ class r_NpcSync
     private function shouldPushOwned(now : float) : bool
     {
         return gateOpen || now < gateFlushUntil || tracked.Size() > 0;
+    }
+
+    private function scheduleOwnedFlush(now : float)
+    {
+        if(gateFlushUntil < now + GATE_FLUSH)
+        {
+            gateFlushUntil = now + GATE_FLUSH;
+        }
     }
 
     private function gateLabel() : string
@@ -1545,6 +1574,7 @@ class r_NpcSync
         {
             if(!tracked[i].actor || (now - tracked[i].lastSeenAt) > TRACK_GRACE)
             {
+                releaseTrackedState(tracked[i]);
                 tracked.Erase(i);
             }
         }
@@ -1728,7 +1758,9 @@ class r_NpcSync
             {
                 if(tracked[i].questTag != "")
                 {
+                    releaseTrackedState(tracked[i]);
                     tracked.Erase(i);
+                    scheduleOwnedFlush(now);
                 }
             }
 
@@ -1747,14 +1779,18 @@ class r_NpcSync
             if(findQuestReplicaByTag(tracked[i].questTag) >= 0)
             {
                 dbg("npc_quest", "owned tag=" + tracked[i].questTag + " now bound as replica, releasing claim");
+                releaseTrackedState(tracked[i]);
                 tracked.Erase(i);
+                scheduleOwnedFlush(now);
                 continue;
             }
 
             if(!tracked[i].actor || classifier.questEnemyTag(tracked[i].actor) == "")
             {
                 dbg("npc_quest", "dropped tag=" + tracked[i].questTag);
+                releaseTrackedState(tracked[i]);
                 tracked.Erase(i);
+                scheduleOwnedFlush(now);
             }
         }
 
@@ -1799,11 +1835,15 @@ class r_NpcSync
 
                 if(tracked[index].actor != npc || tracked[index].npcId != guid)
                 {
+                    releaseTrackedState(tracked[index]);
                     tracked[index].actor = npc;
                     tracked[index].npcId = guid;
                     tracked[index].appearance = npc.GetAppearance();
                     tracked[index].appearanceText = NameToString(tracked[index].appearance);
                     tracked[index].isMonster = npc.IsMonster();
+                    tracked[index].baseMaxHealth = -1.0;
+                    tracked[index].appliedScale = 1000;
+                    tracked[index].cachedForcedTarget = 0;
 
                     dbg("npc_quest", "owned tag=" + questTag + " rebound to guid=" + guid);
                 }
@@ -1834,10 +1874,36 @@ class r_NpcSync
         }
     }
 
-    private function bindQuestReplica(record : r_Replica) : bool
+    private function resetQuestActorState(record : r_Replica)
+    {
+        record.localGuid = 0;
+        record.aiForceId = -1;
+        record.appliedTarget = -1;
+        record.lastLocalHp = -1;
+        record.lastPredictAt = 0.0;
+        record.nextDriveAt = 0.0;
+        record.prepared = false;
+        record.lastActionSeq = -1;
+        record.lastActionAt = 0.0;
+        record.pendingActionAt = -1.0;
+        record.pendingType = 0;
+        record.pendingDir = 0;
+        record.baseMaxHealth = -1.0;
+        record.appliedScale = 1000;
+        record.appliedHostile = -1;
+        record.boundLocal = false;
+        record.hasTicket = false;
+        record.authorityReady = false;
+    }
+
+    private function bindQuestReplica(record : r_Replica, now : float) : bool
     {
         var classifier : r_EntityClassifier;
         var npc : CNewNPC;
+        var preservedBaseMax : float;
+        var preservedScale : int;
+        var preserveScale : bool;
+        var guid : int;
         var index : int;
         var i : int;
 
@@ -1862,7 +1928,29 @@ class r_NpcSync
                 continue;
             }
 
-            if(classifier.questEnemyTag(npc) != record.questTag)
+            if(!npc.GetVisibility() || !npc.GetGameplayVisibility())
+            {
+                continue;
+            }
+
+            if(npc.GetAttitude(thePlayer) != AIA_Hostile)
+            {
+                continue;
+            }
+
+            if(!npc.IsMonster() && !classifier.isFightCapable(npc))
+            {
+                continue;
+            }
+
+            if(!classifier.hasExactQuestTag(npc, record.questTag))
+            {
+                continue;
+            }
+
+            guid = npc.GetGuidHash();
+
+            if(guid == 0)
             {
                 continue;
             }
@@ -1871,7 +1959,30 @@ class r_NpcSync
 
             if(index >= 0)
             {
+                preserveScale = tracked[index].actor == npc;
+
+                if(preserveScale)
+                {
+                    preservedBaseMax = tracked[index].baseMaxHealth;
+                    preservedScale = tracked[index].appliedScale;
+                    wo_releaseNpcTarget(tracked[index].actor);
+                    getAggro().forget(tracked[index].npcId);
+                }
+                else
+                {
+                    releaseTrackedState(tracked[index]);
+                }
+
                 tracked.Erase(index);
+                scheduleOwnedFlush(now);
+            }
+
+            resetQuestActorState(record);
+
+            if(preserveScale)
+            {
+                record.baseMaxHealth = preservedBaseMax;
+                record.appliedScale = preservedScale;
             }
 
             npc.AddTag('WOQuestBound');
@@ -1881,11 +1992,13 @@ class r_NpcSync
             npc.SetCanPlayHitAnim(true);
 
             record.actor = npc;
-            record.localGuid = npc.GetGuidHash();
+            record.localGuid = guid;
             record.boundLocal = true;
             record.prepared = true;
             record.appearance = npc.GetAppearance();
             record.lastLocalHp = healthPermille(npc);
+
+            WO_NpcBindId(record.canonicalId, record.localGuid);
 
             dbg("npc_quest", "bound canonical=" + record.canonicalId
                 + " tag=" + record.questTag + " guid=" + record.localGuid);
@@ -1896,8 +2009,34 @@ class r_NpcSync
         return false;
     }
 
-    private function unbindQuestReplica(record : r_Replica)
+    private function cancelReplicaMovement(record : r_Replica)
     {
+        var agent : CMovingAgentComponent;
+        var adjustor : CMovementAdjustor;
+
+        if(!record || !record.actor || !record.hasTicket)
+        {
+            return;
+        }
+
+        agent = record.actor.GetMovingAgentComponent();
+
+        if(agent)
+        {
+            adjustor = agent.GetMovementAdjustor();
+
+            if(adjustor)
+            {
+                adjustor.Cancel(adjustor.GetRequest('wo_replica'));
+            }
+        }
+
+        record.hasTicket = false;
+    }
+
+    private function unbindQuestReplica(record : r_Replica, keepNetwork : bool)
+    {
+
         if(record.actor)
         {
             if(record.aiForceId >= 0)
@@ -1905,6 +2044,11 @@ class r_NpcSync
                 record.actor.CancelAIBehavior(record.aiForceId);
                 record.aiForceId = -1;
             }
+
+            cancelReplicaMovement(record);
+
+            wo_releaseNpcTarget(record.actor);
+            restoreHealthScale(record.actor, record.baseMaxHealth, record.appliedScale);
 
             record.actor.RemoveTag('WOQuestBound');
             record.actor.RemoveTag('WOReplica');
@@ -1914,13 +2058,48 @@ class r_NpcSync
         }
 
         record.actor = NULL;
-        record.boundLocal = false;
-        record.prepared = false;
+        resetQuestActorState(record);
+
+        if(keepNetwork)
+        {
+            WO_NpcBindId(record.canonicalId, 0);
+        }
     }
 
-    private function updateQuestBindings()
+    private function restoreHealthScale(npc : CNewNPC, baseMax : float, appliedScale : int)
     {
+        if(!npc || baseMax <= 0.0 || appliedScale == 1000)
+        {
+            return;
+        }
+
+        applyHealthScale(npc, 1000, baseMax, appliedScale);
+    }
+
+    private function releaseTrackedState(record : r_TrackedNpc)
+    {
+        if(!record)
+        {
+            return;
+        }
+
+        if(record.actor)
+        {
+            restoreHealthScale(record.actor, record.baseMaxHealth, record.appliedScale);
+            wo_releaseNpcTarget(record.actor);
+        }
+
+        getAggro().forget(record.npcId);
+        record.cachedForcedTarget = 0;
+    }
+
+    private function updateQuestBindings(now : float)
+    {
+        var classifier : r_EntityClassifier;
+        var actorValid : bool;
         var i : int;
+
+        classifier = theGame.r_getMultiplayerClient().getEntityClassifier();
 
         for(i = replicas.Size() - 1; i >= 0; i -= 1)
         {
@@ -1931,32 +2110,33 @@ class r_NpcSync
 
             if(!coopActive())
             {
-                unbindQuestReplica(replicas[i]);
+                unbindQuestReplica(replicas[i], false);
                 WO_NpcForget(replicas[i].canonicalId);
                 replicas.Erase(i);
                 continue;
             }
 
-            if(!replicas[i].actor)
+            actorValid = false;
+
+            if(replicas[i].actor)
             {
-                if(bindQuestReplica(replicas[i]))
+                actorValid = replicas[i].actor.IsAlive()
+                    && replicas[i].actor.GetVisibility()
+                    && replicas[i].actor.GetGameplayVisibility()
+                    && classifier.hasExactQuestTag(replicas[i].actor, replicas[i].questTag)
+                    && (replicas[i].authorityHostile == 1
+                        || replicas[i].actor.GetAttitude(thePlayer) == AIA_Hostile);
+
+                if(!actorValid)
                 {
-                    dbg("npc_quest", "rebound after entity swap tag=" + replicas[i].questTag);
+                    unbindQuestReplica(replicas[i], true);
                 }
-
-                continue;
             }
 
-            if(!replicas[i].actor.IsAlive())
+            if(!replicas[i].actor && bindQuestReplica(replicas[i], now))
             {
-                continue;
-            }
-
-            if(replicas[i].actor.GetAttitude(thePlayer) != AIA_Hostile)
-            {
-                unbindQuestReplica(replicas[i]);
-                WO_NpcForget(replicas[i].canonicalId);
-                replicas.Erase(i);
+                dbg("npc_quest", "rebound tag=" + replicas[i].questTag
+                    + " guid=" + replicas[i].localGuid);
             }
         }
     }
@@ -2165,6 +2345,12 @@ class r_NpcSync
             }
 
             if(targetId > 0
+                && tracked[i].questTag != ""
+                && !client.isQuestCoopPlayer(targetId))
+            {
+                targetId = 0;
+            }
+            else if(targetId > 0
                 && targetId != localId
                 && !client.sharesNpcScope(targetId))
             {
@@ -2314,7 +2500,9 @@ class r_NpcSync
             {
                 if(tracked[index].questTag != "")
                 {
+                    releaseTrackedState(tracked[index]);
                     tracked.Erase(index);
+                    scheduleOwnedFlush(now);
                     statDropped += 1;
 
                     dbg("npc_quest", "released owned quest enemy guid=" + guid);
@@ -2326,6 +2514,7 @@ class r_NpcSync
                     tracked[index].actor.Destroy();
                 }
 
+                getAggro().forget(tracked[index].npcId);
                 tracked.Erase(index);
                 statDropped += 1;
 
@@ -2480,9 +2669,10 @@ class r_NpcSync
             record.typeCode = typeCode;
             record.appearance = appearance;
 
-            if(bindQuestReplica(record))
+            if(!bindQuestReplica(record, now))
             {
-                WO_NpcBind(commandIndex, record.localGuid);
+                dbg("npc_quest", "waiting canonical=" + canonicalId
+                    + " tag=" + record.questTag);
             }
 
             replicas.PushBack(record);
@@ -2613,7 +2803,7 @@ class r_NpcSync
 
         if(record.questTag != "")
         {
-            unbindQuestReplica(record);
+            unbindQuestReplica(record, false);
             return;
         }
 
@@ -2668,6 +2858,9 @@ class r_NpcSync
             record.aiForceId = -1;
         }
 
+        cancelReplicaMovement(record);
+        wo_releaseNpcTarget(npc);
+
         npc.SetImmortalityMode(AIM_None, AIC_Default, true);
         npc.RemoveTag('WOReplica');
         npc.RemoveTag('WOQuestBound');
@@ -2682,9 +2875,14 @@ class r_NpcSync
         owned.questTag = record.questTag;
         owned.lastSeenAt = now;
         owned.lastHp = -1;
+        owned.baseMaxHealth = record.baseMaxHealth;
+        owned.appliedScale = record.appliedScale;
+        owned.cachedForcedTarget = 0;
 
+        getAggro().forget(owned.npcId);
         tracked.PushBack(owned);
         statPromoted += 1;
+        nextAggroAt = 0.0;
 
         WO_NpcTake(record.canonicalId, owned.npcId);
 
@@ -2705,8 +2903,12 @@ class r_NpcSync
         var heading : float;
         var speed : float;
         var distance : float;
+        var snapLimit : float;
+        var freeRadius : float;
+        var slideWindow : float;
         var hp : int;
         var flags : int;
+        var questReplica : bool;
 
         npc = record.actor;
 
@@ -2727,6 +2929,11 @@ class r_NpcSync
 
         flags = WO_NpcFlags(commandIndex);
 
+        if(record.questTag != "")
+        {
+            record.authorityHostile = ((flags & 2) != 0) ? 1 : 0;
+        }
+
         applyReplicaTarget(record, npc, WO_NpcTarget(commandIndex));
         applyReplicaHostility(record, npc, flags);
         applyReplicaAction(record, npc, flags);
@@ -2739,18 +2946,38 @@ class r_NpcSync
 
         current = npc.GetWorldPosition();
         distance = VecDistance(current, target);
+        questReplica = record.questTag != "";
 
-        if(distance > HARD_SNAP)
+        if(questReplica)
         {
+            snapLimit = QUEST_HARD_SNAP;
+            freeRadius = QUEST_FREE_RADIUS;
+            slideWindow = QUEST_SLIDE_WINDOW;
+        }
+        else
+        {
+            snapLimit = HARD_SNAP;
+            freeRadius = FREE_RADIUS;
+            slideWindow = SLIDE_WINDOW;
+        }
+
+        if((questReplica && !record.authorityReady && distance > freeRadius)
+            || distance > snapLimit)
+        {
+            cancelReplicaMovement(record);
+
             rot.Pitch = 0.0;
             rot.Yaw = heading;
             rot.Roll = 0.0;
 
             npc.TeleportWithRotation(target, rot);
+            record.authorityReady = true;
             record.nextDriveAt = now + DRIVE_INTERVAL;
             statTeleports += 1;
             return;
         }
+
+        record.authorityReady = true;
 
         if(now < record.nextDriveAt)
         {
@@ -2759,25 +2986,12 @@ class r_NpcSync
 
         record.nextDriveAt = now + DRIVE_INTERVAL;
 
-        if(distance < FREE_RADIUS
-            || ((now - record.lastActionAt) < ACTION_FREE_WINDOW && distance < ACTION_FREE_RADIUS))
+        if(distance < freeRadius
+            || (!questReplica
+                && (now - record.lastActionAt) < ACTION_FREE_WINDOW
+                && distance < ACTION_FREE_RADIUS))
         {
-            if(record.hasTicket)
-            {
-                agent = npc.GetMovingAgentComponent();
-
-                if(agent)
-                {
-                    adjustor = agent.GetMovementAdjustor();
-
-                    if(adjustor)
-                    {
-                        adjustor.Cancel(adjustor.GetRequest('wo_replica'));
-                    }
-                }
-
-                record.hasTicket = false;
-            }
+            cancelReplicaMovement(record);
 
             return;
         }
@@ -2817,7 +3031,7 @@ class r_NpcSync
 
         ticket = adjustor.CreateNewRequest('wo_replica');
 
-        adjustor.AdjustmentDuration(ticket, SLIDE_WINDOW);
+        adjustor.AdjustmentDuration(ticket, slideWindow);
         adjustor.AdjustLocationVertically(ticket, true);
         adjustor.ScaleAnimationLocationVertically(ticket, true);
         adjustor.RotateTo(ticket, heading);

@@ -388,13 +388,6 @@ class r_EntityClassifier
 
         sample.hostileNow = npc.GetAttitude(thePlayer) == AIA_Hostile;
 
-        if(npc.IsVIP())
-        {
-            sample.entityClass = REC_Quest;
-            sample.reason = "vip";
-            return;
-        }
-
         tags = npc.GetTags();
 
         if(enabled)
@@ -408,6 +401,13 @@ class r_EntityClassifier
             sample.reason = "quest tag " + questTag;
             sample.questTag = questTag;
             sample.questEnemy = questEnemyNow(npc, sample.hostileNow);
+            return;
+        }
+
+        if(npc.IsVIP())
+        {
+            sample.entityClass = REC_Quest;
+            sample.reason = "vip";
             return;
         }
 
@@ -609,6 +609,29 @@ class r_EntityClassifier
         }
 
         return sample.questTag;
+    }
+
+    public function hasExactQuestTag(npc : CNewNPC, questTag : string) : bool
+    {
+        var tags : array<name>;
+        var i : int;
+
+        if(!npc || questTag == "")
+        {
+            return false;
+        }
+
+        tags = npc.GetTags();
+
+        for(i = 0; i < tags.Size(); i += 1)
+        {
+            if(NameToString(tags[i]) == questTag)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     public function update()
