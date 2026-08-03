@@ -364,6 +364,8 @@ statemachine class r_RemotePlayer
     public var lastDialogCount : int;
     public var prevDialogCount : int;
     public var dialogChoicesActive : bool;
+    public var dialogHighlightIndex : int;
+    default dialogHighlightIndex = -1;
 
     public var armorDye : int;
     public var gloveDye : int;

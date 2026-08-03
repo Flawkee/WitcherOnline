@@ -1246,37 +1246,56 @@ function NotifyGwentMatchEnded( wonMatch : bool )
 function OnDialogChoicesSet(choices : array<SSceneChoice>, alternativeUI : bool)
 {
     var client : r_MultiplayerClient;
-    var i : int;
 
     client = theGame.r_getMultiplayerClient();
 
     client.setDialogChoices(choices);
 
-    if(client.shouldLockDialogChoices())
-    {
-        for(i = 0; i < choices.Size(); i += 1)
-        {
-            if(!client.isServiceDialogAction(choices[i].dialogAction))
-            {
-                choices[i].disabled = true;
-            }
-        }
-    }
-
     wrappedMethod(choices, alternativeUI);
+}
+
+@wrapMethod(CR4HudModuleDialog)
+function OnDialogChoiceTimeoutSet(timeOutPercent : float)
+{
+    theGame.r_getMultiplayerClient().markDialogChoiceTimed();
+    wrappedMethod(timeOutPercent);
 }
 
 @wrapMethod(CR4HudModuleDialog)
 function OnDialogOptionAccepted(index : int)
 {
-    if(!theGame.r_getMultiplayerClient().isApplyingSyncedDialogChoice())
+    var client : r_MultiplayerClient;
+
+    client = theGame.r_getMultiplayerClient();
+
+    if(!client.isApplyingSyncedDialogChoice())
     {
-        theGame.r_getMultiplayerClient().setLastDialog(index);
+        client.updateLeaderDialogReadyPopup();
     }
 
-    wrappedMethod(index);
+    if(!client.isApplyingSyncedDialogChoice() && client.shouldLockDialogChoices())
+    {
+        client.restoreLockedDialogChoices();
+        client.notifyDialogChoiceBlocked();
+    }
+    else
+    {
+        if(!client.isApplyingSyncedDialogChoice())
+        {
+            client.setLastDialog(index);
+        }
 
-    theGame.r_getMultiplayerClient().clearActiveDialogChoices();
+        wrappedMethod(index);
+
+        client.clearActiveDialogChoices();
+    }
+}
+
+@wrapMethod(CR4HudModuleDialog)
+function OnDialogOptionSelected(index : int)
+{
+    theGame.r_getMultiplayerClient().setDialogHighlight(index);
+    wrappedMethod(index);
 }
 
 @wrapMethod(CStoryScenePlayer)
@@ -1304,67 +1323,31 @@ function OnDialogSkipped(value : int)
 }
 
 @addMethod(CR4HudModuleDialog)
-public function WO_RelockDialogChoices(source : array<SSceneChoice>, locked : bool)
+public function WO_SetDialogSelection(index : int)
 {
-    var flashValueStorage : CScriptedFlashValueStorage;
-    var choiceFlashArray : CScriptedFlashArray;
-    var choiceFlashObject : CScriptedFlashObject;
-    var description : string;
-    var prefix : string;
-    var colour : string;
-    var blocked : bool;
-    var i : int;
+    var flashModule : CScriptedFlashSprite;
+    var setSelection : CScriptedFlashFunction;
 
-    if(source.Size() <= 0 || source.Size() != lastSetChoices.Size())
+    flashModule = GetModuleFlash();
+
+    if(!flashModule)
     {
         return;
     }
 
-    flashValueStorage = GetModuleFlashValueStorage();
-    choiceFlashArray = flashValueStorage.CreateTempFlashArray();
+    setSelection = flashModule.GetMemberFlashFunction("ChoiceSelectionSet");
 
-    for(i = 0; i < source.Size(); i += 1)
+    if(setSelection)
     {
-        blocked = source[i].disabled
-            || (locked && !theGame.r_getMultiplayerClient().isServiceDialogAction(source[i].dialogAction));
-
-        lastSetChoices[i].disabled = blocked;
-
-        description = "<font size = '" + IntToString(23 + choiceScale) + "' >" + source[i].description + "</font>";
-        prefix = "<font size = '" + IntToString(23 + choiceScale) + "' >" + IntToString(i + 1) + ". " + "</font>";
-
-        if(blocked)
-        {
-            colour = "#CC0000";
-        }
-        else if(source[i].previouslyChoosen)
-        {
-            colour = "#a7a7a7";
-        }
-        else if(source[i].emphasised)
-        {
-            colour = "#d9b215";
-        }
-        else
-        {
-            colour = "#F2D6B7";
-        }
-
-        description = "<FONT COLOR='" + colour + "'>" + description + "</FONT>";
-        prefix = "<FONT COLOR='" + colour + "'>" + prefix + "</FONT>";
-
-        choiceFlashObject = flashValueStorage.CreateTempFlashObject();
-        choiceFlashObject.SetMemberFlashString("prefix", prefix);
-        choiceFlashObject.SetMemberFlashString("name", description);
-        choiceFlashObject.SetMemberFlashInt("icon", (int)source[i].dialogAction);
-        choiceFlashObject.SetMemberFlashBool("read", source[i].previouslyChoosen == false);
-        choiceFlashObject.SetMemberFlashBool("emphasis", source[i].emphasised);
-        choiceFlashObject.SetMemberFlashBool("locked", blocked);
-
-        choiceFlashArray.SetElementFlashObject(i, choiceFlashObject);
+        setSelection.InvokeSelfOneArg(FlashArgInt(index));
     }
+}
 
-    flashValueStorage.SetFlashArray("hud.dialog.choices", choiceFlashArray);
+@addMethod(CR4HudModuleDialog)
+public function WO_RestoreDialogChoices(source : array<SSceneChoice>, index : int)
+{
+    SendDialogChoicesToUI(source, false);
+    WO_SetDialogSelection(index);
 }
 
 @addMethod(CR4HudModuleDialog)
@@ -1487,35 +1470,6 @@ public function WO_ClearDialogChoicesUI()
     choiceFlashArray = flashValueStorage.CreateTempFlashArray();
     flashValueStorage.SetFlashArray("hud.dialog.choices", choiceFlashArray);
 }
-
-@addMethod(CR4HudModuleDialog)
-public function WO_ShowDialogAssistText(text : string, emphasise : bool)
-{
-    var msg : string;
-
-    if(text == "")
-    {
-        return;
-    }
-
-    if(!emphasise)
-    {
-        msg = "<font size = '"+ IntToString( 27 + subtitleScale ) + "' ><FONT COLOR='#F2D6B7'>" + text + "</FONT></font>";
-    }
-    else
-    {
-        msg = "<font size = '"+ IntToString( 27 + subtitleScale ) + "' ><FONT COLOR='#a7a7a7'>" + text + "</FONT></font>";
-    }
-
-    m_fxPreviousSentenceSetSFF.InvokeSelfOneArg(FlashArgString(msg + "<br><br>"));
-}
-
-@addMethod(CR4HudModuleDialog)
-public function WO_ClearDialogAssistText()
-{
-    m_fxPreviousSentenceHideSFF.InvokeSelf();
-}
-
 
 @addMethod(CR4HudModuleCompanion)
 public function WO_HideCompanionHud()

@@ -195,7 +195,7 @@ function WO_ApplyUpdate4()
         WO_Int(3), WO_Int(4), WO_Int(5), WO_Int(6),
         WO_Int(7), WO_Int(8), WO_Str(9), WO_Bool(10),
         WO_Int(11), WO_Int(12), WO_Int(13), WO_Int(14),
-        WO_Float(15));
+        WO_Float(15), WO_Int(16));
 }
 
 function WO_PumpInbound(maxMessages : int)

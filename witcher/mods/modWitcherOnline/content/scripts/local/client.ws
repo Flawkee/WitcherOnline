@@ -200,7 +200,6 @@ statemachine class r_MultiplayerClient
     private var leaderChoiceLockApplied : bool;
     private var dialogChoicesMeaningful : bool;
     private var coopRoster : array<string>;
-    private var nextReadyNoticeAt : float;
     private var wasInSceneLocal : bool;
     private var sceneCheckAt : float;
     private var sceneSawChoices : bool;
@@ -228,7 +227,6 @@ statemachine class r_MultiplayerClient
     default partyDialogReady = false;
     default leaderChoiceLockApplied = false;
     default dialogChoicesMeaningful = false;
-    default nextReadyNoticeAt = 0.0;
     default wasInSceneLocal = false;
     default sceneCheckAt = 0.0;
     default sceneSawChoices = false;
@@ -254,6 +252,7 @@ statemachine class r_MultiplayerClient
 
     private var dialogChoices : array<SSceneChoice>;
     private var dialogChoicesActive : bool;
+    private var currentDialogHighlightIndex : int;
     private var lastSelectedDialogIndex : int;
     private var lastSelectedDialogCount : int;
 
@@ -269,6 +268,7 @@ statemachine class r_MultiplayerClient
     private var lastSelectedDialogValid : bool;
 
     default lastSelectedDialogIndex = -1;
+    default currentDialogHighlightIndex = -1;
     default lastSelectedDialogChoiceSetId = -1;
     default lastSelectedDialogValid = false;
 
@@ -287,10 +287,14 @@ statemachine class r_MultiplayerClient
     private var leaderDialogReadyText : string;
     private var leaderDialogAllReadyShown : bool;
     private var leaderDialogAllReadyClearAt : float;
+    private var partyDialogReadyCount : int;
+    private var partyDialogTotalCount : int;
 
     default leaderDialogReadyText = "";
     default leaderDialogAllReadyShown = false;
     default leaderDialogAllReadyClearAt = -999;
+    default partyDialogReadyCount = 0;
+    default partyDialogTotalCount = 0;
 
     private var seenPartyPlayers : array<string>;
     private var lastHideCompanion : bool;
@@ -506,28 +510,6 @@ statemachine class r_MultiplayerClient
         return 0;
     }
 
-    public function clearDialogPickAlert()
-    {
-        var hud : CR4ScriptedHud;
-        var module : CR4HudModuleDialog;
-
-        hud = (CR4ScriptedHud)theGame.GetHud();
-
-        if(!hud)
-        {
-            return;
-        }
-
-        module = (CR4HudModuleDialog)hud.GetHudModule("DialogModule");
-
-        if(!module)
-        {
-            return;
-        }
-
-        module.WO_ClearDialogAssistText();
-    }
-
     public function updateLeaderDialogReadyPopup()
     {
         var i : int;
@@ -542,6 +524,8 @@ statemachine class r_MultiplayerClient
         {
             clearDialogReadyText();
             partyDialogReady = false;
+            partyDialogReadyCount = 0;
+            partyDialogTotalCount = 0;
             applyLeaderChoiceLock();
             return;
         }
@@ -553,6 +537,8 @@ statemachine class r_MultiplayerClient
         {
             clearDialogReadyText();
             partyDialogReady = false;
+            partyDialogReadyCount = 0;
+            partyDialogTotalCount = 0;
             applyLeaderChoiceLock();
             return;
         }
@@ -592,6 +578,9 @@ statemachine class r_MultiplayerClient
             }
         }
 
+        partyDialogReadyCount = ready;
+        partyDialogTotalCount = total;
+
         if(ready < total)
         {
             partyDialogReady = false;
@@ -621,6 +610,31 @@ statemachine class r_MultiplayerClient
         text = GetLocStringById(2111114102) + " " + leaderName;
 
         announceReadyText(text);
+    }
+
+    public function notifyDialogChoiceBlocked()
+    {
+        var text : string;
+
+        if(!isCoopSession())
+        {
+            return;
+        }
+
+        if(!partyDialogReady)
+        {
+            text = "Waiting for all Co-Op members to proceed "
+                + IntToString(partyDialogReadyCount) + "/" + IntToString(partyDialogTotalCount);
+        }
+        else if(!isPartyLeader())
+        {
+            text = "Waiting for Co-Op leader (" + joinedParty + ") to choose";
+        }
+
+        if(text != "")
+        {
+            theGame.GetGuiManager().ShowNotification(text);
+        }
     }
 
     private function callStuckParty()
@@ -653,30 +667,16 @@ statemachine class r_MultiplayerClient
 
     private function announceReadyText(text : string)
     {
-        var now : float;
-
-        now = theGame.GetEngineTimeAsSeconds();
-
-        if(leaderDialogReadyText != text)
-        {
-            leaderDialogReadyText = text;
-            nextReadyNoticeAt = 0.0;
-        }
-
-        if(now < nextReadyNoticeAt)
+        if(leaderDialogReadyText == text)
         {
             return;
         }
 
-        nextReadyNoticeAt = now + 15.0;
-
-        theGame.GetGuiManager().ShowNotification(text);
+        leaderDialogReadyText = text;
     }
 
     private function clearDialogReadyText()
     {
-        nextReadyNoticeAt = 0.0;
-
         if(leaderDialogReadyText == "")
         {
             return;
@@ -686,7 +686,6 @@ statemachine class r_MultiplayerClient
         leaderDialogAllReadyShown = false;
         leaderDialogAllReadyClearAt = -999;
 
-        clearDialogPickAlert();
     }
 
     private function remoteChoicesMatch(a : array<wo_SSceneChoice>, b : array<wo_SSceneChoice>) : bool
@@ -1365,6 +1364,11 @@ statemachine class r_MultiplayerClient
             return false;
         }
 
+        if(!hasActiveDialogChoices())
+        {
+            return false;
+        }
+
         if(!dialogChoicesMeaningful)
         {
             return false;
@@ -1380,8 +1384,6 @@ statemachine class r_MultiplayerClient
 
     private function applyLeaderChoiceLock()
     {
-        var hud : CR4ScriptedHud;
-        var module : CR4HudModuleDialog;
         var locked : bool;
 
         locked = shouldLockDialogChoices();
@@ -1391,22 +1393,7 @@ statemachine class r_MultiplayerClient
             return;
         }
 
-        hud = (CR4ScriptedHud)theGame.GetHud();
-
-        if(!hud)
-        {
-            return;
-        }
-
-        module = (CR4HudModuleDialog)hud.GetHudModule("DialogModule");
-
-        if(!module)
-        {
-            return;
-        }
-
         leaderChoiceLockApplied = locked;
-        module.WO_RelockDialogChoices(dialogChoices, locked);
     }
 
     private function isFollowerCaughtUpToLeaderDialog(remotePlayer : r_RemotePlayer) : bool
@@ -1436,6 +1423,8 @@ statemachine class r_MultiplayerClient
 
     public function setDialogChoices(val : array<SSceneChoice>)
     {
+        var i : int;
+
         dialogChoices = val;
         dialogChoicesActive = val.Size() > 0;
         dialogChoicesMeaningful = dialogChoicesActive && isMeaningfulChoiceSet(val);
@@ -1452,6 +1441,16 @@ statemachine class r_MultiplayerClient
         }
 
         currentDialogChoiceSetId += 1;
+        currentDialogHighlightIndex = -1;
+
+        for(i = 0; i < val.Size(); i += 1)
+        {
+            if(!val[i].disabled)
+            {
+                currentDialogHighlightIndex = i;
+                break;
+            }
+        }
 
         partyDialogReady = false;
         leaderChoiceLockApplied = shouldLockDialogChoices();
@@ -1466,37 +1465,36 @@ statemachine class r_MultiplayerClient
             lastSelectedDialogValid = false;
             lastSelectedDialogIndex = -1;
 
-            leaderDialogReadyText = "";
-            leaderDialogAllReadyShown = false;
-            leaderDialogAllReadyClearAt = -999;
+            clearDialogReadyText();
         }
     }
 
-    public function showDialogPickAlert(text : string, emphasise : bool)
+    public function markDialogChoiceTimed()
     {
-        var hud : CR4ScriptedHud;
-        var module : CR4HudModuleDialog;
-
-        hud = (CR4ScriptedHud)theGame.GetHud();
-
-        if(!hud)
+        if(!dialogChoicesActive || dialogChoicesMeaningful)
         {
             return;
         }
 
-        module = (CR4HudModuleDialog)hud.GetHudModule("DialogModule");
+        dialogChoicesMeaningful = true;
+        partyDialogReady = false;
 
-        if(!module)
+        if(isCoopSession())
         {
-            return;
+            WO_Note("[scene] choices meaningful=true reason=timed set=" + describeChoiceSet());
         }
 
-        module.WO_ShowDialogAssistText(text, emphasise);
+        announceSceneIfInitiator();
+        applyLeaderChoiceLock();
     }
 
     public function clearActiveDialogChoices()
     {
         dialogChoicesActive = false;
+        currentDialogHighlightIndex = -1;
+        partyDialogReady = false;
+        applyLeaderChoiceLock();
+        clearDialogReadyText();
     }
 
     public function hasActiveDialogChoices() : bool
@@ -1507,6 +1505,97 @@ statemachine class r_MultiplayerClient
     public function getDialogChoices() : array<SSceneChoice>
     {
         return dialogChoices;
+    }
+
+    public function setDialogHighlight(index : int)
+    {
+        if(!hasActiveDialogChoices())
+        {
+            return;
+        }
+
+        if(index < 0 || index >= dialogChoices.Size())
+        {
+            return;
+        }
+
+        currentDialogHighlightIndex = index;
+    }
+
+    public function getOutgoingDialogHighlightIndex() : int
+    {
+        if(!isCoopSession() || !isPartyLeader() || !hasActiveDialogChoices() || !dialogChoicesMeaningful)
+        {
+            return -1;
+        }
+
+        return currentDialogHighlightIndex;
+    }
+
+    public function restoreLockedDialogChoices()
+    {
+        var module : CR4HudModuleDialog;
+
+        module = getDialogModule();
+
+        if(module)
+        {
+            module.WO_RestoreDialogChoices(dialogChoices, currentDialogHighlightIndex);
+        }
+    }
+
+    public function updateLeaderDialogHighlight()
+    {
+        var globalLeader : r_RemotePlayer;
+        var remoteLeader : r_RemotePlayer;
+        var module : CR4HudModuleDialog;
+        var index : int;
+
+        if(!isCoopSession() || isPartyLeader() || !hasActiveDialogChoices() || !dialogChoicesMeaningful)
+        {
+            return;
+        }
+
+        globalLeader = getGlobalPlayerByUsername(joinedParty);
+
+        if(!globalLeader)
+        {
+            return;
+        }
+
+        remoteLeader = hm_getRemotePlayer(playersByServerId, globalLeader.serverPlayerId);
+
+        if(!remoteLeader || !remoteLeader.dialogChoicesActive)
+        {
+            return;
+        }
+
+        if(!dialogChoicesMatch(dialogChoices, remoteLeader.dialogChoices))
+        {
+            return;
+        }
+
+        index = remoteLeader.dialogHighlightIndex;
+
+        if(index < 0 || index >= dialogChoices.Size() || dialogChoices[index].disabled)
+        {
+            return;
+        }
+
+        if(index == currentDialogHighlightIndex)
+        {
+            return;
+        }
+
+        module = getDialogModule();
+
+        if(!module)
+        {
+            return;
+        }
+
+        module.WO_SetDialogSelection(index);
+        currentDialogHighlightIndex = index;
     }
 
     public function setLastDialog(index : int)
@@ -1523,7 +1612,7 @@ statemachine class r_MultiplayerClient
             return;
         }
 
-        if(!dialogChoicesMeaningful || isServiceDialogAction(dialogChoices[index].dialogAction))
+        if(!dialogChoicesMeaningful)
         {
             return;
         }
@@ -1603,26 +1692,27 @@ statemachine class r_MultiplayerClient
 
     public function isMeaningfulChoiceSet(choices : array<SSceneChoice>) : bool
     {
-        var story : int;
-        var unread : int;
         var i : int;
 
         for(i = 0; i < choices.Size(); i += 1)
         {
-            if(isServiceDialogAction(choices[i].dialogAction))
+            if(choices[i].disabled)
             {
                 continue;
             }
 
-            story += 1;
-
-            if(!choices[i].previouslyChoosen)
+            if(choices[i].emphasised)
             {
-                unread += 1;
+                return true;
             }
+
+            if(choices[i].dialogAction == DialogAction_AXII)             return true;
+            if(choices[i].dialogAction == DialogAction_BRIBE)            return true;
+            if(choices[i].dialogAction == DialogAction_PERSUASION)       return true;
+            if(choices[i].dialogAction == DialogAction_MONSTERCONTRACT)  return true;
         }
 
-        return story >= 2 && unread >= 1;
+        return false;
     }
 
     public function dialogActionToInt(action : EDialogActionIcon) : int
@@ -1857,7 +1947,7 @@ statemachine class r_MultiplayerClient
             return false;
         }
 
-        if(!dialogChoicesMeaningful || isServiceDialogAction(dialogChoices[index].dialogAction))
+        if(!dialogChoicesMeaningful)
         {
             return false;
         }
@@ -1959,11 +2049,7 @@ statemachine class r_MultiplayerClient
 
         index = remotePlayer.lastDialogIndex;
 
-        if(leaderDialogReadyText != "")
-        {
-            leaderDialogReadyText = "";
-            clearDialogPickAlert();
-        }
+        clearDialogReadyText();
 
         module.OnDialogOptionSelected(index);
         module.WO_ShowOnlySelectedDialogChoice(index);
@@ -2022,7 +2108,7 @@ statemachine class r_MultiplayerClient
             return;
         }
 
-        if(!dialogChoicesMeaningful || isServiceDialogAction(dialogChoices[remotePlayer.lastDialogIndex].dialogAction))
+        if(!dialogChoicesMeaningful)
         {
             consumeRemoteDialogChoice(remotePlayer);
             return;
@@ -2674,6 +2760,8 @@ statemachine class r_MultiplayerClient
 
     public function partyDisplayName(member : r_RemotePlayer) : string
     {
+        var displayName : string;
+
         if(!member)
         {
             return "";
@@ -2681,10 +2769,14 @@ statemachine class r_MultiplayerClient
 
         if(isPartyLeaderName(member.username))
         {
-            return GetLocStringById(2111114270) + " " + member.username;
+            displayName = GetLocStringById(2111114270) + " " + member.username;
+        }
+        else
+        {
+            displayName = member.username;
         }
 
-        return member.username;
+        return displayName;
     }
 
     private function handleMissingPartyTarget() : bool
@@ -2728,11 +2820,7 @@ statemachine class r_MultiplayerClient
 
         cancelPendingSyncedDialogChoice();
 
-        if(leaderDialogReadyText != "")
-        {
-            leaderDialogReadyText = "";
-            clearDialogPickAlert();
-        }
+        clearDialogReadyText();
 
         return true;
     }
@@ -6208,7 +6296,7 @@ statemachine class r_MultiplayerClient
     }
 
     public function updatePlayerData4(serverPlayerId : int, idName : name, inParty : bool, joinedParty : string, weather : name, day : int, hour : int, minute : int, second : int, lastDialogIndex : int, lastDialogCount : int, dialogChoices : string, 
-                                            dialogChoicesActive : bool, armorDye : int, gloveDye : int, pantDye : int, bootDye : int, health : float)
+                                            dialogChoicesActive : bool, armorDye : int, gloveDye : int, pantDye : int, bootDye : int, health : float, dialogHighlightIndex : int)
     {
         var j : int;
         var p : r_RemotePlayer;
@@ -6259,6 +6347,7 @@ statemachine class r_MultiplayerClient
         p.lastDialogIndex = lastDialogIndex;
         p.lastDialogCount = lastDialogCount;
         p.dialogChoicesActive = dialogChoicesActive;
+        p.dialogHighlightIndex = dialogHighlightIndex;
         p.armorDye = armorDye;
         p.gloveDye = gloveDye;
         p.pantDye = pantDye;
@@ -7946,6 +8035,9 @@ function wo_get4(playerId : int, username : string)
     list += thePlayer.GetHealthPercents();
     list += " ";
 
+    list += theGame.r_getMultiplayerClient().getOutgoingDialogHighlightIndex();
+    list += " ";
+
     WO_Send("wo4 "+wo_getMovementData()+list);
 }
 
@@ -8998,6 +9090,7 @@ state WO_Tick in r_MultiplayerClient
             parent.checkPlayerChange();
             parent.updateWorldSync();
             parent.updateLeaderDialogReadyPopup();
+            parent.updateLeaderDialogHighlight();
             parent.updateSceneWatch();
             parent.updateSceneAnnounce();
             parent.updateScenePending();

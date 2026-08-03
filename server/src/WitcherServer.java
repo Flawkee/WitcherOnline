@@ -3676,6 +3676,11 @@ public class WitcherServer
             return false;
         }
 
+        if (viewer.partyId != 0 && viewer.partyId == target.partyId)
+        {
+            return true;
+        }
+
         if (target.paused && alreadyVisible)
         {
             return true;
@@ -3712,9 +3717,13 @@ public class WitcherServer
 
             for (PlayerSession target : sessions)
             {
-                if (next.size() >= PLAYER_VIS_MAX)
+                boolean partyMember = viewer != target
+                        && viewer.partyId != 0
+                        && viewer.partyId == target.partyId;
+
+                if (next.size() >= PLAYER_VIS_MAX && !partyMember)
                 {
-                    break;
+                    continue;
                 }
 
                 if (shouldSeePlayer(viewer, target, viewer.visiblePlayers.contains(target.playerId)))
@@ -4331,6 +4340,11 @@ public class WitcherServer
     private static boolean isWithinInterest(PlayerSession source, PlayerSession target)
     {
         if (source == target)
+        {
+            return true;
+        }
+
+        if (source.partyId != 0 && source.partyId == target.partyId)
         {
             return true;
         }
