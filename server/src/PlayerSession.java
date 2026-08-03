@@ -40,6 +40,7 @@ public class PlayerSession
     public volatile boolean pausedBroadcast = false;
     public final java.util.Queue<String[]> pendingHits = new java.util.concurrent.ConcurrentLinkedQueue<>();
     public final java.util.Queue<Object[]> pendingOutbound = new java.util.concurrent.ConcurrentLinkedQueue<>();
+    public final java.util.Queue<Object[]> pendingSaveOutbound = new java.util.concurrent.ConcurrentLinkedQueue<>();
     public volatile String ownedCellsSignature = "";
     public volatile long ownedCellsSentNanos = 0L;
 

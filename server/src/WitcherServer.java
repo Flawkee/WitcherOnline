@@ -2069,6 +2069,9 @@ public class WitcherServer
         boolean begun;
         boolean endPending;
         boolean live;
+        double rate = SAVE_RATE_START;
+        double credit;
+        int cleanTicks;
     }
 
     private static final class SaveRelay
@@ -2081,14 +2084,27 @@ public class WitcherServer
         List<String> beginFields;
         boolean uploadComplete;
         long lastActivityNanos;
+        long cachedBytes;
         final Map<String, SaveTarget> targets = new ConcurrentHashMap<>();
         final Set<String> waiting = new HashSet<>();
     }
 
-    private static final int SAVE_RESEND_PER_TICK = 5;
+    private static final double SAVE_RATE_START = 2.0;
+    private static final double SAVE_RATE_MIN = 0.5;
+    private static final double SAVE_RATE_STEP = 0.25;
+    private static final int SAVE_RATE_CLEAN_TICKS = 40;
+
+    private static final int SAVE_RESEND_PER_TICK = 12;
+    private static final int SAVE_QUEUE_LIMIT = 192;
+    private static final int SAVE_DRAIN_PER_TICK = 24;
     private static final int OUTBOUND_QUEUE_LIMIT = 256;
-    private static final int OUTBOUND_SAVE_HEADROOM = 16;
     private static final long SAVE_RELAY_RETAIN_NANOS = 60_000_000_000L;
+
+    private static final long MAX_SAVE_BYTES = 32L * 1024L * 1024L;
+    private static final int MAX_SAVE_CHUNKS = 65536;
+    private static final int MAX_SAVE_CHUNK_BYTES = 2048;
+    private static final long MAX_RELAY_CACHE_BYTES = 48L * 1024L * 1024L;
+    private static final int MAX_ACTIVE_SAVE_RELAYS = 8;
     private static final long SAVE_RELAY_TIMEOUT_NANOS = 300_000_000_000L;
 
     private static final Map<Integer, SaveRelay> saveRelays = new ConcurrentHashMap<>();
@@ -2166,7 +2182,7 @@ public class WitcherServer
         List<String> fields = new ArrayList<>();
         fields.add(asker.username);
 
-        queueOutbound(leader, "SAVENEED", fields);
+        queueSaveOutbound(leader, "SAVENEED", fields);
 
         dbg("SAVE requested from leader %s for %s\n", leaderKey, askerKey);
     }
@@ -2192,7 +2208,7 @@ public class WitcherServer
 
         if (!target.begun)
         {
-            queueOutbound(member, "SAVEBEG", relay.beginFields);
+            queueSaveOutbound(member, "SAVEBEG", relay.beginFields);
             target.begun = true;
         }
 
@@ -2242,22 +2258,43 @@ public class WitcherServer
 
         if ("SAVEBEG".equals(opcode))
         {
-            Integer totalChunks = fields.size() > 1 ? parseIntegerOrNull(fields.get(1)) : null;
-
-            if (totalChunks == null || totalChunks <= 0 || totalChunks > 200000)
+            if (!senderKey.equals(party.leader()))
             {
+                dbg("SAVE rejected upload from non-leader %s in party #%d\n", senderKey, party.partyId);
                 return;
             }
 
             SaveRelay relay = saveRelays.get(party.partyId);
 
-            if (relay == null)
+            if (relay == null || relay.waiting.isEmpty())
             {
-                relay = new SaveRelay();
-                relay.partyId = party.partyId;
-                saveRelays.put(party.partyId, relay);
+                dbg("SAVE rejected unsolicited upload from %s in party #%d\n", senderKey, party.partyId);
+                return;
             }
 
+            Integer totalChunks = fields.size() > 1 ? parseIntegerOrNull(fields.get(1)) : null;
+
+            if (totalChunks == null || totalChunks <= 0 || totalChunks > MAX_SAVE_CHUNKS)
+            {
+                dbg("SAVE rejected upload from %s: chunk count %s\n", senderKey, String.valueOf(totalChunks));
+                return;
+            }
+
+            Long declaredBytes = fields.size() > 2 ? parseLongOrNull(fields.get(2)) : null;
+
+            if (declaredBytes == null || declaredBytes <= 0L || declaredBytes > MAX_SAVE_BYTES)
+            {
+                dbg("SAVE rejected upload from %s: declared size %s\n", senderKey, String.valueOf(declaredBytes));
+                return;
+            }
+
+            if (saveRelays.size() > MAX_ACTIVE_SAVE_RELAYS)
+            {
+                dbg("SAVE rejected upload from %s: %d relays already active\n", senderKey, saveRelays.size());
+                return;
+            }
+
+            relay.cachedBytes = 0L;
             relay.transferId = transferId;
             relay.ownerKey = senderKey;
             relay.totalChunks = totalChunks;
@@ -2288,6 +2325,11 @@ public class WitcherServer
 
         if ("SAVECHK".equals(opcode))
         {
+            if (!senderKey.equals(relay.ownerKey))
+            {
+                return;
+            }
+
             Integer index = fields.size() > 1 ? parseIntegerOrNull(fields.get(1)) : null;
 
             if (index == null || index < 0 || index >= relay.totalChunks || fields.size() < 3)
@@ -2295,9 +2337,24 @@ public class WitcherServer
                 return;
             }
 
+            String payload = fields.get(2);
+
+            if (payload.length() > MAX_SAVE_CHUNK_BYTES)
+            {
+                return;
+            }
+
             if (relay.chunks[index] == null)
             {
-                relay.chunks[index] = fields.get(2).getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+                if (relay.cachedBytes + payload.length() > MAX_RELAY_CACHE_BYTES)
+                {
+                    dbg("SAVE relay #%d dropped: cache over %d bytes\n", transferId, MAX_RELAY_CACHE_BYTES);
+                    saveRelays.remove(relay.partyId);
+                    return;
+                }
+
+                relay.chunks[index] = payload.getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+                relay.cachedBytes += payload.length();
             }
 
             for (SaveTarget target : relay.targets.values())
@@ -2313,6 +2370,11 @@ public class WitcherServer
 
         if ("SAVEEND".equals(opcode))
         {
+            if (!senderKey.equals(relay.ownerKey))
+            {
+                return;
+            }
+
             StringBuilder missing = new StringBuilder();
             int missingCount = 0;
 
@@ -2342,7 +2404,7 @@ public class WitcherServer
                 ask.add(Integer.toString(transferId));
                 ask.add(missing.toString());
 
-                queueOutbound(sender, "SAVENACK", ask);
+                queueSaveOutbound(sender, "SAVENACK", ask);
 
                 dbg("SAVE relay #%d incomplete upload, asked %s for %d missing chunks\n",
                         transferId, senderKey, missingCount);
@@ -2371,6 +2433,9 @@ public class WitcherServer
             {
                 return;
             }
+
+            target.rate = Math.max(SAVE_RATE_MIN, target.rate * 0.5);
+            target.cleanTicks = 0;
 
             int queued = 0;
             int unknown = 0;
@@ -2408,7 +2473,7 @@ public class WitcherServer
 
                 if (owner != null)
                 {
-                    queueOutbound(owner, "SAVENACK", fields);
+                    queueSaveOutbound(owner, "SAVENACK", fields);
                 }
             }
 
@@ -2438,7 +2503,7 @@ public class WitcherServer
                 ack.add(Integer.toString(transferId));
                 ack.add("1");
 
-                queueOutbound(owner, "SAVEACK", ack);
+                queueSaveOutbound(owner, "SAVEACK", ack);
             }
 
             dbg("SAVE relay #%d delivered to %s, cache retained %ds\n",
@@ -2466,15 +2531,30 @@ public class WitcherServer
                     continue;
                 }
 
-                // Leave headroom so save chunks never starve gameplay traffic,
-                // and never enqueue past the cap where queueOutbound silently drops.
-                int space = OUTBOUND_QUEUE_LIMIT - member.pendingOutbound.size() - OUTBOUND_SAVE_HEADROOM;
-                int budget = Math.min(SAVE_RESEND_PER_TICK, space);
+                target.cleanTicks++;
+
+                if (target.cleanTicks >= SAVE_RATE_CLEAN_TICKS)
+                {
+                    target.rate = Math.min(SAVE_RESEND_PER_TICK, target.rate + SAVE_RATE_STEP);
+                    target.cleanTicks = 0;
+                }
+
+                target.credit += target.rate;
+
+                if (target.credit > SAVE_RESEND_PER_TICK)
+                {
+                    target.credit = SAVE_RESEND_PER_TICK;
+                }
+
+                int space = SAVE_QUEUE_LIMIT - member.pendingSaveOutbound.size();
+                int budget = Math.min((int) target.credit, space);
 
                 if (budget <= 0)
                 {
                     continue;
                 }
+
+                target.credit -= budget;
 
                 while (budget > 0 && !target.queue.isEmpty())
                 {
@@ -2493,7 +2573,7 @@ public class WitcherServer
                     out.add(Integer.toString(index));
                     out.add(new String(payload, java.nio.charset.StandardCharsets.US_ASCII));
 
-                    queueOutbound(member, "SAVECHK", out);
+                    queueSaveOutbound(member, "SAVECHK", out);
                     budget--;
                 }
 
@@ -2502,7 +2582,7 @@ public class WitcherServer
                     List<String> endFields = new ArrayList<>();
                     endFields.add(Integer.toString(relay.transferId));
 
-                    queueOutbound(member, "SAVEEND", endFields);
+                    queueSaveOutbound(member, "SAVEEND", endFields);
                     target.endPending = false;
                 }
             }
@@ -3604,6 +3684,18 @@ public class WitcherServer
 
             sendNpcPacket(socket, session, (String) packet[0], fields);
         }
+
+        guard = 0;
+
+        while ((packet = session.pendingSaveOutbound.poll()) != null && guard < SAVE_DRAIN_PER_TICK)
+        {
+            guard++;
+
+            @SuppressWarnings("unchecked")
+            List<String> fields = (List<String>) packet[1];
+
+            sendNpcPacket(socket, session, (String) packet[0], fields);
+        }
     }
 
     static void queueOutbound(PlayerSession session, String opcode, List<String> fields)
@@ -3614,6 +3706,16 @@ public class WitcherServer
         }
 
         session.pendingOutbound.add(new Object[] { opcode, fields });
+    }
+
+    static void queueSaveOutbound(PlayerSession session, String opcode, List<String> fields)
+    {
+        if (session == null || session.pendingSaveOutbound.size() >= SAVE_QUEUE_LIMIT)
+        {
+            return;
+        }
+
+        session.pendingSaveOutbound.add(new Object[] { opcode, fields });
     }
 
     private static String formatCoord(double value)

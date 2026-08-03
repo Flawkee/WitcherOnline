@@ -3,11 +3,14 @@
 #include "Diagnostics.h"
 
 #include <windows.h>
+#include <bcrypt.h>
 #include <atomic>
 #include <fstream>
 #include <sstream>
 #include <mutex>
 #include <unordered_map>
+
+#pragma comment(lib, "bcrypt.lib")
 
 extern void SendPartyRequest2(const char* opcode, const std::string& first, const std::string& second);
 extern void SendSaveChunk(const char* opcode, const std::vector<std::string>& fields);
@@ -16,13 +19,22 @@ namespace w3mp {
 
 	namespace {
 
-		const size_t kChunkBytes = 1024;
-		const int kChunksPerSecond = 150;
+		const size_t kChunkBytes = 700;
 		const int kMaxChunksPerPump = 64;
-		const int kMaxAttempts = 3;
 		const unsigned long long kNackIntervalMs = 1500;
 		const unsigned long long kStallTimeoutMs = 45000;
+		const unsigned long long kReceiveHardLimitMs = 90000;
 		const size_t kNackBatch = 200;
+
+		const double kRateStart = 40.0;
+		const double kRateMin = 20.0;
+		const double kRateMax = 300.0;
+		const double kRateStep = 10.0;
+		const unsigned long long kRateStepMs = 1000;
+
+		const unsigned long long kMaxSaveBytes = 32ull * 1024ull * 1024ull;
+		const char kSaveMagic[] = "SNFHFZLC";
+		const size_t kSaveMagicLen = 8;
 
 		const char kB64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -34,7 +46,6 @@ namespace w3mp {
 		std::string g_completedFile;
 
 		int g_transferId = 0;
-		int g_attempt = 0;
 
 		// sender
 		std::vector<std::string> g_encodedChunks;
@@ -42,7 +53,9 @@ namespace w3mp {
 		std::vector<int> g_resendQueue;
 		unsigned long long g_lastActivityMs = 0;
 		unsigned long long g_lastSendMs = 0;
+		unsigned long long g_lastRateStepMs = 0;
 		double g_sendCredit = 0.0;
+		double g_sendRate = kRateStart;
 		bool g_sentEnd = false;
 
 		// receiver
@@ -50,37 +63,50 @@ namespace w3mp {
 		std::vector<bool> g_have;
 		int g_expectedChunks = 0;
 		unsigned long long g_expectedBytes = 0;
-		unsigned int g_expectedCrc = 0;
+		std::string g_expectedHash;
+		bool g_requested = false;
 		int g_haveCount = 0;
 		unsigned long long g_lastNackMs = 0;
 		unsigned long long g_lastChunkMs = 0;
+		unsigned long long g_recvBeganMs = 0;
 		bool g_endSeen = false;
 
 		std::string g_pendingRequest;
 
-		unsigned int Crc32(const unsigned char* data, size_t len)
+		std::string Sha256Hex(const unsigned char* data, size_t len)
 		{
-			static unsigned int table[256];
-			static bool ready = false;
+			BCRYPT_ALG_HANDLE alg = NULL;
 
-			if (!ready)
+			if (!BCRYPT_SUCCESS(BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, NULL, 0)))
+				return std::string();
+
+			unsigned char digest[32] = { 0 };
+
+			const NTSTATUS status = BCryptHash(alg, NULL, 0,
+				const_cast<PUCHAR>(data), static_cast<ULONG>(len), digest, sizeof(digest));
+
+			BCryptCloseAlgorithmProvider(alg, 0);
+
+			if (!BCRYPT_SUCCESS(status))
+				return std::string();
+
+			static const char* hex = "0123456789abcdef";
+			std::string out;
+			out.reserve(64);
+
+			for (size_t i = 0; i < sizeof(digest); ++i)
 			{
-				for (unsigned int i = 0; i < 256; ++i)
-				{
-					unsigned int c = i;
-					for (int k = 0; k < 8; ++k)
-						c = (c & 1) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
-					table[i] = c;
-				}
-				ready = true;
+				out.push_back(hex[(digest[i] >> 4) & 0x0F]);
+				out.push_back(hex[digest[i] & 0x0F]);
 			}
 
-			unsigned int crc = 0xFFFFFFFFu;
+			return out;
+		}
 
-			for (size_t i = 0; i < len; ++i)
-				crc = table[(crc ^ data[i]) & 0xFF] ^ (crc >> 8);
-
-			return crc ^ 0xFFFFFFFFu;
+		bool HasSaveMagic(const std::string& body)
+		{
+			return body.size() > kSaveMagicLen
+				&& memcmp(body.data(), kSaveMagic, kSaveMagicLen) == 0;
 		}
 
 		std::string EncodeB64(const unsigned char* data, size_t len)
@@ -158,11 +184,14 @@ namespace w3mp {
 			g_sendCredit = 0.0;
 			g_expectedChunks = 0;
 			g_expectedBytes = 0;
-			g_expectedCrc = 0;
+			g_expectedHash.clear();
 			g_haveCount = 0;
 			g_lastChunkMs = 0;
 			g_endSeen = false;
 			g_sentEnd = false;
+			g_recvBeganMs = 0;
+			g_lastRateStepMs = 0;
+			g_sendRate = kRateStart;
 		}
 
 		void SendChunk(int index)
@@ -187,6 +216,7 @@ namespace w3mp {
 		g_state = State::Idle;
 		g_error.clear();
 		g_completedFile.clear();
+		g_requested = true;
 
 		SendPartyRequest2("SAVEWANT", "1", "1");
 
@@ -215,6 +245,30 @@ namespace w3mp {
 
 		ClearLocked();
 
+		if (filePath.find("..") != std::string::npos)
+		{
+			Fail("rejected path with traversal: " + filePath);
+			return false;
+		}
+
+		if (!g_incomingDir.empty())
+		{
+			std::string head = filePath.substr(0, g_incomingDir.size());
+			std::string want = g_incomingDir;
+
+			for (char& c : head)
+				c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+
+			for (char& c : want)
+				c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+
+			if (head != want)
+			{
+				Fail("rejected path outside save directory: " + filePath);
+				return false;
+			}
+		}
+
 		std::ifstream in(filePath, std::ios::in | std::ios::binary);
 
 		if (!in.is_open())
@@ -235,7 +289,25 @@ namespace w3mp {
 			return false;
 		}
 
-		const unsigned int crc = Crc32(reinterpret_cast<const unsigned char*>(body.data()), body.size());
+		if (body.size() > kMaxSaveBytes)
+		{
+			Fail("save too large: " + std::to_string(body.size()) + " bytes");
+			return false;
+		}
+
+		if (!HasSaveMagic(body))
+		{
+			Fail("not a witcher save: " + filePath);
+			return false;
+		}
+
+		const std::string hash = Sha256Hex(reinterpret_cast<const unsigned char*>(body.data()), body.size());
+
+		if (hash.empty())
+		{
+			Fail("cannot hash save");
+			return false;
+		}
 
 		for (size_t offset = 0; offset < body.size(); offset += kChunkBytes)
 		{
@@ -246,21 +318,21 @@ namespace w3mp {
 		g_transferId = static_cast<int>(GetTickCount64() & 0x7FFFFFFF);
 		g_state = State::Sending;
 		g_error.clear();
-		g_attempt = 1;
 		g_lastActivityMs = GetTickCount64();
+		g_lastRateStepMs = g_lastActivityMs;
 
 		std::vector<std::string> fields;
 		fields.push_back(std::to_string(g_transferId));
 		fields.push_back(std::to_string(g_encodedChunks.size()));
 		fields.push_back(std::to_string(body.size()));
-		fields.push_back(std::to_string(crc));
+		fields.push_back(hash);
 
 		SendSaveChunk("SAVEBEG", fields);
 
 		Diagnostics::Log("save transfer upload id=" + std::to_string(g_transferId)
 			+ " bytes=" + std::to_string(body.size())
 			+ " chunks=" + std::to_string(g_encodedChunks.size())
-			+ " crc=" + std::to_string(crc));
+			+ " sha256=" + hash.substr(0, 16));
 
 		return true;
 	}
@@ -282,10 +354,23 @@ namespace w3mp {
 			if (g_lastSendMs == 0)
 				g_lastSendMs = now;
 
+			if (g_lastRateStepMs == 0)
+				g_lastRateStepMs = now;
+
+			if ((now - g_lastRateStepMs) >= kRateStepMs)
+			{
+				g_sendRate += kRateStep;
+
+				if (g_sendRate > kRateMax)
+					g_sendRate = kRateMax;
+
+				g_lastRateStepMs = now;
+			}
+
 			const unsigned long long elapsed = now - g_lastSendMs;
 			g_lastSendMs = now;
 
-			g_sendCredit += (static_cast<double>(elapsed) / 1000.0) * kChunksPerSecond;
+			g_sendCredit += (static_cast<double>(elapsed) / 1000.0) * g_sendRate;
 
 			if (g_sendCredit > kMaxChunksPerPump)
 				g_sendCredit = kMaxChunksPerPump;
@@ -328,6 +413,13 @@ namespace w3mp {
 
 		if (g_state == State::Receiving)
 		{
+			if (g_recvBeganMs != 0 && (now - g_recvBeganMs) > kReceiveHardLimitMs && g_haveCount < g_expectedChunks)
+			{
+				Fail("transfer too slow: " + std::to_string(g_haveCount) + "/" + std::to_string(g_expectedChunks)
+					+ " chunks after " + std::to_string((now - g_recvBeganMs) / 1000) + "s");
+				return;
+			}
+
 			if ((now - g_lastNackMs) < kNackIntervalMs)
 				return;
 
@@ -373,16 +465,44 @@ namespace w3mp {
 			if (fields.size() < 4)
 				return;
 
+			const int incomingId = atoi(fields[0].c_str());
+
+			if (!g_requested)
+			{
+				Diagnostics::Log("save transfer ignored unsolicited offer id=" + std::to_string(incomingId));
+				return;
+			}
+
+			if (g_state == State::Receiving)
+			{
+				if (incomingId != g_transferId)
+					Diagnostics::Log("save transfer ignored competing offer id=" + std::to_string(incomingId));
+
+				return;
+			}
+
 			ClearLocked();
 
-			g_transferId = atoi(fields[0].c_str());
+			g_transferId = incomingId;
 			g_expectedChunks = atoi(fields[1].c_str());
 			g_expectedBytes = strtoull(fields[2].c_str(), nullptr, 10);
-			g_expectedCrc = static_cast<unsigned int>(strtoul(fields[3].c_str(), nullptr, 10));
+			g_expectedHash = fields[3];
 
 			if (g_expectedChunks <= 0 || g_expectedChunks > 200000)
 			{
 				Fail("implausible chunk count");
+				return;
+			}
+
+			if (g_expectedBytes == 0 || g_expectedBytes > kMaxSaveBytes)
+			{
+				Fail("implausible save size: " + std::to_string(g_expectedBytes));
+				return;
+			}
+
+			if (g_expectedHash.size() != 64)
+			{
+				Fail("missing save digest");
 				return;
 			}
 
@@ -393,6 +513,7 @@ namespace w3mp {
 			g_error.clear();
 			g_lastActivityMs = GetTickCount64();
 			g_lastNackMs = g_lastActivityMs;
+			g_recvBeganMs = g_lastActivityMs;
 
 			Diagnostics::Log("save transfer incoming id=" + std::to_string(g_transferId)
 				+ " chunks=" + std::to_string(g_expectedChunks)
@@ -430,6 +551,13 @@ namespace w3mp {
 				return;
 
 			g_lastActivityMs = GetTickCount64();
+
+			g_sendRate *= 0.5;
+
+			if (g_sendRate < kRateMin)
+				g_sendRate = kRateMin;
+
+			g_lastRateStepMs = g_lastActivityMs;
 
 			size_t start = 0;
 			const std::string& list = fields[1];
@@ -481,11 +609,17 @@ namespace w3mp {
 				return;
 			}
 
-			const unsigned int crc = Crc32(reinterpret_cast<const unsigned char*>(body.data()), body.size());
+			const std::string hash = Sha256Hex(reinterpret_cast<const unsigned char*>(body.data()), body.size());
 
-			if (crc != g_expectedCrc)
+			if (hash.empty() || hash != g_expectedHash)
 			{
-				Fail("crc mismatch");
+				Fail("digest mismatch");
+				return;
+			}
+
+			if (!HasSaveMagic(body))
+			{
+				Fail("payload is not a witcher save");
 				return;
 			}
 
@@ -511,11 +645,12 @@ namespace w3mp {
 
 			g_completedFile = stem;
 			g_state = State::Complete;
+			g_requested = false;
 
 			SendPartyRequest2("SAVEACK", std::to_string(g_transferId), "1");
 
 			Diagnostics::Log("save transfer complete -> " + target
-				+ " (" + std::to_string(body.size()) + " bytes, crc ok)");
+				+ " (" + std::to_string(body.size()) + " bytes, digest ok)");
 			return;
 		}
 
@@ -652,5 +787,6 @@ namespace w3mp {
 		g_state = State::Idle;
 		g_error.clear();
 		g_completedFile.clear();
+		g_requested = false;
 	}
 }
