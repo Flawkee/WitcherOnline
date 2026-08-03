@@ -602,6 +602,7 @@ class r_NpcAggro
                     states[index].lastUpdateAt = now;
                 }
 
+                trackedList[i].cachedForcedTarget = 0;
                 continue;
             }
 
@@ -612,6 +613,8 @@ class r_NpcAggro
 
             states[index].lastUpdateAt = now;
             evaluate(states[index], npc, now, dt, ids, actors, healths);
+
+            trackedList[i].cachedForcedTarget = states[index].forcedTargetId;
         }
 
         pruneStates(now);

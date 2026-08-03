@@ -152,6 +152,12 @@ static std::string PayloadTag(const std::string& input)
 
 static void AppendEscaped(std::string& out, const std::string& value)
 {
+	if (value.find_first_of("\\\t\n\r") == std::string::npos)
+	{
+		out.append(value);
+		return;
+	}
+
 	for (char c : value)
 	{
 		switch (c)
@@ -202,6 +208,9 @@ static std::vector<std::string> SplitTabs(const std::string& s)
 	std::string cur;
 	bool esc = false;
 
+	parts.reserve(32);
+	cur.reserve(24);
+
 	for (char c : s)
 	{
 		if (esc) {
@@ -216,15 +225,16 @@ static std::vector<std::string> SplitTabs(const std::string& s)
 			esc = true;
 		}
 		else if (c == '\t') {
-			parts.push_back(cur);
-			cur.clear();
+			parts.push_back(std::move(cur));
+			cur = std::string();
+			cur.reserve(24);
 		}
 		else {
 			cur += c;
 		}
 	}
 
-	parts.push_back(cur);
+	parts.push_back(std::move(cur));
 	return parts;
 }
 
@@ -348,12 +358,27 @@ static void SendUdpPacket(const std::string& packet, const char* label)
 
 static std::string BuildLocalPacketId()
 {
+	static std::mutex cacheMutex;
+	static std::string cached;
+	static int cachedPlayerId = -999;
+	static std::string cachedUsername;
+
 	const int localPlayerId = g_localPlayerId.load();
 
-	if (localPlayerId > 0)
-		return std::to_string(localPlayerId) + "\t" + EscapeField(username);
+	std::lock_guard<std::mutex> lock(cacheMutex);
 
-	return EscapeField(username);
+	if (localPlayerId == cachedPlayerId && username == cachedUsername)
+		return cached;
+
+	cachedPlayerId = localPlayerId;
+	cachedUsername = username;
+
+	if (localPlayerId > 0)
+		cached = std::to_string(localPlayerId) + "\t" + EscapeField(username);
+	else
+		cached = EscapeField(username);
+
+	return cached;
 }
 
 static void SendMovementPacket(const std::string& packetId, const std::vector<std::string>& movement, int movementSequence)
@@ -972,8 +997,9 @@ static void HandleServerPacket(const std::string& msg)
 		if (parts.size() < 3)
 			return;
 
-		std::vector<std::string> netFields(parts.begin() + 3, parts.end());
-		NpcNet::OnPacket(opcode, netFields);
+		const std::string opcodeCopy = opcode;
+		parts.erase(parts.begin(), parts.begin() + 3);
+		NpcNet::OnPacket(opcodeCopy, parts);
 		return;
 	}
 

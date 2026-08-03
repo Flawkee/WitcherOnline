@@ -41,11 +41,15 @@ class r_EntityClassifier
 
     private var lastVisibleCount  : int;
 
-    private var serviceGuids : array<int>;
-    private var serviceFlags : array<bool>;
+    private var serviceMap : MP_SU_HashMap;
 
-    private var SERVICE_CACHE_MAX : int;
-    default SERVICE_CACHE_MAX = 4096;
+    private var memoStamp   : float;
+    private var memoGuids   : array<int>;
+    private var memoSamples : array<r_SEntityClassSample>;
+
+    private var questPrefixes : array<string>;
+
+    default memoStamp = 0.0;
 
     default enabled = false;
     default overlayEnabled = true;
@@ -152,26 +156,27 @@ class r_EntityClassifier
             || npc.HasTag('boat');
     }
 
-    private function questTagPrefixes() : array<string>
+    private function ensurePrefixes()
     {
-        var prefixes : array<string>;
+        if(questPrefixes.Size() > 0)
+        {
+            return;
+        }
 
-        prefixes.PushBack("mq");
-        prefixes.PushBack("sq");
-        prefixes.PushBack("q0");
-        prefixes.PushBack("q1");
-        prefixes.PushBack("q2");
-        prefixes.PushBack("q3");
-        prefixes.PushBack("q4");
-        prefixes.PushBack("q5");
-        prefixes.PushBack("q6");
-        prefixes.PushBack("q7");
-        prefixes.PushBack("q8");
-        prefixes.PushBack("q9");
-        prefixes.PushBack("ep1_");
-        prefixes.PushBack("ep2_");
-
-        return prefixes;
+        questPrefixes.PushBack("mq");
+        questPrefixes.PushBack("sq");
+        questPrefixes.PushBack("q0");
+        questPrefixes.PushBack("q1");
+        questPrefixes.PushBack("q2");
+        questPrefixes.PushBack("q3");
+        questPrefixes.PushBack("q4");
+        questPrefixes.PushBack("q5");
+        questPrefixes.PushBack("q6");
+        questPrefixes.PushBack("q7");
+        questPrefixes.PushBack("q8");
+        questPrefixes.PushBack("q9");
+        questPrefixes.PushBack("ep1_");
+        questPrefixes.PushBack("ep2_");
     }
 
     private function looksLikeQuestTag(text : string, prefix : string) : bool
@@ -269,25 +274,24 @@ class r_EntityClassifier
 
     private function hasQuestTag(tags : array<name>, out matched : string) : bool
     {
-        var prefixes : array<string>;
         var text : string;
         var i : int;
         var p : int;
 
-        prefixes = questTagPrefixes();
+        ensurePrefixes();
 
         for(i = 0; i < tags.Size(); i += 1)
         {
             text = NameToString(tags[i]);
 
-            for(p = 0; p < prefixes.Size(); p += 1)
+            for(p = 0; p < questPrefixes.Size(); p += 1)
             {
-                if(!StrBeginsWith(text, prefixes[p]))
+                if(!StrBeginsWith(text, questPrefixes[p]))
                 {
                     continue;
                 }
 
-                if(!looksLikeQuestTag(text, prefixes[p]))
+                if(!looksLikeQuestTag(text, questPrefixes[p]))
                 {
                     continue;
                 }
@@ -300,12 +304,22 @@ class r_EntityClassifier
         return false;
     }
 
+    public function beginScanTick(now : float)
+    {
+        if(memoStamp == now)
+        {
+            return;
+        }
+
+        memoStamp = now;
+        memoGuids.Clear();
+        memoSamples.Clear();
+    }
+
     public function classify(npc : CNewNPC, out sample : r_SEntityClassSample)
     {
-        var tags : array<name>;
-        var questTag : string;
-        var appearance : string;
-        var entityName : string;
+        var guid : int;
+        var i : int;
 
         sample.entityClass = REC_Unknown;
         sample.reason = "unclassified";
@@ -320,9 +334,36 @@ class r_EntityClassifier
             return;
         }
 
-        tags = npc.GetTags();
-        sample.tags = tagsToString(tags);
-        sample.hostileNow = npc.GetAttitude(thePlayer) == AIA_Hostile;
+        guid = npc.GetGuidHash();
+
+        if(guid != 0 && memoStamp > 0.0)
+        {
+            for(i = 0; i < memoGuids.Size(); i += 1)
+            {
+                if(memoGuids[i] == guid)
+                {
+                    sample = memoSamples[i];
+                    return;
+                }
+            }
+        }
+
+        classifyFresh(npc, sample);
+
+        if(guid != 0 && memoStamp > 0.0)
+        {
+            memoGuids.PushBack(guid);
+            memoSamples.PushBack(sample);
+        }
+    }
+
+    private function classifyFresh(npc : CNewNPC, out sample : r_SEntityClassSample)
+    {
+        var tags : array<name>;
+        var questTag : string;
+        var appearance : string;
+        var entityName : string;
+        var maximum : float;
 
         if(npc == thePlayer)
         {
@@ -345,11 +386,20 @@ class r_EntityClassifier
             return;
         }
 
+        sample.hostileNow = npc.GetAttitude(thePlayer) == AIA_Hostile;
+
         if(npc.IsVIP())
         {
             sample.entityClass = REC_Quest;
             sample.reason = "vip";
             return;
+        }
+
+        tags = npc.GetTags();
+
+        if(enabled)
+        {
+            sample.tags = tagsToString(tags);
         }
 
         if(hasQuestTag(tags, questTag))
@@ -409,44 +459,51 @@ class r_EntityClassifier
             return;
         }
 
-        if(isFightCapable(npc))
+        maximum = npc.GetMaxHealth();
+
+        if(maximum > 5.0 || sample.hostileNow)
         {
             sample.entityClass = REC_Ambient;
 
             if(sample.hostileNow)
             {
-                sample.reason = "human hostile hp=" + npc.GetMaxHealth();
+                sample.reason = "human hostile hp=" + maximum;
                 sample.syncEligible = true;
             }
             else
             {
-                sample.reason = "human calm hp=" + npc.GetMaxHealth();
+                sample.reason = "human calm hp=" + maximum;
             }
 
             return;
         }
 
         sample.entityClass = REC_Ambient;
-        sample.reason = "human cosmetic hp=" + npc.GetMaxHealth();
+        sample.reason = "human cosmetic hp=" + maximum;
     }
 
     public function isServiceNpc(npc : CNewNPC) : bool
     {
         var comp : CComponent;
+        var stored : MP_SU_HashMapValueInt;
         var guid : int;
         var result : bool;
-        var i : int;
 
         guid = npc.GetGuidHash();
 
+        if(!serviceMap)
+        {
+            serviceMap = new MP_SU_HashMap in this;
+            serviceMap.init();
+        }
+
         if(guid != 0)
         {
-            for(i = 0; i < serviceGuids.Size(); i += 1)
+            stored = (MP_SU_HashMapValueInt)serviceMap.get(guid);
+
+            if(stored)
             {
-                if(serviceGuids[i] == guid)
-                {
-                    return serviceFlags[i];
-                }
+                return stored.value != 0;
             }
         }
 
@@ -473,14 +530,14 @@ class r_EntityClassifier
 
         if(guid != 0)
         {
-            if(serviceGuids.Size() >= SERVICE_CACHE_MAX)
+            if(result)
             {
-                serviceGuids.Clear();
-                serviceFlags.Clear();
+                serviceMap.insert(guid, hm_fromInt(1));
             }
-
-            serviceGuids.PushBack(guid);
-            serviceFlags.PushBack(result);
+            else
+            {
+                serviceMap.insert(guid, hm_fromInt(0));
+            }
         }
 
         return result;
@@ -648,7 +705,7 @@ class r_EntityClassifier
                 + " alive=" + npc.IsAlive()
                 + " hostile=" + sample.hostileNow
                 + " dist=" + VecDistance(thePlayer.GetWorldPosition(), npc.GetWorldPosition())
-                + " tags=[" + sample.tags + "]");
+                + " tags=[" + tagsToString(npc.GetTags()) + "]");
         }
 
         Log("woclass dump end");

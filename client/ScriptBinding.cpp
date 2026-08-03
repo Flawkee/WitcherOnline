@@ -600,24 +600,25 @@ namespace w3mp {
 	static std::atomic<unsigned long long> g_deltaSuppressed{ 0 };
 	static std::atomic<unsigned long long> g_deltaDowngraded{ 0 };
 
-	static std::mutex g_churnMutex;
-	static std::map<int, unsigned long long> g_fieldChurn;
+	static constexpr int kChurnSlots = 128;
+	static std::atomic<unsigned long long> g_fieldChurn[kChurnSlots];
 
 	void ScriptBinding::CountFieldChange(int index)
 	{
-		std::lock_guard<std::mutex> lock(g_churnMutex);
-		g_fieldChurn[index]++;
+		if (index >= 0 && index < kChurnSlots)
+			g_fieldChurn[index].fetch_add(1, std::memory_order_relaxed);
 	}
 
 	std::string ScriptBinding::ChurnReport()
 	{
 		std::vector<std::pair<unsigned long long, int>> ranked;
 
+		for (int i = 0; i < kChurnSlots; ++i)
 		{
-			std::lock_guard<std::mutex> lock(g_churnMutex);
+			const unsigned long long count = g_fieldChurn[i].load(std::memory_order_relaxed);
 
-			for (const auto& entry : g_fieldChurn)
-				ranked.push_back({ entry.second, entry.first });
+			if (count > 0)
+				ranked.push_back({ count, i });
 		}
 
 		std::sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& b) { return a.first > b.first; });

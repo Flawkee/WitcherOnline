@@ -25,10 +25,13 @@ public final class NpcRegistry
     public static final int HANDOVER_MAX_ATTEMPTS = 3;
     public static final long HANDOVER_COOLDOWN_NANOS = 15_000_000_000L;
     public static final long UNACKED_DAMAGE_GRACE_NANOS = 1_200_000_000L;
-    public static final long DEAD_RETENTION_NANOS = 180_000_000_000L;
+    public static final long DEAD_RETENTION_NANOS = 30_000_000_000L;
+    public static final long HANDOVER_IDLE_EVAL_NANOS = 250_000_000L;
 
     public static final int MAX_NPCS_PER_OWNER = 250;
     public static final double RESERVATION_RADIUS = 30.0;
+    public static final double HANDOVER_SUSTAIN_RADIUS = 70.0;
+    public static final double HANDOVER_SUSTAIN_SQUARED = HANDOVER_SUSTAIN_RADIUS * HANDOVER_SUSTAIN_RADIUS;
 
     public static final int HISTORY_SAMPLES = 40;
     public static final long HISTORY_WINDOW_MS = 2000L;
@@ -54,6 +57,7 @@ public final class NpcRegistry
     public static final class Npc
     {
         public final int npcId;
+        public final Integer boxedId;
         public volatile int ownerPlayerId;
         public volatile int ownerLocalGuid;
         public volatile int area;
@@ -80,6 +84,7 @@ public final class NpcRegistry
         public volatile int releasedLocalGuid;
         public volatile long releasedAtNanos;
         public volatile long lastMigrationNanos;
+        public volatile long nextHandoverEvalNanos;
         public final java.util.Map<Integer, Long> declinedUntil = new java.util.concurrent.ConcurrentHashMap<>();
         public volatile boolean killOrderPending;
         public volatile int pendingDamagePermille;
@@ -93,6 +98,8 @@ public final class NpcRegistry
         Npc(int npcId)
         {
             this.npcId = npcId;
+            this.boxedId = Integer.valueOf(npcId);
+            this.lastMigrationNanos = System.nanoTime();
         }
 
         synchronized void record(long timeMs, double px, double py, double pz)
@@ -151,8 +158,51 @@ public final class NpcRegistry
     }
 
     private static final Map<Integer, Npc> npcs = new ConcurrentHashMap<>();
+    private static final Map<Integer, java.util.Set<Npc>> byArea = new ConcurrentHashMap<>();
     private static final Map<Long, Integer> ownerGuidToCanonical = new ConcurrentHashMap<>();
     private static final java.util.Queue<int[]> pendingDrops = new java.util.concurrent.ConcurrentLinkedQueue<>();
+    private static final java.util.concurrent.atomic.AtomicInteger killOrdersPending =
+            new java.util.concurrent.atomic.AtomicInteger();
+    private static volatile long lastDeathNanos = 0L;
+    private static final List<Npc> EMPTY_NPCS = java.util.Collections.emptyList();
+
+    private static void areaInsert(Npc npc)
+    {
+        byArea.computeIfAbsent(npc.area, key -> ConcurrentHashMap.newKeySet()).add(npc);
+    }
+
+    private static void areaRemove(Npc npc, int area)
+    {
+        java.util.Set<Npc> bucket = byArea.get(area);
+
+        if (bucket != null)
+        {
+            bucket.remove(npc);
+        }
+    }
+
+    private static void areaMove(Npc npc, int fromArea, int toArea)
+    {
+        if (fromArea == toArea)
+        {
+            return;
+        }
+
+        areaRemove(npc, fromArea);
+        areaInsert(npc);
+    }
+
+    private static void unregister(Npc npc)
+    {
+        npcs.remove(npc.npcId);
+        areaRemove(npc, npc.area);
+
+        if (npc.killOrderPending)
+        {
+            npc.killOrderPending = false;
+            killOrdersPending.decrementAndGet();
+        }
+    }
     private static final java.util.concurrent.atomic.AtomicInteger nextCanonicalId =
             new java.util.concurrent.atomic.AtomicInteger(1);
 
@@ -406,7 +456,7 @@ public final class NpcRegistry
                 continue;
             }
 
-            npcs.remove(npc.npcId);
+            unregister(npc);
             ownerGuidToCanonical.remove(ownerKey(npc.ownerPlayerId, npc.ownerLocalGuid));
 
             WitcherServer.dbg("NPC %s EVICTED STALE DUPLICATE | owner=%s spot=%s\n",
@@ -446,7 +496,7 @@ public final class NpcRegistry
         if (npc != null && !questFoe
                 && (!npc.appearance.equals(appearance) || !npc.typeCode.equals(typeCode)))
         {
-            npcs.remove(npc.npcId);
+            unregister(npc);
             ownerGuidToCanonical.remove(key);
             npc = null;
         }
@@ -503,6 +553,7 @@ public final class NpcRegistry
                     npc.appearance = appearance;
                     npc.questPartyId = partyId;
                     npcs.put(npc.npcId, npc);
+                    areaInsert(npc);
                     ownerGuidToCanonical.put(key, npc.npcId);
                     statAdmitted.incrementAndGet();
 
@@ -551,6 +602,7 @@ public final class NpcRegistry
             npc.typeCode = typeCode;
             npc.appearance = appearance;
             npcs.put(npc.npcId, npc);
+            areaInsert(npc);
             ownerGuidToCanonical.put(key, npc.npcId);
             statAdmitted.incrementAndGet();
         }
@@ -614,8 +666,10 @@ public final class NpcRegistry
     {
         final int previousTarget = npc.targetPlayerId;
         final boolean wasAlive = npc.alive;
+        final int previousArea = npc.area;
 
         npc.area = area;
+        areaMove(npc, previousArea, area);
         npc.x = x;
         npc.y = y;
         npc.z = z;
@@ -630,7 +684,12 @@ public final class NpcRegistry
 
         if (!wasAlive && ownerSaysAlive)
         {
-            npc.killOrderPending = true;
+            if (!npc.killOrderPending)
+            {
+                npc.killOrderPending = true;
+                killOrdersPending.incrementAndGet();
+            }
+
             npc.hpPermille = 0;
             npc.flags = flags & ~1;
 
@@ -646,6 +705,7 @@ public final class NpcRegistry
         if (wasAlive && !npc.alive)
         {
             npc.deadSinceNanos = now;
+            lastDeathNanos = now;
 
             WitcherServer.dbg("NPC %s DIED | owner=%s spot=%s\n",
                     describeNpc(npc),
@@ -675,7 +735,7 @@ public final class NpcRegistry
         }
 
         ownerGuidToCanonical.remove(key);
-        npcs.remove(npc.npcId);
+        unregister(npc);
 
         WitcherServer.dbg("NPC %s DESPAWNED | owner=%s spot=%s\n",
                 describeNpc(npc),
@@ -708,7 +768,7 @@ public final class NpcRegistry
         {
             if (!npc.alive && npc.deathBroadcast && (now - npc.deadSinceNanos) > DEAD_RETENTION_NANOS)
             {
-                npcs.remove(npc.npcId);
+                unregister(npc);
                 ownerGuidToCanonical.remove(ownerKey(npc.ownerPlayerId, npc.ownerLocalGuid));
                 continue;
             }
@@ -717,7 +777,7 @@ public final class NpcRegistry
                     && npc.releasedByPlayerId != 0
                     && (now - npc.releasedAtNanos) > RELEASED_ORPHAN_RETENTION_NANOS)
             {
-                npcs.remove(npc.npcId);
+                unregister(npc);
 
                 WitcherServer.dbg("NPC %s EVICTED (released %.0fs ago, unclaimed)\n",
                         describeNpc(npc),
@@ -732,7 +792,7 @@ public final class NpcRegistry
 
             if ((now - npc.lastUpdateNanos) > NPC_ORPHAN_RETENTION_NANOS)
             {
-                npcs.remove(npc.npcId);
+                unregister(npc);
                 ownerGuidToCanonical.remove(ownerKey(npc.ownerPlayerId, npc.ownerLocalGuid));
 
                 WitcherServer.dbg("NPC %s EVICTED (orphaned %.0fs, owner offline)\n",
@@ -795,6 +855,7 @@ public final class NpcRegistry
                 npc.alive = false;
                 npc.flags = npc.flags & ~1;
                 npc.deadSinceNanos = now;
+                lastDeathNanos = now;
 
                 WitcherServer.dbg("NPC %s DIED (server authority, owner silent) | owner=%s\n",
                         describeNpc(npc),
@@ -810,6 +871,11 @@ public final class NpcRegistry
 
     public static List<Npc> pendingKillOrders(int ownerPlayerId)
     {
+        if (killOrdersPending.get() <= 0)
+        {
+            return EMPTY_NPCS;
+        }
+
         List<Npc> orders = new ArrayList<>();
 
         for (Npc npc : npcs.values())
@@ -823,8 +889,23 @@ public final class NpcRegistry
         return orders;
     }
 
+    public static void clearKillOrder(Npc npc)
+    {
+        if (npc.killOrderPending)
+        {
+            npc.killOrderPending = false;
+            killOrdersPending.decrementAndGet();
+        }
+    }
+
     public static List<Npc> pendingDeaths(long now)
     {
+        if (lastDeathNanos == 0L
+                || (now - lastDeathNanos) > (DEATH_BROADCAST_WINDOW_NANOS + 1_000_000_000L))
+        {
+            return EMPTY_NPCS;
+        }
+
         List<Npc> pending = new ArrayList<>();
 
         for (Npc npc : npcs.values())
@@ -850,7 +931,7 @@ public final class NpcRegistry
         return pending;
     }
 
-    public static List<Npc> visibleTo(PlayerSession session, double radiusSquared)
+    public static List<Npc> visibleTo(PlayerSession session, double enterSquared, double leaveSquared)
     {
         List<Npc> visible = new ArrayList<>();
 
@@ -859,16 +940,16 @@ public final class NpcRegistry
             return visible;
         }
 
-        final long now = System.nanoTime();
+        java.util.Set<Npc> bucket = byArea.get(session.area);
 
-        for (Npc npc : npcs.values())
+        if (bucket == null || bucket.isEmpty())
+        {
+            return visible;
+        }
+
+        for (Npc npc : bucket)
         {
             if (npc.ownerPlayerId == session.playerId)
-            {
-                continue;
-            }
-
-            if (!sharesSyncGroup(session, npc))
             {
                 continue;
             }
@@ -881,11 +962,21 @@ public final class NpcRegistry
             double dx = npc.x - session.posX;
             double dy = npc.y - session.posY;
             double dz = npc.z - session.posZ;
+            double squared = dx * dx + dy * dy + dz * dz;
 
-            if ((dx * dx + dy * dy + dz * dz) <= radiusSquared)
+            double limit = session.knownNpcs.contains(npc.boxedId) ? leaveSquared : enterSquared;
+
+            if (squared > limit)
             {
-                visible.add(npc);
+                continue;
             }
+
+            if (!sharesSyncGroup(session, npc))
+            {
+                continue;
+            }
+
+            visible.add(npc);
         }
 
         return visible;
@@ -938,10 +1029,17 @@ public final class NpcRegistry
         return owned;
     }
 
-    public static void recomputeScaling(List<PlayerSession> sessions, double radiusSquared)
+    public static boolean recomputeScaling(List<PlayerSession> sessions, double radiusSquared)
     {
+        boolean changed = false;
+
         for (Npc npc : npcs.values())
         {
+            if (!npc.alive)
+            {
+                continue;
+            }
+
             int count = 0;
 
             for (PlayerSession session : sessions)
@@ -951,19 +1049,21 @@ public final class NpcRegistry
                     continue;
                 }
 
+                double dx = npc.x - session.posX;
+                double dy = npc.y - session.posY;
+                double dz = npc.z - session.posZ;
+
+                if ((dx * dx + dy * dy + dz * dz) > radiusSquared)
+                {
+                    continue;
+                }
+
                 if (!sharesSyncGroup(session, npc))
                 {
                     continue;
                 }
 
-                double dx = npc.x - session.posX;
-                double dy = npc.y - session.posY;
-                double dz = npc.z - session.posZ;
-
-                if ((dx * dx + dy * dy + dz * dz) <= radiusSquared)
-                {
-                    count++;
-                }
+                count++;
             }
 
             if (count < 1)
@@ -971,9 +1071,18 @@ public final class NpcRegistry
                 count = 1;
             }
 
+            final int milli = NpcScaling.scaleMilliFor(count);
+
+            if (npc.scaleMilli != milli)
+            {
+                changed = true;
+            }
+
             npc.scalePlayerCount = count;
-            npc.scaleMilli = NpcScaling.scaleMilliFor(count);
+            npc.scaleMilli = milli;
         }
+
+        return changed;
     }
 
     public static List<Npc> targetedNpcs()
@@ -998,6 +1107,11 @@ public final class NpcRegistry
         for (Npc npc : npcs.values())
         {
             if (!npc.alive)
+            {
+                continue;
+            }
+
+            if (now < npc.nextHandoverEvalNanos)
             {
                 continue;
             }
@@ -1056,17 +1170,27 @@ public final class NpcRegistry
                     continue;
                 }
 
-                if (!sharesSyncGroup(session, npc))
-                {
-                    continue;
-                }
-
                 if (session.area != npc.area)
                 {
                     continue;
                 }
 
-                if (!session.knownNpcs.contains(npc.npcId))
+                double dx = npc.x - session.posX;
+                double dy = npc.y - session.posY;
+                double dz = npc.z - session.posZ;
+                double squared = (dx * dx) + (dy * dy) + (dz * dz);
+
+                if (squared > radiusSquared)
+                {
+                    continue;
+                }
+
+                if (!session.knownNpcs.contains(npc.boxedId))
+                {
+                    continue;
+                }
+
+                if (!sharesSyncGroup(session, npc))
                 {
                     continue;
                 }
@@ -1081,16 +1205,6 @@ public final class NpcRegistry
                     }
 
                     npc.declinedUntil.remove(session.playerId);
-                }
-
-                double dx = npc.x - session.posX;
-                double dy = npc.y - session.posY;
-                double dz = npc.z - session.posZ;
-                double squared = (dx * dx) + (dy * dy) + (dz * dz);
-
-                if (squared > radiusSquared)
-                {
-                    continue;
                 }
 
                 boolean inHitRange = squared <= HIT_RANGE_SQUARED;
@@ -1125,6 +1239,7 @@ public final class NpcRegistry
 
             if (best == null)
             {
+                npc.nextHandoverEvalNanos = now + HANDOVER_IDLE_EVAL_NANOS;
                 continue;
             }
 
@@ -1153,6 +1268,11 @@ public final class NpcRegistry
                 }
 
                 boolean proximityWin = bestInHitRange && !ownerInHitRange;
+
+                if (!proximityWin && ownerInHitRange && !bestInHitRange)
+                {
+                    continue;
+                }
 
                 if (!proximityWin && (bestLatency + LATENCY_MIGRATION_MARGIN_MS) >= ownerLatency)
                 {

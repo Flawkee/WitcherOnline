@@ -5432,6 +5432,31 @@ statemachine class r_MultiplayerClient
         return false;
     }
 
+    public function canShareNpcsWith(peer : r_RemotePlayer) : bool
+    {
+        if(!peer || peer.serverPlayerId == serverPlayerId)
+        {
+            return false;
+        }
+
+        if(npcSyncIsolated())
+        {
+            return false;
+        }
+
+        if(visibilityFresh() && peer.serverPlayerId > 0)
+        {
+            return sharesNpcScope(peer.serverPlayerId);
+        }
+
+        if(partyId != 0)
+        {
+            return peer.inParty && peer.joinedParty == joinedParty;
+        }
+
+        return !peer.inParty;
+    }
+
     public function applyVisibility(ids : array<int>, scopeIds : array<int>)
     {
         npcScopeIds = scopeIds;

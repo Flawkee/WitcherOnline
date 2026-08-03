@@ -65,6 +65,8 @@ public class PlayerSession
     public final Map<Integer, Integer> sentScales = new ConcurrentHashMap<>();
     public volatile long scalesSentNanos = 0L;
     public volatile int scaleSetId = 0;
+    public volatile long lastScaleEpoch = -1L;
+    public volatile int lastScaleKnownCount = -1;
 
     public volatile int partyId = 0;
     public volatile boolean coopMode = false;

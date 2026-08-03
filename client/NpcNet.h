@@ -28,7 +28,6 @@ namespace w3mp {
 		int hpPermille = -1;
 		int flags = 0;
 		int targetPlayerId = 0;
-		int ageMs = 0;
 		std::string typeCode;
 		std::string appearance;
 	};

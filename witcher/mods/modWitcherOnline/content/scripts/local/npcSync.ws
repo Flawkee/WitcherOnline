@@ -17,8 +17,14 @@ class r_TrackedNpc
     public var baseMaxHealth : float;
     public var appliedScale : int;
     public var questTag   : string;
+    public var appearanceText : string;
+    public var isMonster  : bool;
+    public var cachedForcedTarget : int;
 
     default questTag = "";
+    default appearanceText = "";
+    default isMonster = false;
+    default cachedForcedTarget = 0;
     default baseMaxHealth = -1.0;
     default appliedScale = 1000;
     default lastAttackType = -1;
@@ -55,9 +61,11 @@ class r_Replica
     public var appliedHostile : int;
     public var questTag      : string;
     public var boundLocal    : bool;
+    public var hasTicket     : bool;
 
     default questTag = "";
     default boundLocal = false;
+    default hasTicket = false;
     default baseMaxHealth = -1.0;
     default appliedScale = 1000;
     default appliedHostile = -1;
@@ -79,6 +87,11 @@ class r_NpcSync
     private var enabled       : bool;
     private var debugLogging  : bool;
     private var suspended     : bool;
+    private var gateOpen      : bool;
+    private var gateEverSet   : bool;
+    private var gateAwaySince : float;
+    private var gateFlushUntil : float;
+    private var nextGateAt    : float;
 
     private var tracked       : array<r_TrackedNpc>;
     private var replicas      : array<r_Replica>;
@@ -92,16 +105,23 @@ class r_NpcSync
     private var aggro         : r_NpcAggro;
     private var actions       : r_NpcActions;
 
+    private var lastTickAt    : float;
     private var nextScanAt    : float;
     private var nextPushAt    : float;
     private var nextAggroAt   : float;
     private var nextDebugAt   : float;
+    private var nextDriveTickAt : float;
+    private var nextRejectPruneAt : float;
+    private var nextModeCheckAt : float;
     private var offerWindowAt : float;
     private var offerCount    : int;
     private var nextSkipLogAt : float;
     private var nextScaleAt   : float;
     private var lastScaleGen  : int;
     private var scaleSkipReason : string;
+    private var cachedIsolated : bool;
+    private var reportedPartyId : int;
+    private var scanEntities  : array<CGameplayEntity>;
 
     private var statRegistered : int;
     private var statSpawned    : int;
@@ -141,22 +161,32 @@ class r_NpcSync
     private var reportedSyncMode : int;
     default reportedSyncMode = -1;
 
-    private var reportedScope : string;
     default actionLogging = false;
     default actionForceMode = 1;
 
     default enabled = true;
     default debugLogging = false;
     default suspended = false;
+    default gateOpen = false;
+    default gateEverSet = false;
+    default gateAwaySince = 0.0;
+    default gateFlushUntil = 0.0;
+    default nextGateAt = 0.0;
+    default lastTickAt = 0.0;
     default nextScanAt = 0.0;
     default nextPushAt = 0.0;
     default nextAggroAt = 0.0;
     default nextDebugAt = 0.0;
+    default nextDriveTickAt = 0.0;
+    default nextRejectPruneAt = 0.0;
+    default nextModeCheckAt = 0.0;
     default offerWindowAt = 0.0;
     default offerCount = 0;
     default nextSkipLogAt = 0.0;
     default nextScaleAt = 0.0;
     default lastScaleGen = -1;
+    default cachedIsolated = false;
+    default reportedPartyId = -1;
 
     private var SCAN_RADIUS    : float;
     private var KEEP_RADIUS    : float;
@@ -179,6 +209,12 @@ class r_NpcSync
     private var DAMAGE_CREDIT_RANGE : float;
     private var HIT_REPORT_RANGE : float;
     private var REJECT_MEMORY  : float;
+    private var PEER_RADIUS_ON : float;
+    private var PEER_RADIUS_OFF : float;
+    private var PEER_CLOSE_DELAY : float;
+    private var PEER_STALE     : float;
+    private var GATE_INTERVAL  : float;
+    private var GATE_FLUSH     : float;
     private var OFFERS_PER_SECOND : int;
     private var MAX_TRACKED    : int;
     private var MAX_REPLICAS   : int;
@@ -205,6 +241,12 @@ class r_NpcSync
     default DAMAGE_CREDIT_RANGE = 25.0;
     default HIT_REPORT_RANGE = 12.0;
     default REJECT_MEMORY = 60.0;
+    default PEER_RADIUS_ON = 95.0;
+    default PEER_RADIUS_OFF = 105.0;
+    default PEER_CLOSE_DELAY = 3.0;
+    default PEER_STALE = 5.0;
+    default GATE_INTERVAL = 0.25;
+    default GATE_FLUSH = 1.5;
     default OFFERS_PER_SECOND = 12;
     default MAX_TRACKED = 250;
     default MAX_REPLICAS = 250;
@@ -417,13 +459,16 @@ class r_NpcSync
                 + " code=" + tracked[index].typeCode);
         }
 
-        dbgAction("send guid=" + tracked[index].npcId
-            + " event=" + NameToString(eventName)
-            + " code=" + code
-            + " type=" + tracked[index].actionType
-            + " dir=" + tracked[index].actionDir
-            + " seq=" + tracked[index].actionSeq
-            + " app=" + NameToString(tracked[index].appearance));
+        if(actionLogging || debugLogging)
+        {
+            dbgAction("send guid=" + tracked[index].npcId
+                + " event=" + NameToString(eventName)
+                + " code=" + code
+                + " type=" + tracked[index].actionType
+                + " dir=" + tracked[index].actionDir
+                + " seq=" + tracked[index].actionSeq
+                + " app=" + tracked[index].appearanceText);
+        }
     }
 
     private function applyReplicaAction(record : r_Replica, npc : CNewNPC, flags : int)
@@ -484,14 +529,17 @@ class r_NpcSync
         statActionApplied += 1;
         record.lastActionAt = record.pendingActionAt;
 
-        dbgAction("cmd canonical=" + record.canonicalId
-            + " event=" + NameToString(eventName)
-            + " code=" + code
-            + " type=" + attackType
-            + " dir=" + dir
-            + " seq=" + seq
-            + " forcedRaise=" + raised
-            + " app=" + NameToString(record.appearance));
+        if(actionLogging || debugLogging)
+        {
+            dbgAction("cmd canonical=" + record.canonicalId
+                + " event=" + NameToString(eventName)
+                + " code=" + code
+                + " type=" + attackType
+                + " dir=" + dir
+                + " seq=" + seq
+                + " forcedRaise=" + raised
+                + " app=" + NameToString(record.appearance));
+        }
     }
 
     public function gateAction(actor : CNewNPC) : bool
@@ -499,7 +547,7 @@ class r_NpcSync
         var index : int;
         var now : float;
 
-        if(!actor)
+        if(!actor || !enabled)
         {
             return true;
         }
@@ -524,8 +572,11 @@ class r_NpcSync
         {
             statActionSuppressed += 1;
 
-            dbgAction("suppress canonical=" + replicas[index].canonicalId
-                + " app=" + NameToString(replicas[index].appearance));
+            if(actionLogging || debugLogging)
+            {
+                dbgAction("suppress canonical=" + replicas[index].canonicalId
+                    + " app=" + NameToString(replicas[index].appearance));
+            }
 
             return false;
         }
@@ -544,9 +595,12 @@ class r_NpcSync
         replicas[index].lastActionAt = now;
         statActionAllowed += 1;
 
-        dbgAction("allow canonical=" + replicas[index].canonicalId
-            + " type=" + replicas[index].pendingType
-            + " app=" + NameToString(replicas[index].appearance));
+        if(actionLogging || debugLogging)
+        {
+            dbgAction("allow canonical=" + replicas[index].canonicalId
+                + " type=" + replicas[index].pendingType
+                + " app=" + NameToString(replicas[index].appearance));
+        }
 
         return true;
     }
@@ -594,8 +648,48 @@ class r_NpcSync
         return (int)theGame.GetCommonMapManager().GetCurrentArea();
     }
 
+    private function resetCadence(now : float)
+    {
+        var i : int;
+
+        nextScanAt = 0.0;
+        nextPushAt = 0.0;
+        nextGateAt = 0.0;
+        nextAggroAt = 0.0;
+        nextScaleAt = 0.0;
+        nextDriveTickAt = 0.0;
+        nextRejectPruneAt = 0.0;
+        nextModeCheckAt = 0.0;
+        nextDebugAt = 0.0;
+        nextSkipLogAt = 0.0;
+        offerWindowAt = 0.0;
+        offerCount = 0;
+        gateAwaySince = 0.0;
+        gateFlushUntil = 0.0;
+
+        for(i = 0; i < replicas.Size(); i += 1)
+        {
+            replicas[i].nextDriveAt = 0.0;
+            replicas[i].lastPredictAt = 0.0;
+            replicas[i].lastActionAt = 0.0;
+            replicas[i].pendingActionAt = -1.0;
+        }
+
+        for(i = 0; i < tracked.Size(); i += 1)
+        {
+            tracked[i].lastSeenAt = now;
+        }
+
+        rejectedGuids.Clear();
+        rejectedAt.Clear();
+
+        WO_Note("[npc_sync] engine clock jumped, cadence reset");
+    }
+
     public function update()
     {
+        var classifier : r_EntityClassifier;
+        var coop : bool;
         var now : float;
 
         if(!enabled || !thePlayer)
@@ -605,23 +699,45 @@ class r_NpcSync
 
         now = theGame.GetEngineTimeAsSeconds();
 
-        updateSyncMode();
+        if(lastTickAt != 0.0 && AbsF(now - lastTickAt) > 5.0)
+        {
+            resetCadence(now);
+        }
+
+        lastTickAt = now;
+
+        updateSyncMode(now);
 
         if(updateSuspension(now))
         {
             return;
         }
 
-        if(nextScanAt > now + 5.0)
-        {
-            nextScanAt = 0.0;
-            nextPushAt = 0.0;
-        }
+        updateSyncGate(now);
 
         if(now >= nextScanAt)
         {
             nextScanAt = now + SCAN_INTERVAL;
-            scanOwned(now);
+            coop = coopActive();
+
+            if(gateOpen || coop)
+            {
+                classifier = theGame.r_getMultiplayerClient().getEntityClassifier();
+                classifier.beginScanTick(now);
+
+                scanEntities.Clear();
+                FindGameplayEntitiesInSphere(scanEntities, thePlayer.GetWorldPosition(), KEEP_RADIUS, 512,,,,'CNewNPC');
+            }
+            else if(scanEntities.Size() > 0)
+            {
+                scanEntities.Clear();
+            }
+
+            if(gateOpen)
+            {
+                scanOwned(now);
+            }
+
             scanQuestEnemies(now);
             updateQuestBindings();
         }
@@ -635,7 +751,11 @@ class r_NpcSync
         if(now >= nextPushAt)
         {
             nextPushAt = now + PUSH_INTERVAL;
-            pushOwned(now);
+
+            if(shouldPushOwned(now))
+            {
+                pushOwned(now);
+            }
         }
 
         if(now >= nextScaleAt)
@@ -644,12 +764,23 @@ class r_NpcSync
             updateHealthScaling();
         }
 
-        applyDrops();
+        applyDrops(now);
         applyKillOrders();
-        driveReplicas(now);
+
+        if(now >= nextDriveTickAt)
+        {
+            nextDriveTickAt = now + DRIVE_INTERVAL;
+            driveReplicas(now);
+        }
+
         applyInboundHits(now);
         applyAcks();
-        pruneRejected(now);
+
+        if(now >= nextRejectPruneAt)
+        {
+            nextRejectPruneAt = now + 1.0;
+            pruneRejected(now);
+        }
 
         if(debugLogging && now >= nextDebugAt)
         {
@@ -704,11 +835,185 @@ class r_NpcSync
         {
             nextScanAt = 0.0;
             nextPushAt = 0.0;
+            nextGateAt = 0.0;
 
             dbg("npc_suspend", "resumed");
         }
 
         return suspended;
+    }
+
+    private function hasSyncPeer() : bool
+    {
+        var client : r_MultiplayerClient;
+        var list : array<r_RemotePlayer>;
+        var peer : r_RemotePlayer;
+        var myPos : Vector;
+        var myArea : int;
+        var now : float;
+        var limit : float;
+        var i : int;
+
+        client = theGame.r_getMultiplayerClient();
+
+        if(cachedIsolated)
+        {
+            return false;
+        }
+
+        list = client.getPlayers();
+
+        if(list.Size() == 0)
+        {
+            return false;
+        }
+
+        myPos = thePlayer.GetWorldPosition();
+        myArea = currentArea();
+        now = theGame.GetEngineTimeAsSeconds();
+
+        if(gateOpen)
+        {
+            limit = PEER_RADIUS_OFF;
+        }
+        else
+        {
+            limit = PEER_RADIUS_ON;
+        }
+
+        for(i = 0; i < list.Size(); i += 1)
+        {
+            peer = list[i];
+
+            if(!peer || peer.serverPlayerId <= 0)
+            {
+                continue;
+            }
+
+            if((int)peer.area != myArea)
+            {
+                continue;
+            }
+
+            if((now - peer.lastUpdate) > PEER_STALE)
+            {
+                continue;
+            }
+
+            if(!client.canShareNpcsWith(peer))
+            {
+                continue;
+            }
+
+            if(VecDistance(myPos, peer.pos) <= limit)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function updateSyncGate(now : float)
+    {
+        var peer : bool;
+
+        if(now < nextGateAt)
+        {
+            return;
+        }
+
+        nextGateAt = now + GATE_INTERVAL;
+        peer = hasSyncPeer();
+
+        if(peer)
+        {
+            gateAwaySince = 0.0;
+
+            if(gateOpen && gateEverSet)
+            {
+                return;
+            }
+
+            gateOpen = true;
+            gateEverSet = true;
+            nextScanAt = 0.0;
+            nextPushAt = 0.0;
+
+            rejectedGuids.Clear();
+            rejectedAt.Clear();
+
+            dbg("npc_gate", "open: a peer is within " + PEER_RADIUS_ON + "m");
+            return;
+        }
+
+        if(!gateOpen)
+        {
+            if(!gateEverSet)
+            {
+                gateEverSet = true;
+                dbg("npc_gate", "closed: no peer in range");
+            }
+
+            return;
+        }
+
+        if(gateAwaySince == 0.0)
+        {
+            gateAwaySince = now;
+            return;
+        }
+
+        if((now - gateAwaySince) < PEER_CLOSE_DELAY)
+        {
+            return;
+        }
+
+        gateOpen = false;
+        gateAwaySince = 0.0;
+        gateFlushUntil = now + GATE_FLUSH;
+
+        releaseOwnedForGate();
+
+        dbg("npc_gate", "closed: no peer within " + PEER_RADIUS_OFF + "m");
+    }
+
+    private function releaseOwnedForGate()
+    {
+        var released : int;
+        var i : int;
+
+        for(i = tracked.Size() - 1; i >= 0; i -= 1)
+        {
+            if(tracked[i].questTag == "")
+            {
+                tracked.Erase(i);
+                released += 1;
+            }
+        }
+
+        rejectedGuids.Clear();
+        rejectedAt.Clear();
+
+        if(released > 0)
+        {
+            dbg("npc_gate", "released " + released + " owned npc(s)");
+        }
+    }
+
+    private function shouldPushOwned(now : float) : bool
+    {
+        return gateOpen || now < gateFlushUntil || tracked.Size() > 0;
+    }
+
+    private function gateLabel() : string
+    {
+        if(gateOpen)
+        {
+            return "open";
+        }
+
+        return "closed";
     }
 
     private function isRejected(guid : int) : bool
@@ -796,6 +1101,16 @@ class r_NpcSync
                 seen += 1;
             }
 
+            if(scale == applied && baseMax > 0.0)
+            {
+                if(applied != 1000)
+                {
+                    scaled += 1;
+                }
+
+                continue;
+            }
+
             applyHealthScale(tracked[i].actor, scale, baseMax, applied);
 
             tracked[i].baseMaxHealth = baseMax;
@@ -821,6 +1136,16 @@ class r_NpcSync
             if(scale != 1000)
             {
                 seen += 1;
+            }
+
+            if(scale == applied && baseMax > 0.0)
+            {
+                if(applied != 1000)
+                {
+                    scaled += 1;
+                }
+
+                continue;
             }
 
             applyHealthScale(replicas[i].actor, scale, baseMax, applied);
@@ -988,7 +1313,7 @@ class r_NpcSync
             flags += 2;
         }
 
-        if(npc.IsMonster())
+        if(record.isMonster)
         {
             flags += 4;
         }
@@ -1008,6 +1333,8 @@ class r_NpcSync
 
     private function isSyncable(npc : CNewNPC, classifier : r_EntityClassifier) : bool
     {
+        var sample : r_SEntityClassSample;
+
         if(!npc || npc == thePlayer)
         {
             return false;
@@ -1023,12 +1350,14 @@ class r_NpcSync
             return false;
         }
 
-        if(!classifier.isSyncEligible(npc))
+        classifier.classify(npc, sample);
+
+        if(!sample.syncEligible)
         {
             return false;
         }
 
-        if(classifier.looksQuestBound(npc))
+        if(sample.entityClass == REC_Quest)
         {
             noteQuestLeak(npc, classifier);
             return false;
@@ -1200,7 +1529,6 @@ class r_NpcSync
 
     private function scanOwned(now : float)
     {
-        var entities : array<CGameplayEntity>;
         var npc : CNewNPC;
         var classifier : r_EntityClassifier;
         var record : r_TrackedNpc;
@@ -1224,15 +1552,12 @@ class r_NpcSync
         classifier = theGame.r_getMultiplayerClient().getEntityClassifier();
         playerPos = thePlayer.GetWorldPosition();
 
-        FindGameplayEntitiesInSphere(entities, playerPos, KEEP_RADIUS, 512,,,,'CNewNPC');
-
-        for(i = 0; i < entities.Size(); i += 1)
+        for(i = 0; i < scanEntities.Size(); i += 1)
         {
-            npc = (CNewNPC)entities[i];
+            npc = (CNewNPC)scanEntities[i];
 
-            if(!isSyncable(npc, classifier))
+            if(!npc || npc == thePlayer)
             {
-                noteSkipped(npc, classifier, now);
                 continue;
             }
 
@@ -1240,25 +1565,19 @@ class r_NpcSync
 
             if(index >= 0)
             {
-                if(tracked[index].questTag == "" && !isSyncable(npc, classifier))
+                if(tracked[index].questTag != "" || isSyncable(npc, classifier))
                 {
-                    dbg("npc_offer", "released guid=" + tracked[index].npcId
-                        + " no longer eligible");
-
-                    tracked.Erase(index);
-                    continue;
+                    tracked[index].lastSeenAt = now;
                 }
 
-                tracked[index].lastSeenAt = now;
                 continue;
             }
 
-            if(!npc.IsAlive() || healthPermille(npc) <= 0)
+            if(!npc.IsAlive())
             {
                 continue;
             }
 
-            pos = npc.GetWorldPosition();
             guid = npc.GetGuidHash();
 
             if(guid == 0 || tracked.Size() >= MAX_TRACKED)
@@ -1266,12 +1585,25 @@ class r_NpcSync
                 continue;
             }
 
+            if(isRejected(guid))
+            {
+                continue;
+            }
+
+            pos = npc.GetWorldPosition();
+
             if(VecDistance(playerPos, pos) > SCAN_RADIUS)
             {
                 continue;
             }
 
-            if(isRejected(guid))
+            if(!isSyncable(npc, classifier))
+            {
+                noteSkipped(npc, classifier, now);
+                continue;
+            }
+
+            if(healthPermille(npc) <= 0)
             {
                 continue;
             }
@@ -1289,14 +1621,17 @@ class r_NpcSync
 
             if(replicaCount > 0)
             {
-                localCount = countLocalOfSpecies(typeCode, pos, entities, classifier);
+                localCount = countLocalOfSpecies(typeCode, pos, scanEntities, classifier);
 
                 if(replicaCount >= localCount)
                 {
-                    dbg("npc_offer", "prefiltered duplicate app=" + NameToString(npc.GetAppearance())
-                        + " code=" + typeCode
-                        + " replicas=" + replicaCount
-                        + " local=" + localCount);
+                    if(debugLogging)
+                    {
+                        dbg("npc_offer", "prefiltered duplicate app=" + NameToString(npc.GetAppearance())
+                            + " code=" + typeCode
+                            + " replicas=" + replicaCount
+                            + " local=" + localCount);
+                    }
 
                     npc.Destroy();
                     statPrefiltered += 1;
@@ -1317,6 +1652,8 @@ class r_NpcSync
             record.npcId = guid;
             record.actor = npc;
             record.appearance = npc.GetAppearance();
+            record.appearanceText = NameToString(record.appearance);
+            record.isMonster = npc.IsMonster();
             record.typeCode = typeCode;
             record.lastSeenAt = now;
             record.lastHp = -1;
@@ -1325,10 +1662,13 @@ class r_NpcSync
             tracked.PushBack(record);
             statRegistered += 1;
 
-            dbg("npc_offer", "offered guid=" + guid
-                + " code=" + typeCode
-                + " app=" + NameToString(record.appearance)
-                + " localCount=" + localCount);
+            if(debugLogging)
+            {
+                dbg("npc_offer", "offered guid=" + guid
+                    + " code=" + typeCode
+                    + " app=" + record.appearanceText
+                    + " localCount=" + localCount);
+            }
         }
     }
 
@@ -1374,7 +1714,6 @@ class r_NpcSync
 
     private function scanQuestEnemies(now : float)
     {
-        var entities : array<CGameplayEntity>;
         var classifier : r_EntityClassifier;
         var record : r_TrackedNpc;
         var npc : CNewNPC;
@@ -1419,11 +1758,9 @@ class r_NpcSync
             }
         }
 
-        FindGameplayEntitiesInSphere(entities, thePlayer.GetWorldPosition(), KEEP_RADIUS, 512,,,,'CNewNPC');
-
-        for(i = 0; i < entities.Size(); i += 1)
+        for(i = 0; i < scanEntities.Size(); i += 1)
         {
-            npc = (CNewNPC)entities[i];
+            npc = (CNewNPC)scanEntities[i];
 
             if(!npc || npc == thePlayer || isReplicaActor(npc) || isQuestBoundActor(npc))
             {
@@ -1465,6 +1802,8 @@ class r_NpcSync
                     tracked[index].actor = npc;
                     tracked[index].npcId = guid;
                     tracked[index].appearance = npc.GetAppearance();
+                    tracked[index].appearanceText = NameToString(tracked[index].appearance);
+                    tracked[index].isMonster = npc.IsMonster();
 
                     dbg("npc_quest", "owned tag=" + questTag + " rebound to guid=" + guid);
                 }
@@ -1481,6 +1820,8 @@ class r_NpcSync
             record.npcId = guid;
             record.actor = npc;
             record.appearance = npc.GetAppearance();
+            record.appearanceText = NameToString(record.appearance);
+            record.isMonster = npc.IsMonster();
             record.typeCode = "quest:" + questTag;
             record.questTag = questTag;
             record.lastSeenAt = now;
@@ -1495,7 +1836,6 @@ class r_NpcSync
 
     private function bindQuestReplica(record : r_Replica) : bool
     {
-        var entities : array<CGameplayEntity>;
         var classifier : r_EntityClassifier;
         var npc : CNewNPC;
         var index : int;
@@ -1508,11 +1848,9 @@ class r_NpcSync
 
         classifier = theGame.r_getMultiplayerClient().getEntityClassifier();
 
-        FindGameplayEntitiesInSphere(entities, thePlayer.GetWorldPosition(), KEEP_RADIUS, 512,,,,'CNewNPC');
-
-        for(i = 0; i < entities.Size(); i += 1)
+        for(i = 0; i < scanEntities.Size(); i += 1)
         {
-            npc = (CNewNPC)entities[i];
+            npc = (CNewNPC)scanEntities[i];
 
             if(!npc || npc == thePlayer || isReplicaActor(npc) || isQuestBoundActor(npc))
             {
@@ -1733,15 +2071,26 @@ class r_NpcSync
         return "standalone";
     }
 
-    private function updateSyncMode()
+    private function updateSyncMode(now : float)
     {
+        var client : r_MultiplayerClient;
         var mode : int;
-        var scope : string;
+        var partyId : int;
 
-        mode = theGame.r_getMultiplayerClient().getNpcSyncMode();
-        scope = syncScopeLabel();
+        if(now < nextModeCheckAt)
+        {
+            return;
+        }
 
-        if(mode == reportedSyncMode && scope == reportedScope)
+        nextModeCheckAt = now + 0.5;
+
+        client = theGame.r_getMultiplayerClient();
+        mode = client.getNpcSyncMode();
+        partyId = client.getPartyId();
+
+        cachedIsolated = (mode == 1 && partyId == 0);
+
+        if(mode == reportedSyncMode && partyId == reportedPartyId)
         {
             return;
         }
@@ -1752,32 +2101,45 @@ class r_NpcSync
         }
 
         reportedSyncMode = mode;
-        reportedScope = scope;
+        reportedPartyId = partyId;
 
-        WO_Note("[npc_sync] config=" + (mode == 0 ? "world" : "party")
-            + " scope=" + scope);
+        WO_Note("[npc_sync] config=" + modeLabel(mode) + " scope=" + syncScopeLabel());
+    }
+
+    private function modeLabel(mode : int) : string
+    {
+        if(mode == 0)
+        {
+            return "world";
+        }
+
+        return "party";
     }
 
     private function pushOwned(now : float)
     {
+        var client : r_MultiplayerClient;
         var npc : CNewNPC;
         var pos : Vector;
         var area : int;
+        var localId : int;
         var forced : int;
         var targetId : int;
         var hp : int;
         var i : int;
 
-        area = currentArea();
-
         WO_NpcBeginOwned();
 
-        if(theGame.r_getMultiplayerClient().npcSyncIsolated())
+        if(cachedIsolated)
         {
             WO_NpcEndOwned();
             pollOwnedAttackVars(now);
             return;
         }
+
+        area = currentArea();
+        client = theGame.r_getMultiplayerClient();
+        localId = client.getServerId();
 
         for(i = 0; i < tracked.Size(); i += 1)
         {
@@ -1791,7 +2153,7 @@ class r_NpcSync
             pos = npc.GetWorldPosition();
             hp = healthPermille(npc);
 
-            forced = getAggro().forcedTargetOf(tracked[i].npcId);
+            forced = tracked[i].cachedForcedTarget;
 
             if(forced > 0)
             {
@@ -1799,12 +2161,12 @@ class r_NpcSync
             }
             else
             {
-                targetId = theGame.r_getMultiplayerClient().encodeTargetPlayerId(npc.GetTarget());
+                targetId = client.encodeTargetPlayerId(npc.GetTarget());
             }
 
             if(targetId > 0
-                && targetId != theGame.r_getMultiplayerClient().getServerId()
-                && !theGame.r_getMultiplayerClient().sharesNpcScope(targetId))
+                && targetId != localId
+                && !client.sharesNpcScope(targetId))
             {
                 targetId = 0;
             }
@@ -1814,7 +2176,7 @@ class r_NpcSync
                 area,
                 tracked[i].offerLocalCount,
                 tracked[i].typeCode,
-                NameToString(tracked[i].appearance),
+                tracked[i].appearanceText,
                 pos.X, pos.Y, pos.Z,
                 npc.GetHeading(),
                 hp,
@@ -1865,9 +2227,12 @@ class r_NpcSync
                 replicas[i].lastLocalHp = healthPermille(actor);
                 statHitsSent += 1;
 
-                dbg("npc_hit", "sent (exact) canonical=" + replicas[i].canonicalId
-                    + " permille=" + permille
-                    + " dealt=" + dealt);
+                if(debugLogging)
+                {
+                    dbg("npc_hit", "sent (exact) canonical=" + replicas[i].canonicalId
+                        + " permille=" + permille
+                        + " dealt=" + dealt);
+                }
             }
 
             return;
@@ -1920,14 +2285,13 @@ class r_NpcSync
         return false;
     }
 
-    private function applyDrops()
+    private function applyDrops(now : float)
     {
         var entities : array<CGameplayEntity>;
         var gathered : bool;
         var count : int;
         var guid : int;
         var index : int;
-        var now : float;
         var i : int;
 
         count = WO_NpcDropCount();
@@ -1937,7 +2301,6 @@ class r_NpcSync
             return;
         }
 
-        now = theGame.GetEngineTimeAsSeconds();
         gathered = false;
 
         for(i = 0; i < count; i += 1)
@@ -2207,9 +2570,12 @@ class r_NpcSync
             npc.ResetAttitude(thePlayer);
         }
 
-        dbg("npc_attitude", "canonical=" + record.canonicalId
-            + " hostile=" + desired
-            + " app=" + NameToString(record.appearance));
+        if(debugLogging)
+        {
+            dbg("npc_attitude", "canonical=" + record.canonicalId
+                + " hostile=" + desired
+                + " app=" + NameToString(record.appearance));
+        }
     }
 
     private function prepareReplica(record : r_Replica)
@@ -2310,6 +2676,8 @@ class r_NpcSync
         owned.npcId = npc.GetGuidHash();
         owned.actor = npc;
         owned.appearance = npc.GetAppearance();
+        owned.appearanceText = NameToString(owned.appearance);
+        owned.isMonster = npc.IsMonster();
         owned.typeCode = record.typeCode;
         owned.questTag = record.questTag;
         owned.lastSeenAt = now;
@@ -2391,6 +2759,29 @@ class r_NpcSync
 
         record.nextDriveAt = now + DRIVE_INTERVAL;
 
+        if(distance < FREE_RADIUS
+            || ((now - record.lastActionAt) < ACTION_FREE_WINDOW && distance < ACTION_FREE_RADIUS))
+        {
+            if(record.hasTicket)
+            {
+                agent = npc.GetMovingAgentComponent();
+
+                if(agent)
+                {
+                    adjustor = agent.GetMovementAdjustor();
+
+                    if(adjustor)
+                    {
+                        adjustor.Cancel(adjustor.GetRequest('wo_replica'));
+                    }
+                }
+
+                record.hasTicket = false;
+            }
+
+            return;
+        }
+
         agent = npc.GetMovingAgentComponent();
 
         if(!agent)
@@ -2403,16 +2794,6 @@ class r_NpcSync
         if(adjustor)
         {
             adjustor.Cancel(adjustor.GetRequest('wo_replica'));
-        }
-
-        if(distance < FREE_RADIUS)
-        {
-            return;
-        }
-
-        if((now - record.lastActionAt) < ACTION_FREE_WINDOW && distance < ACTION_FREE_RADIUS)
-        {
-            return;
         }
 
         if(distance > 0.15)
@@ -2441,6 +2822,8 @@ class r_NpcSync
         adjustor.ScaleAnimationLocationVertically(ticket, true);
         adjustor.RotateTo(ticket, heading);
         adjustor.SlideTo(ticket, target);
+
+        record.hasTicket = true;
     }
 
     private function applyReplicaTarget(record : r_Replica, npc : CNewNPC, targetPlayerId : int)
@@ -2470,7 +2853,10 @@ class r_NpcSync
         record.appliedTarget = targetPlayerId;
         statTargets += 1;
 
-        dbg("npc_target", "canonical=" + record.canonicalId + " player=" + targetPlayerId);
+        if(debugLogging)
+        {
+            dbg("npc_target", "canonical=" + record.canonicalId + " player=" + targetPlayerId);
+        }
     }
 
     private function reconcileReplicaHealth(record : r_Replica, npc : CNewNPC, authorityPermille : int, now : float)
@@ -2558,11 +2944,14 @@ class r_NpcSync
             {
                 statHitsApplied += 1;
 
-                dbg("npc_hit", "applied npc=" + guid
-                    + " attacker=" + attackerId
-                    + " permille=" + permille
-                    + " damage=" + applied
-                    + " hp=" + resulting);
+                if(debugLogging)
+                {
+                    dbg("npc_hit", "applied npc=" + guid
+                        + " attacker=" + attackerId
+                        + " permille=" + permille
+                        + " damage=" + applied
+                        + " hp=" + resulting);
+                }
             }
             else
             {
@@ -2697,6 +3086,7 @@ class r_NpcSync
             + " localDamage=" + statLocalDamage
             + " noTemplate=" + statNoTemplate
             + " scope=" + syncScopeLabel()
+            + " gate=" + gateLabel()
             + " templateResolves=" + statTemplateResolves
             + " pathCache=" + pathCacheCount
             + " suspends=" + statSuspends

@@ -3,6 +3,8 @@
 #include "Diagnostics.h"
 
 #include <algorithm>
+#include <atomic>
+#include <charconv>
 #include <cmath>
 #include <deque>
 #include <mutex>
@@ -19,15 +21,13 @@ namespace w3mp {
 		constexpr long long kMaxInterpDelayMs = 400;
 		constexpr int kDefaultSnapshotHz = 40;
 		constexpr int kMaxExtrapolationMs = 250;
-		constexpr int kReplicaSampleCap = 24;
-		constexpr int kOwnedHistoryMs = 1500;
-		constexpr int kOwnedHistoryCap = 40;
+		constexpr int kReplicaSampleCap = 12;
 		constexpr int kAddPerPacket = 8;
 		constexpr int kUpdPerPacket = 20;
 		constexpr int kDelPerPacket = 40;
-		constexpr int kMaxPacketsPerSend = 8;
 		constexpr int kMaxAddPacketsPerSend = 4;
 		constexpr int kMaxUpdPacketsPerSend = 8;
+		constexpr size_t kMaxPacketBytes = 1050;
 		constexpr int kWantPerPacket = 16;
 		constexpr int kWantIntervalMs = 700;
 		constexpr int kSpawnAttemptLimit = 3;
@@ -79,8 +79,6 @@ namespace w3mp {
 			int sentHp = -2;
 			int sentFlags = -1;
 			int sentTarget = -1;
-
-			std::deque<TransformSample> history;
 		};
 
 		struct Replica
@@ -144,8 +142,14 @@ namespace w3mp {
 		int g_latencyMs = 0;
 		int g_rttMs = 0;
 		int g_syncMode = 0;
-		long long g_nextTimeSyncMs = 0;
+		std::atomic<long long> g_nextTimeSyncMs{ 0 };
+		std::atomic<int> g_pendingCount{ 0 };
+		std::atomic<unsigned long long> g_commandsGeneration{ 0 };
 		long long g_nextSnapshotMs = 0;
+		long long g_batchNowMs = 0;
+		long long g_batchServerMs = 0;
+
+		using Outbox = std::vector<std::pair<const char*, std::vector<std::string>>>;
 
 		int g_nextEventId = 1;
 
@@ -172,7 +176,18 @@ namespace w3mp {
 
 		long long NowMs()
 		{
-			return static_cast<long long>(GetTickCount64());
+			static const long long frequency = []
+			{
+				LARGE_INTEGER value;
+				QueryPerformanceFrequency(&value);
+				return static_cast<long long>(value.QuadPart);
+			}();
+
+			LARGE_INTEGER counter;
+			QueryPerformanceCounter(&counter);
+
+			return (static_cast<long long>(counter.QuadPart) / frequency) * 1000ll
+				+ ((static_cast<long long>(counter.QuadPart) % frequency) * 1000ll) / frequency;
 		}
 
 		long long ServerNow()
@@ -185,14 +200,11 @@ namespace w3mp {
 			if (index >= fields.size())
 				return 0;
 
-			try
-			{
-				return std::stoi(fields[index]);
-			}
-			catch (...)
-			{
-				return 0;
-			}
+			const std::string& text = fields[index];
+			int value = 0;
+			std::from_chars(text.data(), text.data() + text.size(), value);
+
+			return value;
 		}
 
 		long long ParseLong(const std::vector<std::string>& fields, size_t index)
@@ -200,14 +212,11 @@ namespace w3mp {
 			if (index >= fields.size())
 				return 0;
 
-			try
-			{
-				return std::stoll(fields[index]);
-			}
-			catch (...)
-			{
-				return 0;
-			}
+			const std::string& text = fields[index];
+			long long value = 0;
+			std::from_chars(text.data(), text.data() + text.size(), value);
+
+			return value;
 		}
 
 		float ParseFloat(const std::vector<std::string>& fields, size_t index)
@@ -215,14 +224,11 @@ namespace w3mp {
 			if (index >= fields.size())
 				return 0.0f;
 
-			try
-			{
-				return std::stof(fields[index]);
-			}
-			catch (...)
-			{
-				return 0.0f;
-			}
+			const std::string& text = fields[index];
+			float value = 0.0f;
+			std::from_chars(text.data(), text.data() + text.size(), value);
+
+			return value;
 		}
 
 		const std::string& Field(const std::vector<std::string>& fields, size_t index)
@@ -234,7 +240,15 @@ namespace w3mp {
 		std::string FormatFloat(float value)
 		{
 			char buffer[32];
-			sprintf_s(buffer, sizeof(buffer), "%.2f", value);
+			long long scaled = llround(static_cast<double>(value) * 100.0);
+			const bool negative = scaled < 0;
+
+			if (negative)
+				scaled = -scaled;
+
+			sprintf_s(buffer, sizeof(buffer), negative ? "-%lld.%02lld" : "%lld.%02lld",
+				scaled / 100, scaled % 100);
+
 			return buffer;
 		}
 
@@ -250,42 +264,30 @@ namespace w3mp {
 			return delta;
 		}
 
-		void TrimHistory(std::deque<TransformSample>& history, long long now, int windowMs, int cap)
+		int ComputeMask(const OwnedEntity& entity)
 		{
-			while (!history.empty() && (now - history.front().t) > windowMs)
-				history.pop_front();
+			int mask = 0;
 
-			while (static_cast<int>(history.size()) > cap)
-				history.pop_front();
-		}
-
-		bool NeedsUpdate(const OwnedEntity& entity, long long now)
-		{
-			if (!entity.registered)
-				return true;
-
-			if (entity.hpPermille != entity.sentHp)
-				return true;
-
-			if (entity.flags != entity.sentFlags)
-				return true;
-
-			if (entity.targetPlayerId != entity.sentTarget)
-				return true;
-
-			if (std::fabs(entity.x - entity.sentX) > kPositionDeadband)
-				return true;
-
-			if (std::fabs(entity.y - entity.sentY) > kPositionDeadband)
-				return true;
-
-			if (std::fabs(entity.z - entity.sentZ) > kPositionDeadband)
-				return true;
+			if (std::fabs(entity.x - entity.sentX) > kPositionDeadband
+				|| std::fabs(entity.y - entity.sentY) > kPositionDeadband
+				|| std::fabs(entity.z - entity.sentZ) > kPositionDeadband)
+			{
+				mask |= 1;
+			}
 
 			if (std::fabs(ShortestAngle(entity.sentHeading, entity.heading)) > kHeadingDeadband)
-				return true;
+				mask |= 2;
 
-			return (now - entity.lastSentMs) >= kKeepaliveMs;
+			if (entity.hpPermille != entity.sentHp)
+				mask |= 4;
+
+			if (entity.flags != entity.sentFlags)
+				mask |= 8;
+
+			if (entity.targetPlayerId != entity.sentTarget)
+				mask |= 16;
+
+			return mask;
 		}
 
 		void MarkSent(OwnedEntity& entity, long long now)
@@ -300,13 +302,35 @@ namespace w3mp {
 			entity.lastSentMs = now;
 		}
 
-		void PushSnapshotHeader(std::vector<std::string>& fields, long long snapshotMs, int count)
+		size_t FieldsBytes(const std::vector<std::string>& fields, size_t fromIndex)
 		{
-			fields.insert(fields.begin(), std::to_string(count));
-			fields.insert(fields.begin(), std::to_string(snapshotMs));
+			size_t total = 0;
+
+			for (size_t i = fromIndex; i < fields.size(); ++i)
+				total += fields[i].size() + 1;
+
+			return total;
 		}
 
-		void FlushOwned(long long now)
+		void QueuePacket(Outbox& outbox, const char* opcode, std::vector<std::string>&& fields)
+		{
+			outbox.emplace_back(opcode, std::move(fields));
+		}
+
+		void BeginSnapshotFields(std::vector<std::string>& fields)
+		{
+			fields.clear();
+			fields.push_back(std::string());
+			fields.push_back(std::string());
+		}
+
+		void SealSnapshotFields(std::vector<std::string>& fields, long long snapshotMs, int count)
+		{
+			fields[0] = std::to_string(snapshotMs);
+			fields[1] = std::to_string(count);
+		}
+
+		void FlushOwned(long long now, Outbox& outbox)
 		{
 			const long long snapshotMs = ServerNow();
 
@@ -316,29 +340,45 @@ namespace w3mp {
 			int addCount = 0;
 			int updCount = 0;
 			int delCount = 0;
-			int packets = 0;
+			size_t addBytes = 0;
+			size_t updBytes = 0;
+
+			addFields.reserve(kAddPerPacket * 12 + 2);
+			updFields.reserve(kUpdPerPacket * 9 + 2);
 
 			for (int guid : g_ownedRemoved)
 			{
-				if (delCount >= kDelPerPacket)
-					break;
-
 				delFields.push_back(std::to_string(guid));
 				delFields.push_back("0");
 				delCount++;
+				g_statRemovals++;
+
+				if (delCount >= kDelPerPacket)
+				{
+					delFields.insert(delFields.begin(), std::to_string(delCount));
+					QueuePacket(outbox, "NPCDEL", std::move(delFields));
+					delFields = std::vector<std::string>();
+					delCount = 0;
+				}
 			}
 
 			g_ownedRemoved.clear();
 
+			if (delCount > 0)
+			{
+				delFields.insert(delFields.begin(), std::to_string(delCount));
+				QueuePacket(outbox, "NPCDEL", std::move(delFields));
+			}
+
 			int addPackets = 0;
 			int updPackets = 0;
+
+			BeginSnapshotFields(addFields);
+			BeginSnapshotFields(updFields);
 
 			for (auto& pair : g_owned)
 			{
 				OwnedEntity& entity = pair.second;
-
-				if (!NeedsUpdate(entity, now))
-					continue;
 
 				if (!entity.registered)
 				{
@@ -347,6 +387,8 @@ namespace w3mp {
 						g_statAddBudgetHit++;
 						continue;
 					}
+
+					const size_t before = addFields.size();
 
 					addFields.push_back(std::to_string(entity.guid));
 					addFields.push_back(std::to_string(entity.area));
@@ -364,20 +406,28 @@ namespace w3mp {
 					entity.registered = true;
 					MarkSent(entity, now);
 					addCount++;
+					addBytes += FieldsBytes(addFields, before);
 					g_statAdds++;
 
-					if (addCount >= kAddPerPacket)
+					if (addCount >= kAddPerPacket || addBytes >= kMaxPacketBytes)
 					{
-						PushSnapshotHeader(addFields, snapshotMs, addCount);
-						Send("NPCADD", addFields);
-						addFields.clear();
+						SealSnapshotFields(addFields, snapshotMs, addCount);
+						QueuePacket(outbox, "NPCADD", std::move(addFields));
+						addFields = std::vector<std::string>();
+						BeginSnapshotFields(addFields);
 						addCount = 0;
+						addBytes = 0;
 						addPackets++;
-						packets++;
 					}
 
 					continue;
 				}
+
+				const int mask = ComputeMask(entity);
+				const bool keepalive = (now - entity.lastSentMs) >= kKeepaliveMs;
+
+				if (mask == 0 && !keepalive)
+					continue;
 
 				if (updPackets >= kMaxUpdPacketsPerSend)
 				{
@@ -385,47 +435,57 @@ namespace w3mp {
 					continue;
 				}
 
+				const size_t before = updFields.size();
+
 				updFields.push_back(std::to_string(entity.guid));
-				updFields.push_back(FormatFloat(entity.x));
-				updFields.push_back(FormatFloat(entity.y));
-				updFields.push_back(FormatFloat(entity.z));
-				updFields.push_back(FormatFloat(entity.heading));
-				updFields.push_back(std::to_string(entity.hpPermille));
-				updFields.push_back(std::to_string(entity.flags));
-				updFields.push_back(std::to_string(entity.targetPlayerId));
+				updFields.push_back(std::to_string(mask));
+
+				if (mask & 1)
+				{
+					updFields.push_back(FormatFloat(entity.x));
+					updFields.push_back(FormatFloat(entity.y));
+					updFields.push_back(FormatFloat(entity.z));
+				}
+
+				if (mask & 2)
+					updFields.push_back(FormatFloat(entity.heading));
+
+				if (mask & 4)
+					updFields.push_back(std::to_string(entity.hpPermille));
+
+				if (mask & 8)
+					updFields.push_back(std::to_string(entity.flags));
+
+				if (mask & 16)
+					updFields.push_back(std::to_string(entity.targetPlayerId));
 
 				MarkSent(entity, now);
 				updCount++;
+				updBytes += FieldsBytes(updFields, before);
 				g_statUpdates++;
 
-				if (updCount >= kUpdPerPacket)
+				if (updCount >= kUpdPerPacket || updBytes >= kMaxPacketBytes)
 				{
-					PushSnapshotHeader(updFields, snapshotMs, updCount);
-					Send("NPCUPD", updFields);
-					updFields.clear();
+					SealSnapshotFields(updFields, snapshotMs, updCount);
+					QueuePacket(outbox, "NPCUPD", std::move(updFields));
+					updFields = std::vector<std::string>();
+					BeginSnapshotFields(updFields);
 					updCount = 0;
+					updBytes = 0;
 					updPackets++;
-					packets++;
 				}
 			}
 
 			if (addCount > 0)
 			{
-				PushSnapshotHeader(addFields, snapshotMs, addCount);
-				Send("NPCADD", addFields);
+				SealSnapshotFields(addFields, snapshotMs, addCount);
+				QueuePacket(outbox, "NPCADD", std::move(addFields));
 			}
 
 			if (updCount > 0)
 			{
-				PushSnapshotHeader(updFields, snapshotMs, updCount);
-				Send("NPCUPD", updFields);
-			}
-
-			if (delCount > 0)
-			{
-				delFields.insert(delFields.begin(), std::to_string(delCount));
-				Send("NPCDEL", delFields);
-				g_statRemovals += delCount;
+				SealSnapshotFields(updFields, snapshotMs, updCount);
+				QueuePacket(outbox, "NPCUPD", std::move(updFields));
 			}
 
 			g_statSnapshotsSent++;
@@ -442,7 +502,7 @@ namespace w3mp {
 				g_sender("TSYNC", fields);
 		}
 
-		void FlushAcks()
+		void FlushAcks(Outbox& outbox)
 		{
 			if (g_ackQueue.empty())
 				return;
@@ -465,7 +525,7 @@ namespace w3mp {
 				return;
 
 			fields.insert(fields.begin(), std::to_string(count));
-			Send("NPCACK", fields);
+			QueuePacket(outbox, "NPCACK", std::move(fields));
 		}
 
 		bool Interpolate(Replica& replica, long long renderTime, ReplicaCommand& command)
@@ -479,7 +539,6 @@ namespace w3mp {
 			command.hpPermille = newest.hpPermille;
 			command.flags = newest.flags;
 			command.targetPlayerId = newest.targetPlayerId;
-			command.ageMs = static_cast<int>(ServerNow() - newest.t);
 
 			if (replica.samples.size() == 1 || renderTime <= oldest.t)
 			{
@@ -729,6 +788,7 @@ namespace w3mp {
 		g_hits.clear();
 		g_acks.clear();
 		g_pending.clear();
+		g_pendingCount.store(0, std::memory_order_relaxed);
 		g_ackQueue.clear();
 		g_scales.clear();
 		g_scaleStaging.clear();
@@ -1081,6 +1141,7 @@ namespace w3mp {
 
 					ack.canonicalId = g_pending[p].canonicalId;
 					g_pending.erase(g_pending.begin() + p);
+					g_pendingCount.store(static_cast<int>(g_pending.size()), std::memory_order_relaxed);
 					break;
 				}
 
@@ -1103,13 +1164,21 @@ namespace w3mp {
 
 	void NpcNet::Tick()
 	{
+		const long long probe = NowMs();
+
+		if (probe < g_nextTimeSyncMs.load(std::memory_order_relaxed)
+			&& g_pendingCount.load(std::memory_order_relaxed) == 0)
+		{
+			return;
+		}
+
 		std::lock_guard<std::mutex> lock(g_mutex);
 
 		const long long now = NowMs();
 
-		if (now >= g_nextTimeSyncMs)
+		if (now >= g_nextTimeSyncMs.load(std::memory_order_relaxed))
 		{
-			g_nextTimeSyncMs = now + kTimeSyncIntervalMs;
+			g_nextTimeSyncMs.store(now + kTimeSyncIntervalMs, std::memory_order_relaxed);
 			SendTimeSync(now);
 		}
 
@@ -1118,15 +1187,23 @@ namespace w3mp {
 		for (auto it = g_pending.begin(); it != g_pending.end();)
 		{
 			if (cutoff - it->atServerMs > 4000)
+			{
 				it = g_pending.erase(it);
+				g_pendingCount.store(static_cast<int>(g_pending.size()), std::memory_order_relaxed);
+			}
 			else
+			{
 				++it;
+			}
 		}
 	}
 
 	void NpcNet::BeginOwned()
 	{
 		std::lock_guard<std::mutex> lock(g_mutex);
+
+		g_batchNowMs = NowMs();
+		g_batchServerMs = g_batchNowMs + g_clockOffsetMs;
 
 		for (auto& pair : g_owned)
 			pair.second.seenThisFrame = false;
@@ -1151,7 +1228,6 @@ namespace w3mp {
 
 		std::lock_guard<std::mutex> lock(g_mutex);
 
-		const long long now = NowMs();
 		OwnedEntity& entity = g_owned[guid];
 
 		if (entity.guid == 0)
@@ -1165,7 +1241,6 @@ namespace w3mp {
 			entity.registered = false;
 			entity.appearance = appearance;
 			entity.typeCode = typeCode;
-			entity.history.clear();
 		}
 
 		entity.area = area;
@@ -1178,20 +1253,7 @@ namespace w3mp {
 		entity.flags = flags;
 		entity.targetPlayerId = targetPlayerId;
 		entity.seenThisFrame = true;
-		entity.lastSeenMs = now;
-
-		TransformSample sample;
-		sample.t = ServerNow();
-		sample.x = x;
-		sample.y = y;
-		sample.z = z;
-		sample.heading = heading;
-		sample.hpPermille = hpPermille;
-		sample.flags = flags;
-		sample.targetPlayerId = targetPlayerId;
-
-		entity.history.push_back(sample);
-		TrimHistory(entity.history, sample.t, kOwnedHistoryMs, kOwnedHistoryCap);
+		entity.lastSeenMs = g_batchNowMs;
 
 		return true;
 	}
@@ -1241,46 +1303,69 @@ namespace w3mp {
 
 	void NpcNet::EndOwned()
 	{
-		std::lock_guard<std::mutex> lock(g_mutex);
+		Outbox outbox;
+		PacketSender sender;
 
-		const long long now = NowMs();
-
-		if (g_suspended)
 		{
-			g_ownedRemoved.clear();
-			return;
-		}
+			std::lock_guard<std::mutex> lock(g_mutex);
 
-		for (auto it = g_owned.begin(); it != g_owned.end();)
-		{
-			if (it->second.seenThisFrame || (now - it->second.lastSeenMs) < kOwnedGraceMs)
+			const long long now = NowMs();
+
+			if (g_suspended)
 			{
-				++it;
-				continue;
+				g_ownedRemoved.clear();
+				return;
 			}
 
-			if (it->second.registered)
-				g_ownedRemoved.push_back(it->first);
+			for (auto it = g_owned.begin(); it != g_owned.end();)
+			{
+				if (it->second.seenThisFrame || (now - it->second.lastSeenMs) < kOwnedGraceMs)
+				{
+					++it;
+					continue;
+				}
 
-			it = g_owned.erase(it);
+				if (it->second.registered)
+					g_ownedRemoved.push_back(it->first);
+
+				it = g_owned.erase(it);
+			}
+
+			if (now >= g_nextSnapshotMs)
+			{
+				g_nextSnapshotMs = now + g_snapshotIntervalMs;
+				FlushOwned(now, outbox);
+			}
+
+			FlushAcks(outbox);
+
+			if (outbox.empty())
+				return;
+
+			sender = g_sender;
 		}
 
-		if (now >= g_nextSnapshotMs)
+		if (!sender)
+			return;
+
+		for (const auto& packet : outbox)
 		{
-			g_nextSnapshotMs = now + g_snapshotIntervalMs;
-			FlushOwned(now);
+			if (packet.second.size() > 1)
+				sender(packet.first, packet.second);
 		}
-
-		FlushAcks();
 	}
 
 	int NpcNet::Pull()
 	{
+		std::vector<int> wanted;
+		PacketSender sender;
+		int result = 0;
+
+		{
 		std::lock_guard<std::mutex> lock(g_mutex);
 
 		g_commands.clear();
-
-		std::vector<int> wanted;
+		g_commandsGeneration.fetch_add(1, std::memory_order_relaxed);
 
 		const long long serverNow = ServerNow();
 
@@ -1345,8 +1430,6 @@ namespace w3mp {
 			ReplicaCommand command;
 			command.canonicalId = replica.canonicalId;
 			command.localGuid = replica.localGuid;
-			command.typeCode = replica.typeCode;
-			command.appearance = replica.appearance;
 
 			long long delayMs = g_interpDelayMs;
 
@@ -1400,6 +1483,8 @@ namespace w3mp {
 				}
 
 				command.op = static_cast<int>(ReplicaOp::Spawn);
+				command.typeCode = replica.typeCode;
+				command.appearance = replica.appearance;
 				replica.spawnRequested = true;
 				replica.spawnEmitted = true;
 				replica.spawnAttempts++;
@@ -1425,7 +1510,13 @@ namespace w3mp {
 			++it;
 		}
 
+		result = static_cast<int>(g_commands.size());
+
 		if (!wanted.empty())
+			sender = g_sender;
+		}
+
+		if (!wanted.empty() && sender)
 		{
 			std::vector<std::string> fields;
 			int count = 0;
@@ -1437,10 +1528,12 @@ namespace w3mp {
 			}
 
 			fields.insert(fields.begin(), std::to_string(count));
-			Send("NPCWANT", fields);
+
+			if (fields.size() > 1)
+				sender("NPCWANT", fields);
 		}
 
-		return static_cast<int>(g_commands.size());
+		return result;
 	}
 
 	void NpcNet::MarkUnspawnable(int canonicalId)
@@ -1502,12 +1595,27 @@ namespace w3mp {
 
 	const ReplicaCommand* NpcNet::Command(int index)
 	{
+		static thread_local unsigned long long cachedGeneration = ~0ull;
+		static thread_local int cachedIndex = -1;
+		static thread_local const ReplicaCommand* cachedCommand = nullptr;
+
+		if (cachedGeneration == g_commandsGeneration.load(std::memory_order_relaxed)
+			&& cachedIndex == index)
+		{
+			return cachedCommand;
+		}
+
 		std::lock_guard<std::mutex> lock(g_mutex);
 
-		if (index < 0 || index >= static_cast<int>(g_commands.size()))
-			return nullptr;
+		cachedGeneration = g_commandsGeneration.load(std::memory_order_relaxed);
+		cachedIndex = index;
 
-		return &g_commands[index];
+		if (index < 0 || index >= static_cast<int>(g_commands.size()))
+			cachedCommand = nullptr;
+		else
+			cachedCommand = &g_commands[index];
+
+		return cachedCommand;
 	}
 
 	void NpcNet::Bind(int index, int localGuid)
@@ -1567,6 +1675,7 @@ namespace w3mp {
 		pending.atServerMs = ServerNow();
 
 		g_pending.push_back(pending);
+		g_pendingCount.store(static_cast<int>(g_pending.size()), std::memory_order_relaxed);
 
 		std::vector<std::string> fields;
 		fields.push_back("1");

@@ -36,6 +36,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class WitcherServer
 {
     private static final Map<String, PlayerSession> players = new ConcurrentHashMap<>();
+    private static final Map<Integer, PlayerSession> playersById = new ConcurrentHashMap<>();
     private static final Set<String> bannedIps = ConcurrentHashMap.newKeySet();
     private static final Set<String> whitelistedIps = ConcurrentHashMap.newKeySet();
     private static final Map<String, UsernameReservation> reservedUsernames = new ConcurrentHashMap<>();
@@ -87,22 +88,25 @@ public class WitcherServer
     private static final double PLAYER_VIS_LEAVE_SQUARED = PLAYER_VIS_LEAVE_RADIUS * PLAYER_VIS_LEAVE_RADIUS;
     private static final long PLAYER_VIS_RESEND_NANOS = 1_000_000_000L;
 
-    private static final long NPC_LOD_NEAR_NANOS = 25_000_000L;
+    private static final long NPC_LOD_NEAR_NANOS = 33_000_000L;
     private static final long NPC_LOD_MID_NANOS = 50_000_000L;
     private static final long NPC_LOD_FAR_NANOS = 250_000_000L;
     private static final double NPC_LOD_NEAR_SQUARED = 40.0 * 40.0;
     private static final double NPC_LOD_MID_SQUARED = 55.0 * 55.0;
-    private static final long NPC_VIEW_KEEPALIVE_NANOS = 500_000_000L;
-    private static final int NPC_VIEW_FULL_MASK = 1 + 2 + 4 + 8 + 16;
-    private static final double NPC_DELTA_POS_EPSILON = 0.02;
-    private static final double NPC_DELTA_HEADING_EPSILON = 0.5;
+    private static final long NPC_VIEW_KEEPALIVE_NANOS = 2_000_000_000L;
+    private static final double NPC_DELTA_POS_EPSILON = 0.06;
+    private static final double NPC_DELTA_HEADING_EPSILON = 1.5;
     private static final long NPC_TICK_SLEEP_MS = 25L;
+    private static final long NPC_TICK_NANOS = NPC_TICK_SLEEP_MS * 1_000_000L;
+    private static final int NPC_SCALE_TICK_DIVIDER = 8;
     private static final int PLAYER_VIS_MAX = 48;
 
     public static final double CELL_SIZE = 128.0;
 
     private static final double NPC_INTEREST_RADIUS = 85.0;
     private static final double NPC_INTEREST_RADIUS_SQUARED = NPC_INTEREST_RADIUS * NPC_INTEREST_RADIUS;
+    private static final double NPC_INTEREST_LEAVE_RADIUS = 95.0;
+    private static final double NPC_INTEREST_LEAVE_SQUARED = NPC_INTEREST_LEAVE_RADIUS * NPC_INTEREST_LEAVE_RADIUS;
     private static final long NPC_OWNERSHIP_REFRESH_NANOS = 2_000_000_000L;
     private static final int NPC_SPAWN_BATCH = 14;
     private static final int NPC_MOVE_BATCH = 20;
@@ -118,6 +122,26 @@ public class WitcherServer
     private static final AtomicLong npcHitsRejected = new AtomicLong();
     private static final AtomicLong npcAcksRejected = new AtomicLong();
     private static final AtomicLong npcResends = new AtomicLong();
+    private static final AtomicLong tickOverruns = new AtomicLong();
+    private static final AtomicLong scaleEpoch = new AtomicLong();
+
+    private static final int TICK_SAMPLE_SLOTS = 512;
+    private static final long[] tickSamples = new long[TICK_SAMPLE_SLOTS];
+    private static int tickSampleCursor = 0;
+
+    private static void recordTickDuration(long nanos)
+    {
+        tickSamples[tickSampleCursor] = nanos;
+        tickSampleCursor = (tickSampleCursor + 1) % TICK_SAMPLE_SLOTS;
+    }
+
+    private static double tickP99Ms()
+    {
+        long[] copy = tickSamples.clone();
+        java.util.Arrays.sort(copy);
+
+        return copy[(int) (copy.length * 0.99)] / 1_000_000.0;
+    }
 
     private static final int MAX_PENDING_ACKS = 4096;
     private static final Map<Integer, int[]> pendingAcks = new ConcurrentHashMap<>();
@@ -192,8 +216,11 @@ public class WitcherServer
         loadBannedIps();
         loadWhitelistIps();
         NpcScaling.load();
+        startLogThread();
 
         DatagramSocket socket = new DatagramSocket(port);
+        socket.setSendBufferSize(1 << 20);
+        socket.setReceiveBufferSize(1 << 20);
 
         boolean svgEnabled = readBoolean(serverProperties, "svgEnabled", false);
         int svgPort = DEFAULT_STATUS_PORT;
@@ -886,6 +913,7 @@ public class WitcherServer
             if (race == null)
             {
                 current = created;
+                playersById.put(created.playerId, created);
                 dbg("Accepted username %s id=%d for %s\n", username, created.playerId, sender);
             }
             else
@@ -1004,10 +1032,9 @@ public class WitcherServer
         }
 
 
-        if ("NPCADD".equals(opcode) || "NPCUPD".equals(opcode))
+        if ("NPCADD".equals(opcode))
         {
-            final boolean isSpawn = "NPCADD".equals(opcode);
-            final int stride = isSpawn ? 12 : 8;
+            final int stride = 12;
 
             Long snapshotMs = parseLongOrNull(fields.get(0));
             Integer count = fields.size() > 1 ? parseIntegerOrNull(fields.get(1)) : null;
@@ -1035,77 +1062,231 @@ public class WitcherServer
                     continue;
                 }
 
-                if (isSpawn)
+                Integer area = parseIntegerOrNull(fields.get(base + 1));
+                Double x = parseDoubleOrNull(fields.get(base + 4));
+                Double y = parseDoubleOrNull(fields.get(base + 5));
+                Double z = parseDoubleOrNull(fields.get(base + 6));
+                Double heading = parseDoubleOrNull(fields.get(base + 7));
+                Integer hp = parseIntegerOrNull(fields.get(base + 8));
+                Integer flags = parseIntegerOrNull(fields.get(base + 9));
+                Integer target = parseIntegerOrNull(fields.get(base + 10));
+                Integer localCount = parseIntegerOrNull(fields.get(base + 11));
+
+                if (area == null || x == null || y == null || z == null || heading == null
+                        || hp == null || flags == null || target == null || localCount == null)
                 {
-                    Integer area = parseIntegerOrNull(fields.get(base + 1));
-                    Double x = parseDoubleOrNull(fields.get(base + 4));
-                    Double y = parseDoubleOrNull(fields.get(base + 5));
-                    Double z = parseDoubleOrNull(fields.get(base + 6));
-                    Double heading = parseDoubleOrNull(fields.get(base + 7));
-                    Integer hp = parseIntegerOrNull(fields.get(base + 8));
-                    Integer flags = parseIntegerOrNull(fields.get(base + 9));
-                    Integer target = parseIntegerOrNull(fields.get(base + 10));
-                    Integer localCount = parseIntegerOrNull(fields.get(base + 11));
+                    continue;
+                }
 
-                    if (area == null || x == null || y == null || z == null || heading == null
-                            || hp == null || flags == null || target == null || localCount == null)
+                NpcRegistry.Npc admitted = NpcRegistry.upsert(
+                        session.playerId,
+                        guid,
+                        area,
+                        sanitizeToken(fields.get(base + 2)),
+                        sanitizeToken(fields.get(base + 3)),
+                        x, y, z, heading,
+                        clampPermille(hp),
+                        flags,
+                        target,
+                        localCount,
+                        stamp,
+                        now);
+
+                if (admitted == null)
+                {
+                    List<String> drop = new ArrayList<>();
+                    drop.add("1");
+                    drop.add(Integer.toString(guid));
+
+                    queueOutbound(session, "NPCDROP", drop);
+                }
+            }
+
+            return;
+        }
+
+        if ("NPCUPD".equals(opcode))
+        {
+            Long snapshotMs = parseLongOrNull(fields.get(0));
+            Integer count = fields.size() > 1 ? parseIntegerOrNull(fields.get(1)) : null;
+
+            if (snapshotMs == null || count == null || count < 0)
+            {
+                return;
+            }
+
+            final long stamp = clampSnapshotTime(snapshotMs);
+            int cursor = 2;
+
+            for (int i = 0; i < count; i++)
+            {
+                if (cursor + 2 > fields.size())
+                {
+                    break;
+                }
+
+                Integer guid = parseIntegerOrNull(fields.get(cursor));
+                Integer mask = parseIntegerOrNull(fields.get(cursor + 1));
+
+                if (guid == null || mask == null || mask < 0)
+                {
+                    break;
+                }
+
+                int entrySize = 2;
+
+                if ((mask & 1) != 0)
+                {
+                    entrySize += 3;
+                }
+
+                if ((mask & 2) != 0)
+                {
+                    entrySize += 1;
+                }
+
+                if ((mask & 4) != 0)
+                {
+                    entrySize += 1;
+                }
+
+                if ((mask & 8) != 0)
+                {
+                    entrySize += 1;
+                }
+
+                if ((mask & 16) != 0)
+                {
+                    entrySize += 1;
+                }
+
+                if (cursor + entrySize > fields.size())
+                {
+                    break;
+                }
+
+                int at = cursor + 2;
+                cursor += entrySize;
+
+                if (guid == 0)
+                {
+                    continue;
+                }
+
+                NpcRegistry.Npc existing = NpcRegistry.getByOwnerGuid(session.playerId, guid);
+
+                if (existing == null || existing.ownerPlayerId != session.playerId)
+                {
+                    session.goneGuids.add(guid);
+                    continue;
+                }
+
+                double x = existing.x;
+                double y = existing.y;
+                double z = existing.z;
+                double heading = existing.heading;
+                int hp = existing.hpPermille;
+                int flags = existing.flags;
+                int target = existing.targetPlayerId;
+                boolean valid = true;
+
+                if ((mask & 1) != 0)
+                {
+                    Double px = parseDoubleOrNull(fields.get(at));
+                    Double py = parseDoubleOrNull(fields.get(at + 1));
+                    Double pz = parseDoubleOrNull(fields.get(at + 2));
+                    at += 3;
+
+                    if (px == null || py == null || pz == null)
                     {
-                        continue;
+                        valid = false;
                     }
-
-                    NpcRegistry.Npc admitted = NpcRegistry.upsert(
-                            session.playerId,
-                            guid,
-                            area,
-                            sanitizeToken(fields.get(base + 2)),
-                            sanitizeToken(fields.get(base + 3)),
-                            x, y, z, heading,
-                            clampPermille(hp),
-                            flags,
-                            target,
-                            localCount,
-                            stamp,
-                            now);
-
-                    if (admitted == null)
+                    else
                     {
-                        List<String> drop = new ArrayList<>();
-                        drop.add("1");
-                        drop.add(Integer.toString(guid));
-
-                        queueOutbound(session, "NPCDROP", drop);
+                        x = px;
+                        y = py;
+                        z = pz;
                     }
                 }
-                else
+
+                if (valid && (mask & 2) != 0)
                 {
-                    Double x = parseDoubleOrNull(fields.get(base + 1));
-                    Double y = parseDoubleOrNull(fields.get(base + 2));
-                    Double z = parseDoubleOrNull(fields.get(base + 3));
-                    Double heading = parseDoubleOrNull(fields.get(base + 4));
-                    Integer hp = parseIntegerOrNull(fields.get(base + 5));
-                    Integer flags = parseIntegerOrNull(fields.get(base + 6));
-                    Integer target = parseIntegerOrNull(fields.get(base + 7));
+                    Double ph = parseDoubleOrNull(fields.get(at));
+                    at += 1;
 
-                    if (x == null || y == null || z == null || heading == null
-                            || hp == null || flags == null || target == null)
+                    if (ph == null)
                     {
-                        continue;
+                        valid = false;
                     }
-
-                    NpcRegistry.Npc moved = NpcRegistry.move(
-                            session.playerId,
-                            guid,
-                            x, y, z, heading,
-                            clampPermille(hp),
-                            flags,
-                            target,
-                            stamp,
-                            now);
-
-                    if (moved == null)
+                    else
                     {
-                        session.goneGuids.add(guid);
+                        heading = ph;
                     }
+                }
+
+                if (valid && (mask & 4) != 0)
+                {
+                    Integer phsi = parseIntegerOrNull(fields.get(at));
+                    at += 1;
+
+                    if (phsi == null)
+                    {
+                        valid = false;
+                    }
+                    else
+                    {
+                        hp = clampPermille(phsi);
+                    }
+                }
+
+                if (valid && (mask & 8) != 0)
+                {
+                    Integer pf = parseIntegerOrNull(fields.get(at));
+                    at += 1;
+
+                    if (pf == null)
+                    {
+                        valid = false;
+                    }
+                    else
+                    {
+                        flags = pf;
+                    }
+                }
+
+                if (valid && (mask & 16) != 0)
+                {
+                    Integer pt = parseIntegerOrNull(fields.get(at));
+                    at += 1;
+
+                    if (pt == null)
+                    {
+                        valid = false;
+                    }
+                    else
+                    {
+                        target = pt;
+                    }
+                }
+
+                if (!valid)
+                {
+                    continue;
+                }
+
+                NpcRegistry.Npc moved = NpcRegistry.move(
+                        session.playerId,
+                        guid,
+                        x, y, z, heading,
+                        hp,
+                        flags,
+                        target,
+                        stamp,
+                        now);
+
+                if (moved == null)
+                {
+                    session.goneGuids.add(guid);
                 }
             }
 
@@ -1669,12 +1850,16 @@ public class WitcherServer
     private static void npcLoop(DatagramSocket socket)
     {
         long lastHeartbeat = System.nanoTime();
+        long tickCounter = 0;
 
         while (running.get())
         {
             try
             {
-                long now = System.nanoTime();
+                long tickStart = System.nanoTime();
+                long now = tickStart;
+                tickCounter++;
+
                 List<PlayerSession> sessions = new ArrayList<>(players.values());
 
                 Set<Integer> ownerOnline = new HashSet<>();
@@ -1690,11 +1875,20 @@ public class WitcherServer
 
                 NpcRegistry.applyUnackedDamage(now);
                 NpcRegistry.pruneStale(ownerOnline, now);
-                NpcRegistry.recomputeScaling(sessions, NpcRegistry.HIT_RANGE_SQUARED);
+
+                if (tickCounter % NPC_SCALE_TICK_DIVIDER == 0)
+                {
+                    if (NpcRegistry.recomputeScaling(sessions, NpcRegistry.HIT_RANGE_SQUARED))
+                    {
+                        scaleEpoch.incrementAndGet();
+                    }
+                }
+
+                final long snapshotMs = serverMs();
 
                 for (PlayerSession session : sessions)
                 {
-                    relayNpcs(socket, session, now);
+                    relayNpcs(socket, session, now, snapshotMs);
                     relayScaling(socket, session, now);
                     relayHits(socket, session);
                     relayKillOrders(socket, session);
@@ -1707,24 +1901,39 @@ public class WitcherServer
                 relayHandovers(socket, sessions, now);
                 relayPartyHeartbeat(now);
 
+                final long tickNanos = System.nanoTime() - tickStart;
+
+                recordTickDuration(tickNanos);
+
                 if (!sessions.isEmpty() && (now - lastHeartbeat) >= NPC_HEARTBEAT_NANOS)
                 {
                     lastHeartbeat = now;
 
-                    dbg("NPC sync: players=%d npcs=%d admitted=%d rejectedDup=%d | packets spawn=%d move=%d end=%d\n",
+                    dbg("NPC sync: players=%d npcs=%d admitted=%d rejectedDup=%d | packets spawn=%d move=%d end=%d | tick p99=%.2fms overruns=%d\n",
                             sessions.size(),
                             NpcRegistry.npcCount(),
                             NpcRegistry.admittedCount(),
                             NpcRegistry.rejectedDuplicateCount(),
                             npcSpawnPacketsSent.get(),
                             npcMovePacketsSent.get(),
-                            npcEndPacketsSent.get());
+                            npcEndPacketsSent.get(),
+                            tickP99Ms(),
+                            tickOverruns.get());
 
                     logSyncGroups(sessions);
                     logTargetSnapshot();
                 }
 
-                Thread.sleep(NPC_TICK_SLEEP_MS);
+                final long remainingNanos = NPC_TICK_NANOS - (System.nanoTime() - tickStart);
+
+                if (remainingNanos > 0)
+                {
+                    Thread.sleep(remainingNanos / 1_000_000L, (int) (remainingNanos % 1_000_000L));
+                }
+                else
+                {
+                    tickOverruns.incrementAndGet();
+                }
             }
             catch (InterruptedException e)
             {
@@ -1924,15 +2133,7 @@ public class WitcherServer
             return null;
         }
 
-        for (PlayerSession session : players.values())
-        {
-            if (session.playerId == playerId)
-            {
-                return session;
-            }
-        }
-
-        return null;
+        return playersById.get(playerId);
     }
 
     private static Party partyOf(String usernameKey)
@@ -3055,12 +3256,13 @@ public class WitcherServer
         }
     }
 
-    private static void relayNpcs(DatagramSocket socket, PlayerSession session, long nowNanos)
+    private static void relayNpcs(DatagramSocket socket, PlayerSession session, long nowNanos, long snapshotMs)
     {
-        List<NpcRegistry.Npc> visible = NpcRegistry.visibleTo(session, NPC_INTEREST_RADIUS_SQUARED);
+        List<NpcRegistry.Npc> visible = NpcRegistry.visibleTo(
+                session, NPC_INTEREST_RADIUS_SQUARED, NPC_INTEREST_LEAVE_SQUARED);
         Set<Integer> desired = new HashSet<>();
 
-        final long snapshotMs = serverMs();
+        int viewerQuestParty = -2;
 
         List<String> spawn = new ArrayList<>();
         List<String> move = new ArrayList<>();
@@ -3071,10 +3273,19 @@ public class WitcherServer
 
         for (NpcRegistry.Npc npc : visible)
         {
-            if (NpcRegistry.isQuestFoe(npc) && !questVisibleTo(session, npc)
-                    && !session.knownNpcs.contains(npc.npcId))
+            if (NpcRegistry.isQuestFoe(npc) && !session.knownNpcs.contains(npc.npcId))
             {
-                continue;
+                if (viewerQuestParty == -2)
+                {
+                    viewerQuestParty = questPartyOf(session.playerId);
+                }
+
+                if (session.partyId <= 0
+                        || session.partyId != npc.questPartyId
+                        || viewerQuestParty != session.partyId)
+                {
+                    continue;
+                }
             }
 
             if (!npc.alive && !session.knownNpcs.contains(npc.npcId))
@@ -3175,11 +3386,6 @@ public class WitcherServer
                 continue;
             }
 
-            if (mask == 0)
-            {
-                mask = NPC_VIEW_FULL_MASK;
-            }
-
             move.add(Integer.toString(npc.npcId));
             move.add(Integer.toString(mask));
 
@@ -3234,14 +3440,16 @@ public class WitcherServer
         List<String> remove = new ArrayList<>();
         int removeCount = 0;
 
-        for (Integer known : new ArrayList<>(session.knownNpcs))
+        for (java.util.Iterator<Integer> it = session.knownNpcs.iterator(); it.hasNext();)
         {
+            Integer known = it.next();
+
             if (desired.contains(known))
             {
                 continue;
             }
 
-            session.knownNpcs.remove(known);
+            it.remove();
             session.npcViews.remove(known);
 
             if (removeCount < NPC_REMOVE_BATCH)
@@ -3478,7 +3686,7 @@ public class WitcherServer
             queueOutbound(loser, "NPCDROP", drop);
         }
 
-        List<int[]> orders = NpcRegistry.planHandovers(sessions, NPC_INTEREST_RADIUS_SQUARED, now);
+        List<int[]> orders = NpcRegistry.planHandovers(sessions, NpcRegistry.HANDOVER_SUSTAIN_SQUARED, now);
 
         if (orders.isEmpty())
         {
@@ -3524,6 +3732,19 @@ public class WitcherServer
 
     private static void relayScaling(DatagramSocket socket, PlayerSession session, long now)
     {
+        final long epoch = scaleEpoch.get();
+        final int knownVersion = session.knownNpcs.size();
+
+        if (session.lastScaleEpoch == epoch
+                && session.lastScaleKnownCount == knownVersion
+                && (now - session.scalesSentNanos) < NPC_SCALE_RESEND_NANOS)
+        {
+            return;
+        }
+
+        session.lastScaleEpoch = epoch;
+        session.lastScaleKnownCount = knownVersion;
+
         Map<Integer, Integer> current = new HashMap<>();
         List<int[]> wire = new ArrayList<>();
 
@@ -3624,7 +3845,7 @@ public class WitcherServer
             }
 
             fields.add(Integer.toString(npc.ownerLocalGuid));
-            npc.killOrderPending = false;
+            NpcRegistry.clearKillOrder(npc);
             count++;
         }
 
@@ -3720,7 +3941,34 @@ public class WitcherServer
 
     private static String formatCoord(double value)
     {
-        return String.format(Locale.US, "%.3f", value);
+        long scaled = Math.round(value * 100.0);
+        final boolean negative = scaled < 0;
+
+        if (negative)
+        {
+            scaled = -scaled;
+        }
+
+        StringBuilder sb = new StringBuilder(12);
+
+        if (negative)
+        {
+            sb.append('-');
+        }
+
+        sb.append(scaled / 100);
+        sb.append('.');
+
+        final long cents = scaled % 100;
+
+        if (cents < 10)
+        {
+            sb.append('0');
+        }
+
+        sb.append(cents);
+
+        return sb.toString();
     }
 
     private static void sendNpcPacket(DatagramSocket socket, PlayerSession session, String opcode, List<String> fields)
@@ -4085,17 +4333,24 @@ public class WitcherServer
 
     private static String buildTypedPacket(String opcode, int playerId, String username, List<String> fields)
     {
-        StringBuilder sb = new StringBuilder();
+        int estimate = opcode.length() + username.length() + 16;
+
+        for (String field : fields)
+        {
+            estimate += field.length() + 1;
+        }
+
+        StringBuilder sb = new StringBuilder(estimate);
 
         sb.append(opcode)
-                .append("\t")
+                .append('\t')
                 .append(playerId)
-                .append("\t")
+                .append('\t')
                 .append(escapeField(username));
 
         for (String field : fields)
         {
-            sb.append("\t").append(escapeField(field));
+            sb.append('\t').append(escapeField(field));
         }
 
         return sb.toString();
@@ -4549,6 +4804,7 @@ public class WitcherServer
 
         if (removed != null)
         {
+            playersById.remove(removed.playerId, removed);
             safeSend(socket, removed.endpoint, kickText);
         }
     }
@@ -4925,7 +5181,25 @@ public class WitcherServer
 
     private static String escapeField(String s)
     {
-        StringBuilder out = new StringBuilder();
+        boolean clean = true;
+
+        for (int i = 0; i < s.length(); i++)
+        {
+            char c = s.charAt(i);
+
+            if (c == '\\' || c == '\t' || c == '\n' || c == '\r')
+            {
+                clean = false;
+                break;
+            }
+        }
+
+        if (clean)
+        {
+            return s;
+        }
+
+        StringBuilder out = new StringBuilder(s.length() + 8);
 
         for (int i = 0; i < s.length(); i++)
         {
@@ -5018,17 +5292,84 @@ public class WitcherServer
         return out.toString();
     }
 
+    private static final java.util.concurrent.ConcurrentLinkedQueue<String> logQueue =
+            new java.util.concurrent.ConcurrentLinkedQueue<>();
+    private static final java.util.concurrent.atomic.AtomicInteger logQueueSize =
+            new java.util.concurrent.atomic.AtomicInteger();
+    private static final AtomicLong logDropped = new AtomicLong();
+    private static final int LOG_QUEUE_LIMIT = 8192;
+
+    private static void enqueueLog(String line)
+    {
+        if (logQueueSize.get() >= LOG_QUEUE_LIMIT)
+        {
+            logDropped.incrementAndGet();
+            return;
+        }
+
+        logQueue.add(line);
+        logQueueSize.incrementAndGet();
+    }
+
+    static void startLogThread()
+    {
+        Thread thread = new Thread(() ->
+        {
+            StringBuilder batch = new StringBuilder(4096);
+
+            while (true)
+            {
+                String line;
+                batch.setLength(0);
+
+                while ((line = logQueue.poll()) != null)
+                {
+                    logQueueSize.decrementAndGet();
+                    batch.append(line);
+
+                    if (batch.length() > 16384)
+                    {
+                        break;
+                    }
+                }
+
+                if (batch.length() > 0)
+                {
+                    System.out.print(batch);
+                    System.out.flush();
+                }
+
+                long dropped = logDropped.getAndSet(0);
+
+                if (dropped > 0)
+                {
+                    System.out.print("[log] dropped " + dropped + " lines under pressure\n");
+                }
+
+                try
+                {
+                    Thread.sleep(50);
+                }
+                catch (InterruptedException e)
+                {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+            }
+        }, "log-writer");
+
+        thread.setDaemon(true);
+        thread.start();
+    }
+
     private static void dbgNotime(String format, Object... args)
     {
-        System.out.print(String.format(format, args));
-        System.out.flush();
+        enqueueLog(String.format(format, args));
     }
 
     static void dbg(String format, Object... args)
     {
-        String prefix = "[" + LocalTime.now().format(LOG_TIME) + " INFO]: ";
-        System.out.print(prefix + String.format(format, args));
-        System.out.flush();
+        enqueueLog("[" + LocalTime.now().format(LOG_TIME) + " INFO]: " + String.format(format, args));
     }
 
     private static String trim(String s)
@@ -5121,6 +5462,7 @@ public class WitcherServer
             return false;
         }
 
+        playersById.remove(session.playerId, session);
         NpcRegistry.orphanNpcsOwnedBy(session.playerId, System.nanoTime());
 
         String ip = normalizeIp(session.endpoint.address.getHostAddress());
@@ -5145,15 +5487,7 @@ public class WitcherServer
             return null;
         }
 
-        for (PlayerSession session : players.values())
-        {
-            if (session != null && session.playerId == playerId)
-            {
-                return session;
-            }
-        }
-
-        return null;
+        return playersById.get(playerId);
     }
 
     private static int allocateNewPlayerId()
