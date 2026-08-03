@@ -41,6 +41,12 @@ class r_EntityClassifier
 
     private var lastVisibleCount  : int;
 
+    private var serviceGuids : array<int>;
+    private var serviceFlags : array<bool>;
+
+    private var SERVICE_CACHE_MAX : int;
+    default SERVICE_CACHE_MAX = 4096;
+
     default enabled = false;
     default overlayEnabled = true;
     default showTags = false;
@@ -389,6 +395,13 @@ class r_EntityClassifier
             return;
         }
 
+        if(isServiceNpc(npc))
+        {
+            sample.entityClass = REC_Ambient;
+            sample.reason = "service npc";
+            return;
+        }
+
         if(!npc.GetVisibility() || !npc.GetGameplayVisibility())
         {
             sample.entityClass = REC_Unknown;
@@ -399,13 +412,78 @@ class r_EntityClassifier
         if(isFightCapable(npc))
         {
             sample.entityClass = REC_Ambient;
-            sample.reason = "human combatant hp=" + npc.GetMaxHealth();
-            sample.syncEligible = true;
+
+            if(sample.hostileNow)
+            {
+                sample.reason = "human hostile hp=" + npc.GetMaxHealth();
+                sample.syncEligible = true;
+            }
+            else
+            {
+                sample.reason = "human calm hp=" + npc.GetMaxHealth();
+            }
+
             return;
         }
 
         sample.entityClass = REC_Ambient;
         sample.reason = "human cosmetic hp=" + npc.GetMaxHealth();
+    }
+
+    public function isServiceNpc(npc : CNewNPC) : bool
+    {
+        var comp : CComponent;
+        var guid : int;
+        var result : bool;
+        var i : int;
+
+        guid = npc.GetGuidHash();
+
+        if(guid != 0)
+        {
+            for(i = 0; i < serviceGuids.Size(); i += 1)
+            {
+                if(serviceGuids[i] == guid)
+                {
+                    return serviceFlags[i];
+                }
+            }
+        }
+
+        result = false;
+
+        if((W3MerchantNPC)npc)
+        {
+            result = true;
+        }
+        else
+        {
+            comp = npc.GetComponentByClassName('W3MerchantComponent');
+
+            if(!comp)
+            {
+                comp = npc.GetComponentByClassName('W3CraftsmanComponent');
+            }
+
+            if(comp)
+            {
+                result = true;
+            }
+        }
+
+        if(guid != 0)
+        {
+            if(serviceGuids.Size() >= SERVICE_CACHE_MAX)
+            {
+                serviceGuids.Clear();
+                serviceFlags.Clear();
+            }
+
+            serviceGuids.PushBack(guid);
+            serviceFlags.PushBack(result);
+        }
+
+        return result;
     }
 
     public function isSyncEligible(npc : CNewNPC) : bool

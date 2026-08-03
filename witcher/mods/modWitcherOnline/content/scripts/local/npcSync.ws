@@ -1240,6 +1240,15 @@ class r_NpcSync
 
             if(index >= 0)
             {
+                if(tracked[index].questTag == "" && !isSyncable(npc, classifier))
+                {
+                    dbg("npc_offer", "released guid=" + tracked[index].npcId
+                        + " no longer eligible");
+
+                    tracked.Erase(index);
+                    continue;
+                }
+
                 tracked[index].lastSeenAt = now;
                 continue;
             }
