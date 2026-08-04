@@ -1034,7 +1034,7 @@ public class WitcherServer
 
         if ("NPCADD".equals(opcode))
         {
-            final int stride = 12;
+            final int stride = 14;
 
             Long snapshotMs = parseLongOrNull(fields.get(0));
             Integer count = fields.size() > 1 ? parseIntegerOrNull(fields.get(1)) : null;
@@ -1071,9 +1071,12 @@ public class WitcherServer
                 Integer flags = parseIntegerOrNull(fields.get(base + 9));
                 Integer target = parseIntegerOrNull(fields.get(base + 10));
                 Integer localCount = parseIntegerOrNull(fields.get(base + 11));
+                Integer terminalState = parseIntegerOrNull(fields.get(base + 12));
+                Integer terminalAttacker = parseIntegerOrNull(fields.get(base + 13));
 
                 if (area == null || x == null || y == null || z == null || heading == null
-                        || hp == null || flags == null || target == null || localCount == null)
+                        || hp == null || flags == null || target == null || localCount == null
+                        || terminalState == null || terminalAttacker == null)
                 {
                     continue;
                 }
@@ -1102,6 +1105,8 @@ public class WitcherServer
                             clampPermille(hp),
                             flags,
                             target,
+                            NpcRegistry.sanitizeTerminalState(terminalState),
+                            terminalAttacker,
                             localCount,
                             stamp,
                             now);
@@ -1175,6 +1180,16 @@ public class WitcherServer
                     entrySize += 1;
                 }
 
+                if ((mask & 32) != 0)
+                {
+                    entrySize += 1;
+                }
+
+                if ((mask & 64) != 0)
+                {
+                    entrySize += 1;
+                }
+
                 if (cursor + entrySize > fields.size())
                 {
                     break;
@@ -1203,6 +1218,8 @@ public class WitcherServer
                 int hp = existing.hpPermille;
                 int flags = existing.flags;
                 int target = existing.targetPlayerId;
+                int terminalState = existing.terminalState;
+                int terminalAttacker = existing.terminalAttackerId;
                 boolean valid = true;
 
                 if ((mask & 1) != 0)
@@ -1284,6 +1301,36 @@ public class WitcherServer
                     }
                 }
 
+                if (valid && (mask & 32) != 0)
+                {
+                    Integer pts = parseIntegerOrNull(fields.get(at));
+                    at += 1;
+
+                    if (pts == null)
+                    {
+                        valid = false;
+                    }
+                    else
+                    {
+                        terminalState = NpcRegistry.sanitizeTerminalState(pts);
+                    }
+                }
+
+                if (valid && (mask & 64) != 0)
+                {
+                    Integer pta = parseIntegerOrNull(fields.get(at));
+                    at += 1;
+
+                    if (pta == null)
+                    {
+                        valid = false;
+                    }
+                    else
+                    {
+                        terminalAttacker = pta;
+                    }
+                }
+
                 if (!valid)
                 {
                     continue;
@@ -1296,6 +1343,8 @@ public class WitcherServer
                         hp,
                         flags,
                         target,
+                        terminalState,
+                        terminalAttacker,
                         stamp,
                         now);
 
@@ -1830,7 +1879,7 @@ public class WitcherServer
         });
 
         pendingAcks.put(eventId, new int[] { attacker.playerId, owner.playerId, npc.npcId });
-        NpcRegistry.notePendingDamage(npc, permille, System.nanoTime());
+        NpcRegistry.notePendingDamage(npc, permille, attacker.playerId, System.nanoTime());
 
         if (pendingAcks.size() > MAX_PENDING_ACKS)
         {
@@ -2478,8 +2527,13 @@ public class WitcherServer
 
         SaveTarget target = relay.targets.get(memberKey);
 
-        if (target == null)
+        if (target == null || fullPush)
         {
+            if (fullPush)
+            {
+                member.pendingSaveOutbound.clear();
+            }
+
             target = new SaveTarget();
             relay.targets.put(memberKey, target);
         }
@@ -3044,25 +3098,8 @@ public class WitcherServer
         final String senderKey = normalizeUsernameKey(session.username);
         Party party = partyOf(senderKey);
 
-        if (party == null || fields.size() < 4)
-        {
-            return;
-        }
-
-        boolean anyCoop = false;
-
-        for (String memberKey : party.snapshot())
-        {
-            PlayerSession member = players.get(memberKey);
-
-            if (member != null && member.coopMode)
-            {
-                anyCoop = true;
-                break;
-            }
-        }
-
-        if (!anyCoop)
+        if (party == null || fields.size() < 18
+                || !isQuestCoopParticipant(session, party.partyId))
         {
             return;
         }
@@ -3080,13 +3117,12 @@ public class WitcherServer
 
             PlayerSession member = players.get(memberKey);
 
-            if (member != null)
+            if (isQuestCoopParticipant(member, party.partyId))
             {
                 queueOutbound(member, "SCENE", payload);
             }
         }
 
-        dbg("SCENE %s started a scene, relayed to party #%d\n", senderKey, party.partyId);
     }
 
     private static void relayQuestItem(PlayerSession session, List<String> fields)
@@ -3187,6 +3223,17 @@ public class WitcherServer
         }
 
         return isQuestCoopParticipant(session, npc.questPartyId);
+    }
+
+    static int sanitizeQuestTerminalAttacker(NpcRegistry.Npc npc, int attackerPlayerId)
+    {
+        if (npc == null || attackerPlayerId <= 0 || !NpcRegistry.isQuestFoe(npc))
+        {
+            return 0;
+        }
+
+        PlayerSession attacker = sessionByPlayerId(attackerPlayerId);
+        return questVisibleTo(attacker, npc) ? attackerPlayerId : 0;
     }
 
     private static void notifyLeaderOfCoop(PlayerSession session)
@@ -3414,6 +3461,9 @@ public class WitcherServer
                 spawn.add(Integer.toString(npc.hpPermille));
                 spawn.add(Integer.toString(npc.flags));
                 spawn.add(Integer.toString(npc.targetPlayerId));
+                spawn.add(Integer.toString(npc.terminalState));
+                spawn.add(Integer.toString(npc.terminalRevision));
+                spawn.add(Integer.toString(npc.terminalAttackerId));
                 spawnCount++;
 
                 if (spawnCount >= NPC_SPAWN_BATCH)
@@ -3480,6 +3530,18 @@ public class WitcherServer
                 mask |= 16;
             }
 
+            if (!view.valid
+                    || view.terminalState != npc.terminalState
+                    || view.terminalRevision != npc.terminalRevision)
+            {
+                mask |= 32;
+            }
+
+            if (!view.valid || view.terminalAttackerId != npc.terminalAttackerId)
+            {
+                mask |= 64;
+            }
+
             if (mask == 0 && (nowNanos - view.lastSentNanos) < NPC_VIEW_KEEPALIVE_NANOS)
             {
                 continue;
@@ -3515,6 +3577,17 @@ public class WitcherServer
                 move.add(Integer.toString(npc.targetPlayerId));
             }
 
+            if ((mask & 32) != 0)
+            {
+                move.add(Integer.toString(npc.terminalState));
+                move.add(Integer.toString(npc.terminalRevision));
+            }
+
+            if ((mask & 64) != 0)
+            {
+                move.add(Integer.toString(npc.terminalAttackerId));
+            }
+
             view.x = npc.x;
             view.y = npc.y;
             view.z = npc.z;
@@ -3522,6 +3595,9 @@ public class WitcherServer
             view.hpPermille = npc.hpPermille;
             view.flags = npc.flags;
             view.targetPlayerId = npc.targetPlayerId;
+            view.terminalState = npc.terminalState;
+            view.terminalRevision = npc.terminalRevision;
+            view.terminalAttackerId = npc.terminalAttackerId;
             view.lastSentNanos = nowNanos;
             view.valid = true;
 
@@ -3652,6 +3728,9 @@ public class WitcherServer
                 List<String> fields = new ArrayList<>();
                 fields.add("1");
                 fields.add(Integer.toString(npc.npcId));
+                fields.add(Integer.toString(npc.terminalState));
+                fields.add(Integer.toString(npc.terminalRevision));
+                fields.add(Integer.toString(npc.terminalAttackerId));
 
                 sendNpcPacket(socket, session, "NPCDEAD", fields);
                 npc.deathSends.put(session.playerId, count + 1);
@@ -3807,6 +3886,7 @@ public class WitcherServer
         {
             List<String> fields = new ArrayList<>();
             int count = 0;
+            int offered = 0;
 
             for (int[] order : orders)
             {
@@ -3817,25 +3897,27 @@ public class WitcherServer
 
                 fields.add(Integer.toString(order[0]));
                 count++;
+                offered++;
 
                 if (count >= NPC_REMOVE_BATCH)
                 {
-                    break;
+                    fields.add(0, Integer.toString(count));
+                    sendNpcPacket(socket, session, "NPCGIVE", fields);
+                    fields = new ArrayList<>();
+                    count = 0;
                 }
             }
 
-            if (count == 0)
+            if (count > 0)
             {
-                continue;
+                fields.add(0, Integer.toString(count));
+                sendNpcPacket(socket, session, "NPCGIVE", fields);
             }
 
-            fields.add(0, Integer.toString(count));
-            sendNpcPacket(socket, session, "NPCGIVE", fields);
-
-            if (session.lastHandoverLogged != count)
+            if (offered > 0 && session.lastHandoverLogged != offered)
             {
-                session.lastHandoverLogged = count;
-                dbg("NPC handover offered: %d entities -> %s\n", count, describePlayerId(session.playerId));
+                session.lastHandoverLogged = offered;
+                dbg("NPC handover offered: %d entities -> %s\n", offered, describePlayerId(session.playerId));
             }
         }
     }
@@ -3937,7 +4019,8 @@ public class WitcherServer
 
     private static void relayKillOrders(DatagramSocket socket, PlayerSession session)
     {
-        List<NpcRegistry.Npc> orders = NpcRegistry.pendingKillOrders(session.playerId);
+        final long now = System.nanoTime();
+        List<NpcRegistry.Npc> orders = NpcRegistry.pendingKillOrders(session.playerId, now);
 
         if (orders.isEmpty())
         {
@@ -3946,6 +4029,7 @@ public class WitcherServer
 
         List<String> fields = new ArrayList<>();
         int count = 0;
+        boolean logBatch = false;
 
         for (NpcRegistry.Npc npc : orders)
         {
@@ -3955,7 +4039,18 @@ public class WitcherServer
             }
 
             fields.add(Integer.toString(npc.ownerLocalGuid));
-            NpcRegistry.clearKillOrder(npc);
+            fields.add(Integer.toString(npc.pendingDamageAttackerId));
+
+            if (NpcRegistry.isQuestFoe(npc))
+            {
+                NpcRegistry.markKillOrderSent(npc, now);
+                logBatch = logBatch || npc.killOrderSends == 1 || (npc.killOrderSends % 10) == 0;
+            }
+            else
+            {
+                NpcRegistry.clearKillOrder(npc);
+                logBatch = true;
+            }
             count++;
         }
 
@@ -3967,7 +4062,11 @@ public class WitcherServer
         fields.add(0, Integer.toString(count));
         sendNpcPacket(socket, session, "NPCKILL", fields);
 
-        dbg("NPC kill orders: %d -> %s (server-confirmed deaths)\n", count, describePlayerId(session.playerId));
+        if (logBatch)
+        {
+            dbg("NPC kill orders: %d -> %s (server-confirmed deaths)\n",
+                    count, describePlayerId(session.playerId));
+        }
     }
 
     private static void relayHits(DatagramSocket socket, PlayerSession session)

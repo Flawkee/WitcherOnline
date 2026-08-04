@@ -191,11 +191,11 @@ timer function r_showJoinMessage(dt : float, id : int)
 
     if(regions == 1)
     {
-        regionString = "region";
+        regionString = GetLocStringById(2111114318);
     }
     else
     {
-        regionString = "regions";
+        regionString = GetLocStringById(2111114319);
     }
     
     GetWitcherPlayer().DisplayHudMessage(GetLocStringById(2111114235) + " " + total + " " + GetLocStringById(2111114236) + " " + regions + " " + regionString + GetLocStringById(2111114237));
@@ -1302,14 +1302,16 @@ function OnDialogOptionSelected(index : int)
 function OnBlockingSceneStarted( scene: CStoryScene )
 {
     theGame.r_getMultiplayerClient().stopRiding();
-
     wrappedMethod(scene);
+
+    theGame.r_getMultiplayerClient().onBlockingSceneStarted(scene, this.GetSceneWorldPos());
 }
 
 @wrapMethod(CStoryScenePlayer)
 function OnBlockingSceneEnded( output : CStorySceneOutput )
 {
     theGame.r_getMultiplayerClient().clearActiveDialogChoices();
+    theGame.r_getMultiplayerClient().onBlockingSceneEnded();
 
     wrappedMethod(output);
 }

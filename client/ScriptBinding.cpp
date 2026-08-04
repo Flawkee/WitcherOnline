@@ -1574,21 +1574,50 @@ namespace w3mp {
 
 	static void WO_SceneStart(void* context, void* frame, void* result)
 	{
+		RedString scenePath;
+		const int scenePathSize = ReadStringParameter(frame, scenePath);
+		RedString actorTag;
+		const int actorTagSize = ReadStringParameter(frame, actorTag);
 		RedString voiceTag;
-		const int tagSize = ReadStringParameter(frame, voiceTag);
-		const float npcX = ReadFloatParameter(frame);
-		const float npcY = ReadFloatParameter(frame);
-		const float npcZ = ReadFloatParameter(frame);
+		const int voiceTagSize = ReadStringParameter(frame, voiceTag);
+		const float actorX = ReadFloatParameter(frame);
+		const float actorY = ReadFloatParameter(frame);
+		const float actorZ = ReadFloatParameter(frame);
+		const float sceneX = ReadFloatParameter(frame);
+		const float sceneY = ReadFloatParameter(frame);
+		const float sceneZ = ReadFloatParameter(frame);
+		const float entryX = ReadFloatParameter(frame);
+		const float entryY = ReadFloatParameter(frame);
+		const float entryZ = ReadFloatParameter(frame);
+		const float entryHeading = ReadFloatParameter(frame);
+		const int area = ReadIntParameter(frame);
 		const int kind = ReadIntParameter(frame);
+		const int choicePhase = ReadIntParameter(frame);
+		RedString choiceSignature;
+		const int choiceSignatureSize = ReadStringParameter(frame, choiceSignature);
+		const int choiceCount = ReadIntParameter(frame);
 
 		AdvanceFrame(frame);
 
 		std::vector<std::string> fields;
-		fields.push_back(tagSize > 0 ? NarrowPayload(voiceTag) : std::string("-"));
-		fields.push_back(std::to_string(npcX));
-		fields.push_back(std::to_string(npcY));
-		fields.push_back(std::to_string(npcZ));
+		fields.push_back(scenePathSize > 0 ? NarrowPayload(scenePath) : std::string("-"));
+		fields.push_back(actorTagSize > 0 ? NarrowPayload(actorTag) : std::string("-"));
+		fields.push_back(voiceTagSize > 0 ? NarrowPayload(voiceTag) : std::string("-"));
+		fields.push_back(std::to_string(actorX));
+		fields.push_back(std::to_string(actorY));
+		fields.push_back(std::to_string(actorZ));
+		fields.push_back(std::to_string(sceneX));
+		fields.push_back(std::to_string(sceneY));
+		fields.push_back(std::to_string(sceneZ));
+		fields.push_back(std::to_string(entryX));
+		fields.push_back(std::to_string(entryY));
+		fields.push_back(std::to_string(entryZ));
+		fields.push_back(std::to_string(entryHeading));
+		fields.push_back(std::to_string(area));
 		fields.push_back(std::to_string(kind));
+		fields.push_back(std::to_string(choicePhase));
+		fields.push_back(choiceSignatureSize > 0 ? NarrowPayload(choiceSignature) : std::string("-"));
+		fields.push_back(std::to_string(choiceCount));
 
 		SendSaveChunk("SCENE", fields);
 	}
@@ -1976,6 +2005,8 @@ namespace w3mp {
 		const int hpPermille = ReadIntParameter(frame);
 		const int flags = ReadIntParameter(frame);
 		const int targetPlayerId = ReadIntParameter(frame);
+		const int terminalState = ReadIntParameter(frame);
+		const int terminalAttackerId = ReadIntParameter(frame);
 
 		AdvanceFrame(frame);
 
@@ -1988,7 +2019,9 @@ namespace w3mp {
 			x, y, z, heading,
 			hpPermille,
 			flags,
-			targetPlayerId);
+			targetPlayerId,
+			terminalState,
+			terminalAttackerId);
 
 		if (result)
 			*static_cast<bool*>(result) = stored;
@@ -2124,6 +2157,30 @@ namespace w3mp {
 		AdvanceFrame(frame);
 
 		NpcNet::Bind(index, localGuid);
+	}
+
+	static void WO_NpcTerminalState(void* context, void* frame, void* result)
+	{
+		const ReplicaCommand* command = CommandAt(frame);
+
+		if (result)
+			*static_cast<int*>(result) = command ? command->terminalState : 0;
+	}
+
+	static void WO_NpcTerminalRevision(void* context, void* frame, void* result)
+	{
+		const ReplicaCommand* command = CommandAt(frame);
+
+		if (result)
+			*static_cast<int*>(result) = command ? command->terminalRevision : 0;
+	}
+
+	static void WO_NpcTerminalAttacker(void* context, void* frame, void* result)
+	{
+		const ReplicaCommand* command = CommandAt(frame);
+
+		if (result)
+			*static_cast<int*>(result) = command ? command->terminalAttackerId : 0;
 	}
 
 	static void WO_NpcBindId(void* context, void* frame, void* result)
@@ -2334,6 +2391,15 @@ namespace w3mp {
 	{
 		AdvanceFrame(frame);
 		WriteStringResult(result, NpcNet::Report());
+	}
+
+	static void WO_NpcKillAttacker(void* context, void* frame, void* result)
+	{
+		const int index = ReadIntParameter(frame);
+		AdvanceFrame(frame);
+
+		if (result)
+			*static_cast<int*>(result) = NpcNet::KillAttacker(index);
 	}
 
 	static void WO_NpcLatency(void* context, void* frame, void* result)
@@ -2590,6 +2656,9 @@ namespace w3mp {
 		RegisterOne(L"WO_NpcHp", reinterpret_cast<void*>(&WO_NpcHp), "WO_NpcHp");
 		RegisterOne(L"WO_NpcFlags", reinterpret_cast<void*>(&WO_NpcFlags), "WO_NpcFlags");
 		RegisterOne(L"WO_NpcTarget", reinterpret_cast<void*>(&WO_NpcTarget), "WO_NpcTarget");
+		RegisterOne(L"WO_NpcTerminalState", reinterpret_cast<void*>(&WO_NpcTerminalState), "WO_NpcTerminalState");
+		RegisterOne(L"WO_NpcTerminalRevision", reinterpret_cast<void*>(&WO_NpcTerminalRevision), "WO_NpcTerminalRevision");
+		RegisterOne(L"WO_NpcTerminalAttacker", reinterpret_cast<void*>(&WO_NpcTerminalAttacker), "WO_NpcTerminalAttacker");
 		RegisterOne(L"WO_NpcType", reinterpret_cast<void*>(&WO_NpcType), "WO_NpcType");
 		RegisterOne(L"WO_NpcAppearance", reinterpret_cast<void*>(&WO_NpcAppearance), "WO_NpcAppearance");
 		RegisterOne(L"WO_NpcBind", reinterpret_cast<void*>(&WO_NpcBind), "WO_NpcBind");
@@ -2603,6 +2672,7 @@ namespace w3mp {
 		RegisterOne(L"WO_NpcDropsDone", reinterpret_cast<void*>(&WO_NpcDropsDone), "WO_NpcDropsDone");
 		RegisterOne(L"WO_NpcKillCount", reinterpret_cast<void*>(&WO_NpcKillCount), "WO_NpcKillCount");
 		RegisterOne(L"WO_NpcKillGuid", reinterpret_cast<void*>(&WO_NpcKillGuid), "WO_NpcKillGuid");
+		RegisterOne(L"WO_NpcKillAttacker", reinterpret_cast<void*>(&WO_NpcKillAttacker), "WO_NpcKillAttacker");
 		RegisterOne(L"WO_NpcKillsDone", reinterpret_cast<void*>(&WO_NpcKillsDone), "WO_NpcKillsDone");
 		RegisterOne(L"WO_NpcReportHit", reinterpret_cast<void*>(&WO_NpcReportHit), "WO_NpcReportHit");
 		RegisterOne(L"WO_NpcHitCount", reinterpret_cast<void*>(&WO_NpcHitCount), "WO_NpcHitCount");

@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <Config>
-	<Username>Player</Username>
-	<ServerIP>22.222.222.22</ServerIP>
+	<Username>ChangeMe</Username>
+	<ServerIP>127.0.0.1</ServerIP>
 	<Port>40000</Port>
 </Config>

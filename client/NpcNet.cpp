@@ -34,6 +34,7 @@ namespace w3mp {
 		constexpr int kKeepaliveMs = 500;
 		constexpr int kOwnedGraceMs = 900;
 		constexpr int kReplicaStaleMs = 6000;
+		constexpr int kQuestAuthorityTimeoutMs = 1500;
 		constexpr int kDeathAnimGraceMs = 2000;
 		constexpr float kPositionDeadband = 0.08f;
 		constexpr float kHeadingDeadband = 2.0f;
@@ -50,6 +51,9 @@ namespace w3mp {
 			int hpPermille = -1;
 			int flags = 0;
 			int targetPlayerId = 0;
+			int terminalState = 0;
+			int terminalRevision = 0;
+			int terminalAttackerId = 0;
 		};
 
 		struct OwnedEntity
@@ -66,6 +70,8 @@ namespace w3mp {
 			int hpPermille = -1;
 			int flags = 0;
 			int targetPlayerId = 0;
+			int terminalState = 0;
+			int terminalAttackerId = 0;
 
 			bool registered = false;
 			bool seenThisFrame = false;
@@ -79,6 +85,8 @@ namespace w3mp {
 			int sentHp = -2;
 			int sentFlags = -1;
 			int sentTarget = -1;
+			int sentTerminalState = -1;
+			int sentTerminalAttacker = -1;
 		};
 
 		struct Replica
@@ -92,7 +100,10 @@ namespace w3mp {
 			bool spawnEmitted = false;
 			bool despawn = false;
 			bool dead = false;
-			bool deathEmitted = false;
+			int terminalState = 0;
+			int terminalRevision = 0;
+			int terminalAttackerId = 0;
+			int emittedTerminalRevision = 0;
 			bool promote = false;
 			bool unspawnable = false;
 			int spawnAttempts = 0;
@@ -110,6 +121,12 @@ namespace w3mp {
 			long long atServerMs = 0;
 		};
 
+		struct KillOrder
+		{
+			int guid = 0;
+			int attackerPlayerId = 0;
+		};
+
 		std::mutex g_mutex;
 		PacketSender g_sender;
 
@@ -123,7 +140,7 @@ namespace w3mp {
 		std::vector<PendingHit> g_pending;
 		std::vector<std::string> g_ackQueue;
 		std::vector<int> g_dropGuids;
-		std::vector<int> g_killGuids;
+		std::vector<KillOrder> g_killOrders;
 		std::vector<int> g_giveNacks;
 		std::unordered_map<int, bool> g_pausedPlayers;
 		std::unordered_map<int, int> g_scales;
@@ -287,6 +304,12 @@ namespace w3mp {
 			if (entity.targetPlayerId != entity.sentTarget)
 				mask |= 16;
 
+			if (entity.terminalState != entity.sentTerminalState)
+				mask |= 32;
+
+			if (entity.terminalAttackerId != entity.sentTerminalAttacker)
+				mask |= 64;
+
 			return mask;
 		}
 
@@ -299,6 +322,8 @@ namespace w3mp {
 			entity.sentHp = entity.hpPermille;
 			entity.sentFlags = entity.flags;
 			entity.sentTarget = entity.targetPlayerId;
+			entity.sentTerminalState = entity.terminalState;
+			entity.sentTerminalAttacker = entity.terminalAttackerId;
 			entity.lastSentMs = now;
 		}
 
@@ -343,8 +368,8 @@ namespace w3mp {
 			size_t addBytes = 0;
 			size_t updBytes = 0;
 
-			addFields.reserve(kAddPerPacket * 12 + 2);
-			updFields.reserve(kUpdPerPacket * 9 + 2);
+			addFields.reserve(kAddPerPacket * 14 + 2);
+			updFields.reserve(kUpdPerPacket * 11 + 2);
 
 			for (int guid : g_ownedRemoved)
 			{
@@ -402,6 +427,8 @@ namespace w3mp {
 					addFields.push_back(std::to_string(entity.flags));
 					addFields.push_back(std::to_string(entity.targetPlayerId));
 					addFields.push_back(std::to_string(entity.localCount));
+					addFields.push_back(std::to_string(entity.terminalState));
+					addFields.push_back(std::to_string(entity.terminalAttackerId));
 
 					entity.registered = true;
 					MarkSent(entity, now);
@@ -458,6 +485,12 @@ namespace w3mp {
 
 				if (mask & 16)
 					updFields.push_back(std::to_string(entity.targetPlayerId));
+
+				if (mask & 32)
+					updFields.push_back(std::to_string(entity.terminalState));
+
+				if (mask & 64)
+					updFields.push_back(std::to_string(entity.terminalAttackerId));
 
 				MarkSent(entity, now);
 				updCount++;
@@ -539,6 +572,9 @@ namespace w3mp {
 			command.hpPermille = newest.hpPermille;
 			command.flags = newest.flags;
 			command.targetPlayerId = newest.targetPlayerId;
+			command.terminalState = newest.terminalState;
+			command.terminalRevision = newest.terminalRevision;
+			command.terminalAttackerId = newest.terminalAttackerId;
 
 			if (replica.samples.size() == 1 || renderTime <= oldest.t)
 			{
@@ -645,7 +681,7 @@ namespace w3mp {
 
 				if (isSpawn)
 				{
-					entrySize = 11;
+					entrySize = 14;
 				}
 				else
 				{
@@ -664,6 +700,10 @@ namespace w3mp {
 					if (mask & 8)
 						entrySize += 1;
 					if (mask & 16)
+						entrySize += 1;
+					if (mask & 32)
+						entrySize += 2;
+					if (mask & 64)
 						entrySize += 1;
 				}
 
@@ -696,8 +736,15 @@ namespace w3mp {
 					sample.hpPermille = ParseInt(fields, base + 8);
 					sample.flags = ParseInt(fields, base + 9);
 					sample.targetPlayerId = ParseInt(fields, base + 10);
+					sample.terminalState = ParseInt(fields, base + 11);
+					sample.terminalRevision = ParseInt(fields, base + 12);
+					sample.terminalAttackerId = ParseInt(fields, base + 13);
 
-					if ((sample.flags & 1) == 0 || sample.hpPermille <= 0)
+					replica.terminalState = sample.terminalState;
+					replica.terminalRevision = sample.terminalRevision;
+					replica.terminalAttackerId = sample.terminalAttackerId;
+
+					if (sample.terminalState != 0 || (sample.flags & 1) == 0 || sample.hpPermille <= 0)
 						replica.dead = true;
 				}
 				else
@@ -715,6 +762,9 @@ namespace w3mp {
 						sample.hpPermille = previous.hpPermille;
 						sample.flags = previous.flags;
 						sample.targetPlayerId = previous.targetPlayerId;
+						sample.terminalState = previous.terminalState;
+						sample.terminalRevision = previous.terminalRevision;
+						sample.terminalAttackerId = previous.terminalAttackerId;
 					}
 
 					if (mask & 1)
@@ -748,6 +798,24 @@ namespace w3mp {
 						sample.targetPlayerId = ParseInt(fields, at);
 						at += 1;
 					}
+
+					if (mask & 32)
+					{
+						sample.terminalState = ParseInt(fields, at);
+						sample.terminalRevision = ParseInt(fields, at + 1);
+						at += 2;
+					}
+
+					if (mask & 64)
+					{
+						sample.terminalAttackerId = ParseInt(fields, at);
+						at += 1;
+					}
+
+					replica.terminalState = sample.terminalState;
+					replica.terminalRevision = sample.terminalRevision;
+					replica.terminalAttackerId = sample.terminalAttackerId;
+					replica.dead = sample.terminalState != 0 || (sample.flags & 1) == 0 || sample.hpPermille <= 0;
 				}
 
 				if (!replica.samples.empty() && sample.t < replica.samples.back().t)
@@ -790,6 +858,7 @@ namespace w3mp {
 		g_commands.clear();
 		g_hits.clear();
 		g_acks.clear();
+		g_killOrders.clear();
 		g_pending.clear();
 		g_pendingCount.store(0, std::memory_order_relaxed);
 		g_ackQueue.clear();
@@ -870,9 +939,9 @@ namespace w3mp {
 
 			for (int i = 0; i < count; ++i)
 			{
-				const size_t base = 1 + static_cast<size_t>(i) * 2;
+				const size_t base = 1 + static_cast<size_t>(i);
 
-				if (base + 2 > fields.size())
+				if (base >= fields.size())
 					break;
 
 				const int canonicalId = ParseInt(fields, base);
@@ -891,15 +960,17 @@ namespace w3mp {
 
 			for (int i = 0; i < count; ++i)
 			{
-				const size_t base = 1 + static_cast<size_t>(i);
+				const size_t base = 1 + static_cast<size_t>(i) * 2;
 
-				if (base >= fields.size())
+				if (base + 2 > fields.size())
 					break;
 
-				const int guid = ParseInt(fields, base);
+				KillOrder order;
+				order.guid = ParseInt(fields, base);
+				order.attackerPlayerId = ParseInt(fields, base + 1);
 
-				if (guid != 0)
-					g_killGuids.push_back(guid);
+				if (order.guid != 0)
+					g_killOrders.push_back(order);
 			}
 
 			return;
@@ -1020,9 +1091,9 @@ namespace w3mp {
 
 			for (int i = 0; i < count; ++i)
 			{
-				const size_t base = 1 + static_cast<size_t>(i);
+				const size_t base = 1 + static_cast<size_t>(i) * 4;
 
-				if (base >= fields.size())
+				if (base + 4 > fields.size())
 					break;
 
 				const int canonicalId = ParseInt(fields, base);
@@ -1031,6 +1102,9 @@ namespace w3mp {
 
 				Replica& replica = g_replicas[canonicalId];
 				replica.canonicalId = canonicalId;
+				replica.terminalState = ParseInt(fields, base + 1);
+				replica.terminalRevision = ParseInt(fields, base + 2);
+				replica.terminalAttackerId = ParseInt(fields, base + 3);
 				replica.dead = true;
 				replica.lastPacketMs = ServerNow();
 			}
@@ -1227,7 +1301,9 @@ namespace w3mp {
 		float heading,
 		int hpPermille,
 		int flags,
-		int targetPlayerId)
+		int targetPlayerId,
+		int terminalState,
+		int terminalAttackerId)
 	{
 		if (guid == 0)
 			return false;
@@ -1258,6 +1334,8 @@ namespace w3mp {
 		entity.hpPermille = hpPermille;
 		entity.flags = flags;
 		entity.targetPlayerId = targetPlayerId;
+		entity.terminalState = terminalState;
+		entity.terminalAttackerId = terminalAttackerId;
 		entity.seenThisFrame = true;
 		entity.lastSeenMs = g_batchNowMs;
 
@@ -1306,6 +1384,16 @@ namespace w3mp {
 			g_ownedRemoved.clear();
 			g_owned.clear();
 			g_statSuspends++;
+		}
+		else
+		{
+			const long long now = ServerNow();
+
+			for (auto& pair : g_replicas)
+			{
+				if (pair.second.typeCode.rfind("quest:", 0) == 0)
+					pair.second.lastPacketMs = now;
+			}
 		}
 	}
 
@@ -1385,15 +1473,20 @@ namespace w3mp {
 
 			if (replica.despawn)
 			{
-				if (replica.dead && !replica.deathEmitted && replica.localGuid != 0)
+				if (replica.dead
+					&& replica.terminalRevision > replica.emittedTerminalRevision
+					&& replica.localGuid != 0)
 				{
 					ReplicaCommand command;
 					command.canonicalId = replica.canonicalId;
 					command.op = static_cast<int>(ReplicaOp::Kill);
 					command.localGuid = replica.localGuid;
+					command.terminalState = replica.terminalState;
+					command.terminalRevision = replica.terminalRevision;
+					command.terminalAttackerId = replica.terminalAttackerId;
 					g_commands.push_back(command);
 
-					replica.deathEmitted = true;
+					replica.emittedTerminalRevision = replica.terminalRevision;
 					replica.despawnAfterMs = serverNow + kDeathAnimGraceMs;
 					g_statKills++;
 
@@ -1437,6 +1530,21 @@ namespace w3mp {
 				continue;
 			}
 
+			if (questReplica
+				&& replica.localGuid != 0
+				&& !replica.promote
+				&& (serverNow - replica.lastPacketMs) > kQuestAuthorityTimeoutMs)
+			{
+				ReplicaCommand command;
+				command.canonicalId = replica.canonicalId;
+				command.localGuid = replica.localGuid;
+				command.op = static_cast<int>(ReplicaOp::ReleaseLocal);
+				g_commands.push_back(command);
+				wanted.push_back(replica.canonicalId);
+				it = g_replicas.erase(it);
+				continue;
+			}
+
 			ReplicaCommand command;
 			command.canonicalId = replica.canonicalId;
 			command.localGuid = replica.localGuid;
@@ -1458,6 +1566,14 @@ namespace w3mp {
 
 			if (!Interpolate(replica, renderTime, command))
 			{
+				if (replica.samples.empty()
+					&& (serverNow - replica.wantedAtMs) >= kWantIntervalMs)
+				{
+					replica.wantedAtMs = serverNow;
+					wanted.push_back(replica.canonicalId);
+					g_statWants++;
+				}
+
 				++it;
 				continue;
 			}
@@ -1470,7 +1586,7 @@ namespace w3mp {
 					continue;
 				}
 
-				if (replica.dead && replica.deathEmitted)
+				if (replica.dead && replica.emittedTerminalRevision >= replica.terminalRevision)
 				{
 					++it;
 					continue;
@@ -1506,10 +1622,10 @@ namespace w3mp {
 				replica.spawnAttempts++;
 				g_statSpawns++;
 			}
-			else if (replica.dead && !replica.deathEmitted)
+			else if (replica.dead && replica.terminalRevision > replica.emittedTerminalRevision)
 			{
 				command.op = static_cast<int>(ReplicaOp::Kill);
-				replica.deathEmitted = true;
+				replica.emittedTerminalRevision = replica.terminalRevision;
 				g_statKills++;
 			}
 			else if (replica.promote)
@@ -1534,19 +1650,23 @@ namespace w3mp {
 
 		if (!wanted.empty() && sender)
 		{
-			std::vector<std::string> fields;
-			int count = 0;
-
-			for (size_t i = 0; i < wanted.size() && count < kWantPerPacket; ++i)
+			for (size_t offset = 0; offset < wanted.size();)
 			{
-				fields.push_back(std::to_string(wanted[i]));
-				count++;
+				std::vector<std::string> fields;
+				int count = 0;
+
+				while (offset < wanted.size() && count < kWantPerPacket)
+				{
+					fields.push_back(std::to_string(wanted[offset]));
+					offset++;
+					count++;
+				}
+
+				fields.insert(fields.begin(), std::to_string(count));
+
+				if (fields.size() > 1)
+					sender("NPCWANT", fields);
 			}
-
-			fields.insert(fields.begin(), std::to_string(count));
-
-			if (fields.size() > 1)
-				sender("NPCWANT", fields);
 		}
 
 		return result;
@@ -1590,23 +1710,33 @@ namespace w3mp {
 	int NpcNet::PullKills()
 	{
 		std::lock_guard<std::mutex> lock(g_mutex);
-		return static_cast<int>(g_killGuids.size());
+		return static_cast<int>(g_killOrders.size());
 	}
 
 	int NpcNet::KillGuid(int index)
 	{
 		std::lock_guard<std::mutex> lock(g_mutex);
 
-		if (index < 0 || index >= static_cast<int>(g_killGuids.size()))
+		if (index < 0 || index >= static_cast<int>(g_killOrders.size()))
 			return 0;
 
-		return g_killGuids[index];
+		return g_killOrders[index].guid;
+	}
+
+	int NpcNet::KillAttacker(int index)
+	{
+		std::lock_guard<std::mutex> lock(g_mutex);
+
+		if (index < 0 || index >= static_cast<int>(g_killOrders.size()))
+			return 0;
+
+		return g_killOrders[index].attackerPlayerId;
 	}
 
 	void NpcNet::ClearKills()
 	{
 		std::lock_guard<std::mutex> lock(g_mutex);
-		g_killGuids.clear();
+		g_killOrders.clear();
 	}
 
 	const ReplicaCommand* NpcNet::Command(int index)
@@ -1647,6 +1777,9 @@ namespace w3mp {
 		if (it == g_replicas.end())
 			return;
 
+		if (localGuid != 0 && localGuid != it->second.localGuid && it->second.dead)
+			it->second.emittedTerminalRevision = 0;
+
 		it->second.localGuid = localGuid;
 		it->second.spawnAttempts = 0;
 		it->second.spawnRequested = false;
@@ -1662,6 +1795,9 @@ namespace w3mp {
 
 		if (it == g_replicas.end())
 			return;
+
+		if (localGuid != 0 && localGuid != it->second.localGuid && it->second.dead)
+			it->second.emittedTerminalRevision = 0;
 
 		it->second.localGuid = localGuid;
 		it->second.spawnAttempts = 0;

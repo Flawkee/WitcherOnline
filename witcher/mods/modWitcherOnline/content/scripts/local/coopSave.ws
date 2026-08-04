@@ -28,6 +28,7 @@ class r_CoopSave
     private var SAVE_INTERVAL : float;
     private var SAVE_SETTLE   : float;
     private var SAVE_TIMEOUT  : float;
+    private var ADOPT_TIMEOUT : float;
 
     default active = false;
     default haveLock = false;
@@ -54,6 +55,7 @@ class r_CoopSave
     default SAVE_INTERVAL = 300.0;
     default SAVE_SETTLE = 1.0;
     default SAVE_TIMEOUT = 60.0;
+    default ADOPT_TIMEOUT = 90.0;
 
     public function isActive() : bool
     {
@@ -311,7 +313,7 @@ class r_CoopSave
                 return;
             }
 
-            if((now - adoptStartedAt) > 600.0)
+            if((now - adoptStartedAt) > ADOPT_TIMEOUT)
             {
                 adoptStage = 0;
                 retryOrFail();

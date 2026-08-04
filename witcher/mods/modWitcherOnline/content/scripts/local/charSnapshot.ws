@@ -1368,7 +1368,7 @@ exec function wo_char_save()
     if(WO_CharStore(wo_charSnapshotSlot(), body))
     {
         WO_Note("[char] saved " + StrLen(body) + " bytes");
-        GetWitcherPlayer().DisplayHudMessage("Character snapshot saved");
+        GetWitcherPlayer().DisplayHudMessage(GetLocStringById(2111114316));
     }
     else
     {
@@ -1394,7 +1394,7 @@ exec function wo_char_load()
     report = snapshot.restore(body);
 
     WO_Note("[char] restored: " + report);
-    GetWitcherPlayer().DisplayHudMessage("Character restored");
+    GetWitcherPlayer().DisplayHudMessage(GetLocStringById(2111114317));
 }
 
 exec function wo_char_dump()

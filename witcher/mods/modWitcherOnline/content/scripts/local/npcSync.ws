@@ -20,11 +20,15 @@ class r_TrackedNpc
     public var appearanceText : string;
     public var isMonster  : bool;
     public var cachedForcedTarget : int;
+    public var terminalState : int;
+    public var lastAttackerId : int;
 
     default questTag = "";
     default appearanceText = "";
     default isMonster = false;
     default cachedForcedTarget = 0;
+    default terminalState = 0;
+    default lastAttackerId = 0;
     default baseMaxHealth = -1.0;
     default appliedScale = 1000;
     default lastAttackType = -1;
@@ -64,11 +68,31 @@ class r_Replica
     public var boundLocal    : bool;
     public var hasTicket     : bool;
     public var authorityReady : bool;
+    public var questOriginalImmortality : int;
+    public var questOriginalAttackable : bool;
+    public var questOriginalHitAnim : bool;
+    public var questHealthProtectionApplied : bool;
+    public var terminalState : int;
+    public var terminalRevision : int;
+    public var terminalAttackerId : int;
+    public var terminalAppliedRevision : int;
+    public var terminalVerifyAt : float;
+    public var terminalAttempts : int;
 
     default questTag = "";
     default boundLocal = false;
     default hasTicket = false;
     default authorityReady = false;
+    default questOriginalImmortality = -1;
+    default questOriginalAttackable = false;
+    default questOriginalHitAnim = false;
+    default questHealthProtectionApplied = false;
+    default terminalState = 0;
+    default terminalRevision = 0;
+    default terminalAttackerId = 0;
+    default terminalAppliedRevision = 0;
+    default terminalVerifyAt = 0.0;
+    default terminalAttempts = 0;
     default baseMaxHealth = -1.0;
     default appliedScale = 1000;
     default appliedHostile = -1;
@@ -729,6 +753,7 @@ class r_NpcSync
         }
 
         updateSyncGate(now);
+        verifyQuestTerminals(now);
 
         if(now >= nextScanAt)
         {
@@ -802,6 +827,7 @@ class r_NpcSync
             nextDebugAt = now + DEBUG_INTERVAL;
             writeDebug(now);
         }
+
     }
 
     private function updateSuspension(now : float) : bool
@@ -1324,6 +1350,36 @@ class r_NpcSync
         }
 
         return (int)((current / maximum) * 1000.0);
+    }
+
+    private function questTerminalState(npc : CNewNPC) : int
+    {
+        if(!npc)
+        {
+            return 0;
+        }
+
+        if(npc.IsInAgony())
+        {
+            return 3;
+        }
+
+        if(npc.IsKnockedUnconscious())
+        {
+            return 2;
+        }
+
+        if(!npc.IsAlive())
+        {
+            if(npc.WillBeUnconscious())
+            {
+                return 2;
+            }
+
+            return 1;
+        }
+
+        return 0;
     }
 
     private function buildFlags(npc : CNewNPC, record : r_TrackedNpc) : int
@@ -1894,6 +1950,75 @@ class r_NpcSync
         record.boundLocal = false;
         record.hasTicket = false;
         record.authorityReady = false;
+        record.questOriginalImmortality = -1;
+        record.questOriginalAttackable = false;
+        record.questOriginalHitAnim = false;
+        record.questHealthProtectionApplied = false;
+    }
+
+    private function questDefaultImmortality(npc : CNewNPC) : int
+    {
+        var channels : array<EActorImmortalityChanel>;
+
+        if(!npc)
+        {
+            return (int)AIM_None;
+        }
+
+        channels = npc.GetImmortalityModeChannels(AIM_Invulnerable);
+
+        if(channels.Contains(AIC_Default))
+        {
+            return (int)AIM_Invulnerable;
+        }
+
+        channels = npc.GetImmortalityModeChannels(AIM_Immortal);
+
+        if(channels.Contains(AIC_Default))
+        {
+            return (int)AIM_Immortal;
+        }
+
+        channels = npc.GetImmortalityModeChannels(AIM_Unconscious);
+
+        if(channels.Contains(AIC_Default))
+        {
+            return (int)AIM_Unconscious;
+        }
+
+        return (int)AIM_None;
+    }
+
+    private function applyQuestHealthProtection(record : r_Replica, npc : CNewNPC)
+    {
+        if(!record || !npc)
+        {
+            return;
+        }
+
+        record.questOriginalImmortality = questDefaultImmortality(npc);
+        record.questOriginalAttackable = npc.IsAttackableByPlayer();
+        record.questOriginalHitAnim = npc.CanPlayHitAnim();
+        record.questHealthProtectionApplied = false;
+
+        if(record.questOriginalImmortality == (int)AIM_None)
+        {
+            npc.SetImmortalityMode(AIM_Immortal, AIC_Default);
+            record.questHealthProtectionApplied = questDefaultImmortality(npc) == (int)AIM_Immortal;
+        }
+    }
+
+    private function releaseQuestHealthProtection(record : r_Replica, npc : CNewNPC)
+    {
+        if(!record || !npc || !record.questHealthProtectionApplied)
+        {
+            return;
+        }
+
+        npc.SetImmortalityMode(
+            (EActorImmortalityMode)record.questOriginalImmortality,
+            AIC_Default);
+        record.questHealthProtectionApplied = false;
     }
 
     private function bindQuestReplica(record : r_Replica, now : float) : bool
@@ -1987,9 +2112,7 @@ class r_NpcSync
 
             npc.AddTag('WOQuestBound');
             npc.AddTag('WOReplica');
-            npc.SetImmortalityMode(AIM_Immortal, AIC_Default, true);
-            npc.SetAttackableByPlayerRuntime(true);
-            npc.SetCanPlayHitAnim(true);
+            applyQuestHealthProtection(record, npc);
 
             record.actor = npc;
             record.localGuid = guid;
@@ -2001,7 +2124,11 @@ class r_NpcSync
             WO_NpcBindId(record.canonicalId, record.localGuid);
 
             dbg("npc_quest", "bound canonical=" + record.canonicalId
-                + " tag=" + record.questTag + " guid=" + record.localGuid);
+                + " tag=" + record.questTag + " guid=" + record.localGuid
+                + " originalImm=" + record.questOriginalImmortality
+                + " protected=" + record.questHealthProtectionApplied
+                + " attackable=" + record.questOriginalAttackable
+                + " hitAnim=" + record.questOriginalHitAnim);
 
             return true;
         }
@@ -2049,12 +2176,11 @@ class r_NpcSync
 
             wo_releaseNpcTarget(record.actor);
             restoreHealthScale(record.actor, record.baseMaxHealth, record.appliedScale);
+            releaseQuestHealthProtection(record, record.actor);
 
             record.actor.RemoveTag('WOQuestBound');
             record.actor.RemoveTag('WOReplica');
-            record.actor.SetImmortalityMode(AIM_None, AIC_Default, true);
 
-            dbg("npc_quest", "released canonical=" + record.canonicalId + " tag=" + record.questTag);
         }
 
         record.actor = NULL;
@@ -2113,6 +2239,17 @@ class r_NpcSync
                 unbindQuestReplica(replicas[i], false);
                 WO_NpcForget(replicas[i].canonicalId);
                 replicas.Erase(i);
+                continue;
+            }
+
+            if(replicas[i].terminalState > 0 && replicas[i].terminalRevision > 0)
+            {
+                if(replicas[i].terminalAppliedRevision < replicas[i].terminalRevision
+                    && replicas[i].terminalVerifyAt <= 0.0)
+                {
+                    replicas[i].terminalVerifyAt = now;
+                }
+
                 continue;
             }
 
@@ -2204,12 +2341,14 @@ class r_NpcSync
         return path;
     }
 
-    public function creditOwnedDamage(actor : CNewNPC, dealt : float)
+    public function creditOwnedDamage(actor : CNewNPC, dealt : float, attacker : CGameplayEntity)
     {
+        var attackerActor : CActor;
+        var attackerId : int;
         var localId : int;
         var index : int;
 
-        if(!actor || dealt <= 0.0)
+        if(!actor)
         {
             return;
         }
@@ -2221,6 +2360,10 @@ class r_NpcSync
             return;
         }
 
+        attackerActor = (CActor)attacker;
+        attackerId = theGame.r_getMultiplayerClient().encodeTargetPlayerId(attackerActor);
+        tracked[index].lastAttackerId = attackerId;
+
         localId = theGame.r_getMultiplayerClient().getServerId();
 
         if(localId <= 0)
@@ -2228,8 +2371,15 @@ class r_NpcSync
             return;
         }
 
-        getAggro().noteDamage(tracked[index].npcId, localId, dealt, theGame.GetEngineTimeAsSeconds());
-        statLocalDamage += 1;
+        if(attackerId > 0 && dealt > 0.0)
+        {
+            getAggro().noteDamage(tracked[index].npcId, attackerId, dealt, theGame.GetEngineTimeAsSeconds());
+        }
+
+        if(dealt > 0.0)
+        {
+            statLocalDamage += 1;
+        }
     }
 
     private function syncScopeLabel() : string
@@ -2332,6 +2482,7 @@ class r_NpcSync
 
             pos = npc.GetWorldPosition();
             hp = healthPermille(npc);
+            tracked[i].terminalState = tracked[i].questTag != "" ? questTerminalState(npc) : 0;
 
             forced = tracked[i].cachedForcedTarget;
 
@@ -2367,7 +2518,9 @@ class r_NpcSync
                 npc.GetHeading(),
                 hp,
                 buildFlags(npc, tracked[i]),
-                targetId);
+                targetId,
+                tracked[i].terminalState,
+                tracked[i].lastAttackerId);
 
             tracked[i].lastHp = hp;
             tracked[i].lastTargetId = targetId;
@@ -2405,6 +2558,23 @@ class r_NpcSync
             if(replicas[i].actor != actor)
             {
                 continue;
+            }
+
+            if(replicas[i].questTag != "" && actor.IsImmortal()
+                && actor.GetHealth() > 0.0 && actor.GetHealth() <= 1.01)
+            {
+                dealt += actor.GetHealth();
+                permille = (int)((dealt / maximum) * 1000.0);
+
+                if(permille <= 0)
+                {
+                    permille = 1;
+                }
+
+                if(permille > 1000)
+                {
+                    permille = 1000;
+                }
             }
 
             if(WO_NpcReportHit(replicas[i].canonicalId, permille) != 0)
@@ -2547,6 +2717,8 @@ class r_NpcSync
     private function applyKillOrders()
     {
         var count : int;
+        var attackerId : int;
+        var attacker : CActor;
         var guid : int;
         var index : int;
         var i : int;
@@ -2561,6 +2733,7 @@ class r_NpcSync
         for(i = 0; i < count; i += 1)
         {
             guid = WO_NpcKillGuid(i);
+            attackerId = WO_NpcKillAttacker(i);
             index = findTrackedById(guid);
 
             if(index < 0)
@@ -2570,7 +2743,17 @@ class r_NpcSync
 
             if(tracked[index].actor && tracked[index].actor.IsAlive())
             {
-                tracked[index].actor.Kill('WitcherOnline', true, NULL);
+                attacker = theGame.r_getMultiplayerClient().resolveTargetActor(attackerId);
+                tracked[index].lastAttackerId = attackerId;
+
+                if(tracked[index].questTag != "")
+                {
+                    tracked[index].actor.Kill('WitcherOnlineQuestSync', false, attacker);
+                }
+                else
+                {
+                    tracked[index].actor.Kill('WitcherOnline', true, NULL);
+                }
                 statKilled += 1;
 
                 dbg("npc_kill", "server-confirmed kill of owned guid=" + guid);
@@ -2626,13 +2809,20 @@ class r_NpcSync
 
             if(op == 3)
             {
-                killReplica(replicas[index]);
+                killReplica(replicas[index], i, now);
                 continue;
             }
 
             if(op == 4)
             {
                 promoteReplica(replicas[index], now);
+                replicas.Erase(index);
+                continue;
+            }
+
+            if(op == 5)
+            {
+                recoverQuestReplicaLocally(replicas[index], now);
                 replicas.Erase(index);
                 continue;
             }
@@ -2668,6 +2858,9 @@ class r_NpcSync
             record.questTag = StrAfterFirst(typeCode, "quest:");
             record.typeCode = typeCode;
             record.appearance = appearance;
+            record.terminalState = WO_NpcTerminalState(commandIndex);
+            record.terminalRevision = WO_NpcTerminalRevision(commandIndex);
+            record.terminalAttackerId = WO_NpcTerminalAttacker(commandIndex);
 
             if(!bindQuestReplica(record, now))
             {
@@ -2820,8 +3013,152 @@ class r_NpcSync
         record.actor = NULL;
     }
 
-    private function killReplica(record : r_Replica)
+    private function questTerminalMatches(record : r_Replica) : bool
     {
+        if(!record.actor)
+        {
+            return true;
+        }
+
+        if(record.terminalState == 2)
+        {
+            return record.actor.IsKnockedUnconscious();
+        }
+
+        if(record.terminalState == 3)
+        {
+            return record.actor.IsInAgony();
+        }
+
+        if(record.terminalState == 1)
+        {
+            return !record.actor.IsAlive()
+                && !record.actor.IsKnockedUnconscious()
+                && !record.actor.IsInAgony();
+        }
+
+        return record.actor.IsAlive();
+    }
+
+    private function detachQuestTerminalActor(record : r_Replica)
+    {
+        if(!record.actor)
+        {
+            return;
+        }
+
+        if(record.aiForceId >= 0)
+        {
+            record.actor.CancelAIBehavior(record.aiForceId);
+            record.aiForceId = -1;
+        }
+
+        cancelReplicaMovement(record);
+        wo_releaseNpcTarget(record.actor);
+        releaseQuestHealthProtection(record, record.actor);
+
+        record.actor.RemoveTag('WOReplica');
+        record.actor.RemoveTag('WOQuestBound');
+        record.prepared = false;
+        record.authorityReady = false;
+    }
+
+    private function applyQuestTerminalNative(record : r_Replica, now : float)
+    {
+        var attacker : CActor;
+
+        if(!record || record.questTag == "" || record.terminalState <= 0
+            || record.terminalRevision <= 0)
+        {
+            return;
+        }
+
+        if(!record.actor)
+        {
+            record.terminalAppliedRevision = record.terminalRevision;
+            record.terminalVerifyAt = 0.0;
+            return;
+        }
+
+        detachQuestTerminalActor(record);
+        attacker = theGame.r_getMultiplayerClient().resolveTargetActor(record.terminalAttackerId);
+
+        if(record.terminalState == 2)
+        {
+            record.actor.SetImmortalityMode(AIM_Unconscious, AIC_Default, true);
+        }
+        else if(record.terminalState == 3)
+        {
+            record.actor.SignalGameplayEvent('ForceAgony');
+        }
+
+        if(record.actor.IsAlive())
+        {
+            record.actor.Kill('WitcherOnlineQuestSync', false, attacker);
+            statKilled += 1;
+        }
+
+        record.terminalAppliedRevision = record.terminalRevision;
+        record.terminalAttempts += 1;
+        record.terminalVerifyAt = now + 0.15;
+
+    }
+
+    private function verifyQuestTerminals(now : float)
+    {
+        var i : int;
+
+        for(i = 0; i < replicas.Size(); i += 1)
+        {
+            if(replicas[i].questTag == "" || replicas[i].terminalState <= 0
+                || replicas[i].terminalRevision <= 0 || replicas[i].terminalVerifyAt <= 0.0
+                || now < replicas[i].terminalVerifyAt)
+            {
+                continue;
+            }
+
+            if(replicas[i].terminalAppliedRevision == replicas[i].terminalRevision
+                && questTerminalMatches(replicas[i]))
+            {
+                replicas[i].terminalVerifyAt = 0.0;
+                continue;
+            }
+
+            if(replicas[i].terminalAttempts < 3)
+            {
+                applyQuestTerminalNative(replicas[i], now);
+                continue;
+            }
+
+            replicas[i].terminalAppliedRevision = replicas[i].terminalRevision;
+            replicas[i].terminalVerifyAt = 0.0;
+        }
+    }
+
+    private function killReplica(record : r_Replica, commandIndex : int, now : float)
+    {
+        if(record.questTag != "")
+        {
+            record.terminalState = WO_NpcTerminalState(commandIndex);
+            record.terminalRevision = WO_NpcTerminalRevision(commandIndex);
+            record.terminalAttackerId = WO_NpcTerminalAttacker(commandIndex);
+
+            if(record.terminalState <= 0)
+            {
+                record.terminalState = 1;
+            }
+
+            if(record.terminalRevision <= record.terminalAppliedRevision)
+            {
+                return;
+            }
+
+            record.terminalAttempts = 0;
+            record.terminalVerifyAt = now;
+            applyQuestTerminalNative(record, now);
+            return;
+        }
+
         if(!record.actor)
         {
             return;
@@ -2843,10 +3180,92 @@ class r_NpcSync
     {
         var npc : CNewNPC;
         var owned : r_TrackedNpc;
+        var preservedTargetId : int;
+        var preservedTarget : CActor;
 
         npc = record.actor;
 
         if(!npc)
+        {
+            WO_NpcForget(record.canonicalId);
+            return;
+        }
+
+        if(record.questTag != "" && record.appliedTarget > 0)
+        {
+            preservedTargetId = record.appliedTarget;
+        }
+
+        if(record.aiForceId >= 0)
+        {
+            npc.CancelAIBehavior(record.aiForceId);
+            record.aiForceId = -1;
+        }
+
+        cancelReplicaMovement(record);
+        wo_releaseNpcTarget(npc);
+
+        if(record.questTag != "")
+        {
+            releaseQuestHealthProtection(record, npc);
+        }
+        else
+        {
+            npc.SetImmortalityMode(AIM_None, AIC_Default, true);
+        }
+        npc.RemoveTag('WOReplica');
+        npc.RemoveTag('WOQuestBound');
+
+        if(preservedTargetId > 0)
+        {
+            preservedTarget = theGame.r_getMultiplayerClient().resolveTargetActor(preservedTargetId);
+
+            if(preservedTarget)
+            {
+                wo_forceNpcTarget(npc, preservedTarget);
+            }
+        }
+
+        owned = new r_TrackedNpc in this;
+        owned.npcId = npc.GetGuidHash();
+        owned.actor = npc;
+        owned.appearance = npc.GetAppearance();
+        owned.appearanceText = NameToString(owned.appearance);
+        owned.isMonster = npc.IsMonster();
+        owned.typeCode = record.typeCode;
+        owned.questTag = record.questTag;
+        owned.lastSeenAt = now;
+        owned.lastHp = -1;
+        owned.baseMaxHealth = record.baseMaxHealth;
+        owned.appliedScale = record.appliedScale;
+        owned.cachedForcedTarget = 0;
+
+        if(preservedTarget)
+        {
+            owned.cachedForcedTarget = preservedTargetId;
+        }
+
+        getAggro().forget(owned.npcId);
+        tracked.PushBack(owned);
+        statPromoted += 1;
+        nextAggroAt = 0.0;
+
+        WO_NpcTake(record.canonicalId, owned.npcId);
+
+        dbg("npc_handover", "promoted canonical=" + record.canonicalId
+            + " guid=" + owned.npcId
+            + " app=" + NameToString(owned.appearance)
+            + " target=" + owned.cachedForcedTarget);
+    }
+
+    private function recoverQuestReplicaLocally(record : r_Replica, now : float)
+    {
+        var npc : CNewNPC;
+        var owned : r_TrackedNpc;
+
+        npc = record.actor;
+
+        if(!npc || record.questTag == "")
         {
             WO_NpcForget(record.canonicalId);
             return;
@@ -2861,9 +3280,9 @@ class r_NpcSync
         cancelReplicaMovement(record);
         wo_releaseNpcTarget(npc);
 
-        npc.SetImmortalityMode(AIM_None, AIC_Default, true);
         npc.RemoveTag('WOReplica');
         npc.RemoveTag('WOQuestBound');
+        releaseQuestHealthProtection(record, npc);
 
         owned = new r_TrackedNpc in this;
         owned.npcId = npc.GetGuidHash();
@@ -2881,14 +3300,11 @@ class r_NpcSync
 
         getAggro().forget(owned.npcId);
         tracked.PushBack(owned);
-        statPromoted += 1;
         nextAggroAt = 0.0;
+        nextPushAt = 0.0;
 
-        WO_NpcTake(record.canonicalId, owned.npcId);
+        WO_NpcForget(record.canonicalId);
 
-        dbg("npc_handover", "promoted canonical=" + record.canonicalId
-            + " guid=" + owned.npcId
-            + " app=" + NameToString(owned.appearance));
     }
 
     private function driveReplica(record : r_Replica, commandIndex : int, now : float)
@@ -2909,6 +3325,29 @@ class r_NpcSync
         var hp : int;
         var flags : int;
         var questReplica : bool;
+
+        if(record.questTag != "")
+        {
+            record.terminalState = WO_NpcTerminalState(commandIndex);
+            record.terminalRevision = WO_NpcTerminalRevision(commandIndex);
+            record.terminalAttackerId = WO_NpcTerminalAttacker(commandIndex);
+
+            if(record.terminalState == 0 && record.terminalAppliedRevision > 0)
+            {
+                record.terminalAppliedRevision = 0;
+                record.terminalAttempts = 0;
+                record.terminalVerifyAt = 0.0;
+
+                if(record.actor && record.actor.IsAlive())
+                {
+                    record.actor.AddTag('WOQuestBound');
+                    record.actor.AddTag('WOReplica');
+                    applyQuestHealthProtection(record, record.actor);
+                    record.prepared = true;
+
+                }
+            }
+        }
 
         npc = record.actor;
 
@@ -2935,7 +3374,12 @@ class r_NpcSync
         }
 
         applyReplicaTarget(record, npc, WO_NpcTarget(commandIndex));
-        applyReplicaHostility(record, npc, flags);
+
+        if(record.questTag == "")
+        {
+            applyReplicaHostility(record, npc, flags);
+        }
+
         applyReplicaAction(record, npc, flags);
         reconcileReplicaHealth(record, npc, hp, now);
 
@@ -3435,14 +3879,14 @@ exec function wo_npc_tune(interpDelayMs : int, snapshotHz : int)
     WO_Note("[npc_debug] interpDelayMs=" + interpDelayMs + " snapshotHz=" + snapshotHz);
 }
 
-function wo_creditOwnedDamage(victim : CNewNPC, dealt : float)
+function wo_creditOwnedDamage(victim : CNewNPC, dealt : float, attacker : CGameplayEntity)
 {
-    if(!victim || dealt <= 0.0)
+    if(!victim)
     {
         return;
     }
 
-    theGame.r_getMultiplayerClient().getNpcSync().creditOwnedDamage(victim, dealt);
+    theGame.r_getMultiplayerClient().getNpcSync().creditOwnedDamage(victim, dealt, attacker);
 }
 
 function wo_reportReplicaDamage(victim : CNewNPC, dealt : float, maximum : float)

@@ -40,11 +40,15 @@ class W3DamageManager
 		healthBefore = 0.0;
 		maxHealth = 0.0;
 
-		if(playerAttacker == thePlayer && npc)
+		if(npc)
 		{
-			replicaVictim = npc;
 			healthBefore = npc.GetHealth();
 			maxHealth = npc.GetMaxHealth();
+
+			if(playerAttacker == thePlayer && npc.HasTag('WOReplica'))
+			{
+				replicaVictim = npc;
+			}
 		}
 
 		proc = new W3DamageManagerProcessor in this;
@@ -57,10 +61,12 @@ class W3DamageManager
 			{
 				wo_reportReplicaDamage(replicaVictim, healthBefore - replicaVictim.GetHealth(), maxHealth);
 			}
-			else
-			{
-				wo_creditOwnedDamage(replicaVictim, healthBefore - replicaVictim.GetHealth());
-			}
+		}
+
+		if(npc && !npc.HasTag('WOReplica') && maxHealth > 0.0
+			&& (healthBefore > npc.GetHealth() || (wasAlive && !npc.IsAlive())))
+		{
+			wo_creditOwnedDamage(npc, healthBefore - npc.GetHealth(), act.attacker);
 		}
 	}
 }

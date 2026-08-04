@@ -6,6 +6,10 @@ import java.util.concurrent.ConcurrentHashMap;
 
 public final class NpcRegistry
 {
+    public static final int TERMINAL_ACTIVE = 0;
+    public static final int TERMINAL_DEAD = 1;
+    public static final int TERMINAL_UNCONSCIOUS = 2;
+    public static final int TERMINAL_AGONY = 3;
     public static final int CELL_SIZE_TAG = 128;
     public static final int CELL_AXIS_SPAN = 2048;
 
@@ -25,6 +29,7 @@ public final class NpcRegistry
     public static final int HANDOVER_MAX_ATTEMPTS = 3;
     public static final long HANDOVER_COOLDOWN_NANOS = 15_000_000_000L;
     public static final long UNACKED_DAMAGE_GRACE_NANOS = 1_200_000_000L;
+    public static final long QUEST_KILL_ORDER_RETRY_NANOS = 200_000_000L;
     public static final long DEAD_RETENTION_NANOS = 30_000_000_000L;
     public static final long HANDOVER_IDLE_EVAL_NANOS = 250_000_000L;
 
@@ -70,6 +75,9 @@ public final class NpcRegistry
         public volatile int hpPermille = -1;
         public volatile int flags;
         public volatile int targetPlayerId;
+        public volatile int terminalState = TERMINAL_ACTIVE;
+        public volatile int terminalRevision;
+        public volatile int terminalAttackerId;
         public volatile boolean alive = true;
         public volatile boolean deathBroadcast;
         public final java.util.Map<Integer, Integer> deathSends = new java.util.concurrent.ConcurrentHashMap<>();
@@ -87,8 +95,11 @@ public final class NpcRegistry
         public volatile long nextHandoverEvalNanos;
         public final java.util.Map<Integer, Long> declinedUntil = new java.util.concurrent.ConcurrentHashMap<>();
         public volatile boolean killOrderPending;
+        public volatile long lastKillOrderSendNanos;
+        public volatile int killOrderSends;
         public volatile int pendingDamagePermille;
         public volatile long pendingDamageSince;
+        public volatile int pendingDamageAttackerId;
         public volatile int scaleMilli = NpcScaling.SCALE_UNIT;
         public volatile int scalePlayerCount = 1;
         public volatile int questPartyId;
@@ -261,6 +272,16 @@ public final class NpcRegistry
     public static int npcCount()
     {
         return npcs.size();
+    }
+
+    public static int sanitizeTerminalState(int terminalState)
+    {
+        if (terminalState < TERMINAL_ACTIVE || terminalState > TERMINAL_AGONY)
+        {
+            return TERMINAL_ACTIVE;
+        }
+
+        return terminalState;
     }
 
     public static long admittedCount()
@@ -479,6 +500,8 @@ public final class NpcRegistry
             int hpPermille,
             int flags,
             int targetPlayerId,
+            int terminalState,
+            int terminalAttackerId,
             int offeredLocalCount,
             long snapshotMs,
             long now)
@@ -638,7 +661,8 @@ public final class NpcRegistry
             return null;
         }
 
-        applyState(npc, area, x, y, z, heading, hpPermille, flags, targetPlayerId, snapshotMs, now);
+        applyState(npc, area, x, y, z, heading, hpPermille, flags, targetPlayerId,
+                terminalState, terminalAttackerId, snapshotMs, now);
 
         if (isNew)
         {
@@ -662,6 +686,8 @@ public final class NpcRegistry
             int hpPermille,
             int flags,
             int targetPlayerId,
+            int terminalState,
+            int terminalAttackerId,
             long snapshotMs,
             long now)
     {
@@ -684,7 +710,8 @@ public final class NpcRegistry
             return null;
         }
 
-        applyState(npc, npc.area, x, y, z, heading, hpPermille, flags, targetPlayerId, snapshotMs, now);
+        applyState(npc, npc.area, x, y, z, heading, hpPermille, flags, targetPlayerId,
+                terminalState, terminalAttackerId, snapshotMs, now);
 
         return npc;
     }
@@ -699,6 +726,8 @@ public final class NpcRegistry
             int hpPermille,
             int flags,
             int targetPlayerId,
+            int terminalState,
+            int terminalAttackerId,
             long snapshotMs,
             long now)
     {
@@ -717,6 +746,8 @@ public final class NpcRegistry
         final int previousTarget = npc.targetPlayerId;
         final boolean wasAlive = npc.alive;
         final int previousArea = npc.area;
+        final int previousTerminalState = npc.terminalState;
+        final int previousTerminalAttacker = npc.terminalAttackerId;
 
         npc.area = area;
         areaMove(npc, previousArea, area);
@@ -732,8 +763,32 @@ public final class NpcRegistry
 
         final boolean ownerSaysAlive = (flags & 1) != 0;
 
+        terminalState = sanitizeTerminalState(terminalState);
+
+        if (ownerSaysAlive)
+        {
+            terminalState = TERMINAL_ACTIVE;
+        }
+        else if (terminalState == TERMINAL_ACTIVE)
+        {
+            terminalState = TERMINAL_DEAD;
+        }
+
         if (!wasAlive && ownerSaysAlive)
         {
+            if (isQuestFoe(npc) && hpPermille > 0)
+            {
+                npc.alive = true;
+                npc.terminalState = TERMINAL_ACTIVE;
+                npc.terminalAttackerId = 0;
+                npc.terminalRevision += 1;
+                npc.deathBroadcast = false;
+                npc.deathSends.clear();
+                npc.deadSinceNanos = 0L;
+
+                return;
+            }
+
             if (!npc.killOrderPending)
             {
                 npc.killOrderPending = true;
@@ -754,6 +809,19 @@ public final class NpcRegistry
 
         if (wasAlive && !npc.alive)
         {
+            int resolvedAttacker = WitcherServer.sanitizeQuestTerminalAttacker(npc, terminalAttackerId);
+
+            if (resolvedAttacker == 0)
+            {
+                resolvedAttacker = WitcherServer.sanitizeQuestTerminalAttacker(
+                        npc, npc.pendingDamageAttackerId);
+            }
+
+            clearKillOrder(npc);
+            clearPendingDamage(npc);
+            npc.terminalState = terminalState;
+            npc.terminalAttackerId = resolvedAttacker;
+            npc.terminalRevision += 1;
             npc.deadSinceNanos = now;
             lastDeathNanos = now;
 
@@ -761,6 +829,37 @@ public final class NpcRegistry
                     describeNpc(npc),
                     WitcherServer.describePlayerId(npc.ownerPlayerId),
                     describeSpot(npc));
+        }
+        else if (!wasAlive && !npc.alive && isQuestFoe(npc))
+        {
+            final int refinedState = previousTerminalState == TERMINAL_DEAD
+                    && terminalState != TERMINAL_DEAD
+                    ? terminalState
+                    : previousTerminalState;
+            final int claimedAttacker = WitcherServer.sanitizeQuestTerminalAttacker(
+                    npc, terminalAttackerId);
+            final int refinedAttacker = previousTerminalAttacker == 0
+                    ? claimedAttacker
+                    : previousTerminalAttacker;
+
+            if (refinedState != previousTerminalState
+                    || refinedAttacker != previousTerminalAttacker)
+            {
+                npc.terminalState = refinedState;
+                npc.terminalAttackerId = refinedAttacker;
+                npc.terminalRevision += 1;
+                npc.deathBroadcast = false;
+                npc.deathSends.clear();
+                npc.lastDeathSendNanos = 0L;
+                npc.deadSinceNanos = now;
+                lastDeathNanos = now;
+
+            }
+        }
+        else if (npc.alive)
+        {
+            npc.terminalState = TERMINAL_ACTIVE;
+            npc.terminalAttackerId = 0;
         }
 
         if (previousTarget != targetPlayerId)
@@ -902,7 +1001,7 @@ public final class NpcRegistry
         }
     }
 
-    public static void notePendingDamage(Npc npc, int permille, long now)
+    public static void notePendingDamage(Npc npc, int permille, int attackerPlayerId, long now)
     {
         if (npc.pendingDamagePermille == 0)
         {
@@ -910,6 +1009,7 @@ public final class NpcRegistry
         }
 
         npc.pendingDamagePermille = Math.min(1000, npc.pendingDamagePermille + permille);
+        npc.pendingDamageAttackerId = attackerPlayerId;
     }
 
     public static void clearPendingDamage(Npc npc)
@@ -952,8 +1052,23 @@ public final class NpcRegistry
 
             if (npc.hpPermille == 0)
             {
+                if (isQuestFoe(npc))
+                {
+                    npc.hpPermille = 1;
+
+                    if (!npc.killOrderPending)
+                    {
+                        npc.killOrderPending = true;
+                        killOrdersPending.incrementAndGet();
+                    }
+
+                    continue;
+                }
+
                 npc.alive = false;
                 npc.flags = npc.flags & ~1;
+                npc.terminalState = TERMINAL_DEAD;
+                npc.terminalRevision += 1;
                 npc.deadSinceNanos = now;
                 lastDeathNanos = now;
 
@@ -969,7 +1084,7 @@ public final class NpcRegistry
         return !npc.alive;
     }
 
-    public static List<Npc> pendingKillOrders(int ownerPlayerId)
+    public static List<Npc> pendingKillOrders(int ownerPlayerId, long now)
     {
         if (killOrdersPending.get() <= 0)
         {
@@ -980,7 +1095,12 @@ public final class NpcRegistry
 
         for (Npc npc : npcs.values())
         {
-            if (npc.killOrderPending && npc.ownerPlayerId == ownerPlayerId && npc.ownerLocalGuid != 0)
+            if (npc.killOrderPending
+                    && npc.ownerPlayerId == ownerPlayerId
+                    && npc.ownerLocalGuid != 0
+                    && (!isQuestFoe(npc)
+                        || npc.lastKillOrderSendNanos == 0L
+                        || (now - npc.lastKillOrderSendNanos) >= QUEST_KILL_ORDER_RETRY_NANOS))
             {
                 orders.add(npc);
             }
@@ -995,6 +1115,18 @@ public final class NpcRegistry
         {
             npc.killOrderPending = false;
             killOrdersPending.decrementAndGet();
+        }
+
+        npc.lastKillOrderSendNanos = 0L;
+        npc.killOrderSends = 0;
+    }
+
+    public static void markKillOrderSent(Npc npc, long now)
+    {
+        if (npc != null && npc.killOrderPending)
+        {
+            npc.lastKillOrderSendNanos = now;
+            npc.killOrderSends += 1;
         }
     }
 
@@ -1303,6 +1435,8 @@ public final class NpcRegistry
                 continue;
             }
 
+            final boolean questFoe = isQuestFoe(npc);
+
             if (now < npc.nextHandoverEvalNanos)
             {
                 continue;
@@ -1347,7 +1481,7 @@ public final class NpcRegistry
                     continue;
                 }
 
-                if (session.playerId == npc.releasedByPlayerId)
+                if (!questFoe && session.playerId == npc.releasedByPlayerId)
                 {
                     continue;
                 }
@@ -1357,7 +1491,8 @@ public final class NpcRegistry
                     continue;
                 }
 
-                if ((now - session.lastReleaseNanos) < HANDOVER_RELEASE_GRACE_NANOS)
+                if (!questFoe
+                        && (now - session.lastReleaseNanos) < HANDOVER_RELEASE_GRACE_NANOS)
                 {
                     continue;
                 }
@@ -1372,7 +1507,7 @@ public final class NpcRegistry
                 double dz = npc.z - session.posZ;
                 double squared = (dx * dx) + (dy * dy) + (dz * dz);
 
-                if (squared > radiusSquared)
+                if (!questFoe && squared > radiusSquared)
                 {
                     continue;
                 }
@@ -1466,7 +1601,14 @@ public final class NpcRegistry
                     continue;
                 }
 
-                if (!proximityWin && (bestLatency + LATENCY_MIGRATION_MARGIN_MS) >= ownerLatency)
+                if (questFoe && !proximityWin)
+                {
+                    continue;
+                }
+
+                if (!questFoe
+                        && !proximityWin
+                        && (bestLatency + LATENCY_MIGRATION_MARGIN_MS) >= ownerLatency)
                 {
                     continue;
                 }
@@ -1488,7 +1630,14 @@ public final class NpcRegistry
             npc.handoverSentNanos = now;
             npc.handoverAttempts++;
 
-            orders.add(new int[] { npc.npcId, best.playerId });
+            if (questFoe)
+            {
+                orders.add(0, new int[] { npc.npcId, best.playerId });
+            }
+            else
+            {
+                orders.add(new int[] { npc.npcId, best.playerId });
+            }
         }
 
         return orders;

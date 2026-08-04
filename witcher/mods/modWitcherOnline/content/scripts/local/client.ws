@@ -195,52 +195,79 @@ statemachine class r_MultiplayerClient
     private var joinedParty : string;
     private var coopSave : r_CoopSave;
     private var coopMode : bool;
+    private var coopPending : bool;
     private var coopLeader : bool;
     private var partyDialogReady : bool;
     private var leaderChoiceLockApplied : bool;
     private var dialogChoicesMeaningful : bool;
     private var coopRoster : array<string>;
     private var wasInSceneLocal : bool;
-    private var sceneCheckAt : float;
     private var sceneSawChoices : bool;
-    private var sceneJoinNeedsDialog : bool;
     private var scenePendingUntil : float;
-    private var sceneCallIsStuck : bool;
-    private var sceneAnnounceAt : float;
     private var applyingRemoteQuestItem : bool;
     private var questItemProbe : r_CharSnapshot;
     private var nextStuckCallAt : float;
-    private var sceneProbeIndex : int;
     private var SCENE_CALL_LIFETIME : float;
     private var sceneJoinStage : int;
     private var sceneJoinAt : float;
     private var sceneJoinWho : string;
+    private var sceneJoinPath : string;
+    private var sceneJoinActorTag : name;
     private var sceneJoinVoice : name;
-    private var sceneJoinNpcPos : Vector;
-    private var sceneSuppressUntil : float;
+    private var sceneJoinActorPos : Vector;
+    private var sceneJoinScenePos : Vector;
+    private var sceneJoinEntryPos : Vector;
+    private var sceneJoinEntryHeading : float;
+    private var sceneJoinArea : int;
+    private var activeScenePath : string;
+    private var activeScenePos : Vector;
+    private var activeSceneActorTag : name;
+    private var activeSceneVoice : name;
+    private var activeSceneActorPos : Vector;
+    private var sceneLastGameplayPos : Vector;
+    private var sceneLastGameplayHeading : float;
+    private var sceneLastGameplayArea : int;
+    private var lastSceneAnnouncedPath : string;
+    private var lastSceneAnnouncedAt : float;
+    private var sceneChoicePhase : int;
+    private var sceneChoiceSignature : string;
+    private var sceneChoiceArrivalSent : bool;
+    private var sceneChoiceArrivalRepeatAt : float;
+    private var sceneChoiceArrivalRepeatUntil : float;
+    private var sceneWaitNoticeShown : bool;
+    private var sceneMoveNoticeShown : bool;
+    private var sceneJoinRetryPrompted : bool;
+    private var sceneFailedPath : string;
+    private var sceneFailedUntil : float;
+    private var sceneChoiceArrivalNotified : array<string>;
     private var coopOffered : bool;
     private var confirmPopupOpen : bool;
     private var pendingInviteFrom : string;
 
     default coopMode = false;
+    default coopPending = false;
     default coopLeader = false;
     default partyDialogReady = false;
     default leaderChoiceLockApplied = false;
     default dialogChoicesMeaningful = false;
     default wasInSceneLocal = false;
-    default sceneCheckAt = 0.0;
     default sceneSawChoices = false;
-    default sceneJoinNeedsDialog = true;
     default scenePendingUntil = 0.0;
-    default sceneCallIsStuck = false;
-    default sceneAnnounceAt = 0.0;
     default applyingRemoteQuestItem = false;
     default nextStuckCallAt = 0.0;
-    default sceneProbeIndex = 0;
     default SCENE_CALL_LIFETIME = 300.0;
     default sceneJoinStage = 0;
     default sceneJoinAt = 0.0;
-    default sceneSuppressUntil = 0.0;
+    default sceneJoinArea = 0;
+    default lastSceneAnnouncedAt = -999.0;
+    default sceneChoicePhase = 0;
+    default sceneChoiceArrivalSent = false;
+    default sceneChoiceArrivalRepeatAt = -999.0;
+    default sceneChoiceArrivalRepeatUntil = -999.0;
+    default sceneWaitNoticeShown = false;
+    default sceneMoveNoticeShown = false;
+    default sceneJoinRetryPrompted = false;
+    default sceneFailedUntil = -999.0;
     default coopOffered = false;
     default confirmPopupOpen = false;
     private var partyId : int;
@@ -623,12 +650,13 @@ statemachine class r_MultiplayerClient
 
         if(!partyDialogReady)
         {
-            text = "Waiting for all Co-Op members to proceed "
-                + IntToString(partyDialogReadyCount) + "/" + IntToString(partyDialogTotalCount);
+            text = StrReplace(GetLocStringById(2111114310), "%ready%",
+                IntToString(partyDialogReadyCount));
+            text = StrReplace(text, "%total%", IntToString(partyDialogTotalCount));
         }
         else if(!isPartyLeader())
         {
-            text = "Waiting for Co-Op leader (" + joinedParty + ") to choose";
+            text = StrReplace(GetLocStringById(2111114311), "%s", joinedParty);
         }
 
         if(text != "")
@@ -639,10 +667,7 @@ statemachine class r_MultiplayerClient
 
     private function callStuckParty()
     {
-        var anchor : CNewNPC;
         var now : float;
-        var pos : Vector;
-        var tag : string;
 
         now = theGame.GetEngineTimeAsSeconds();
 
@@ -652,17 +677,7 @@ statemachine class r_MultiplayerClient
         }
 
         nextStuckCallAt = now + 12.0;
-
-        pos = thePlayer.GetWorldPosition();
-        anchor = findSceneAnchorNpc(pos, 20.0);
-
-        if(anchor)
-        {
-            tag = NameToString(anchor.GetVoicetag());
-            pos = anchor.GetWorldPosition();
-        }
-
-        WO_SceneStart(tag, pos.X, pos.Y, pos.Z, 1);
+        sendActiveSceneSignal(1);
     }
 
     private function announceReadyText(text : string)
@@ -728,45 +743,205 @@ statemachine class r_MultiplayerClient
         var inScene : bool;
         var now : float;
 
-        if(!isCoopSession())
+        if(!thePlayer)
         {
-            wasInSceneLocal = false;
-            sceneCheckAt = 0.0;
-            sceneSawChoices = false;
             return;
         }
 
-        now = theGame.GetEngineTimeAsSeconds();
         inScene = theGame.IsDialogOrCutscenePlaying() || theGame.IsCurrentlyPlayingNonGameplayScene();
+        now = theGame.GetEngineTimeAsSeconds();
 
-        if(inScene && !wasInSceneLocal)
+        if(sceneChoiceArrivalSent && hasActiveDialogChoices() && dialogChoicesMeaningful
+            && now >= sceneChoiceArrivalRepeatAt && now <= sceneChoiceArrivalRepeatUntil)
         {
-            sceneCheckAt = now + 4.0;
-            sceneSawChoices = false;
+            sendActiveSceneSignal(2);
+            sceneChoiceArrivalRepeatAt = now + 0.75;
         }
 
         if(!inScene)
         {
-            sceneCheckAt = 0.0;
+            sceneLastGameplayPos = thePlayer.GetWorldPosition();
+            sceneLastGameplayHeading = thePlayer.GetHeading();
+            sceneLastGameplayArea = theGame.GetCommonMapManager().GetCurrentArea();
+        }
+
+        if(!inScene && wasInSceneLocal)
+        {
+            activeScenePath = "";
+            activeSceneActorTag = '';
+            activeSceneVoice = '';
             sceneSawChoices = false;
         }
 
         wasInSceneLocal = inScene;
+    }
 
-        if(sceneCheckAt <= 0.0 || now < sceneCheckAt)
+    public function onBlockingSceneStarted(scene : CStoryScene, scenePos : Vector)
+    {
+        var anchor : CNewNPC;
+        var isQuestPath : bool;
+        var path : string;
+
+        if(scene)
         {
+            path = StrLower(scene.GetPath());
+        }
+
+        if(!scenePathsMatch(activeScenePath, path))
+        {
+            sceneChoicePhase = 0;
+            sceneChoiceSignature = "";
+            sceneChoiceArrivalSent = false;
+            sceneChoiceArrivalRepeatAt = -999.0;
+            sceneChoiceArrivalRepeatUntil = -999.0;
+            sceneChoiceArrivalNotified.Clear();
+        }
+
+        activeScenePath = path;
+        activeScenePos = scenePos;
+        sceneSawChoices = false;
+
+        anchor = findSceneAnchorNpc(sceneLastGameplayPos, 20.0);
+
+        if(anchor)
+        {
+            activeSceneActorTag = getSceneActorTag(anchor);
+            activeSceneVoice = anchor.GetVoicetag();
+            activeSceneActorPos = anchor.GetWorldPosition();
+        }
+        else
+        {
+            activeSceneActorTag = '';
+            activeSceneVoice = '';
+            activeSceneActorPos = scenePos;
+        }
+
+        isQuestPath = isCoopQuestScenePath(activeScenePath);
+
+        if(sceneJoinStage != 0
+            && (sceneJoinPath == "" || scenePathsMatch(activeScenePath, sceneJoinPath)))
+        {
+            completeSceneJoin(activeScenePath);
             return;
         }
 
-        sceneCheckAt = 0.0;
-
-        if(sceneSawChoices)
+        if(scenePathsMatch(activeScenePath, sceneFailedPath))
         {
-            WO_Note("[scene] scene offered choices, leaving the call to the choice rule");
+            sceneFailedPath = "";
+            sceneFailedUntil = -999.0;
             return;
         }
 
-        announceCutsceneIfInitiator();
+        if(isCoopSession() && isQuestPath)
+        {
+            announceCutsceneIfInitiator();
+        }
+    }
+
+    public function onBlockingSceneEnded()
+    {
+        activeScenePath = "";
+        activeSceneActorTag = '';
+        activeSceneVoice = '';
+        sceneSawChoices = false;
+        sceneChoicePhase = 0;
+        sceneChoiceSignature = "";
+        sceneChoiceArrivalSent = false;
+        sceneChoiceArrivalRepeatAt = -999.0;
+        sceneChoiceArrivalRepeatUntil = -999.0;
+        sceneChoiceArrivalNotified.Clear();
+    }
+
+    private function isCoopQuestScenePath(path : string) : bool
+    {
+        var fileName : string;
+        var separator : string;
+
+        separator = StrChar(92);
+        path = StrReplaceAll(StrLower(path), "/", separator);
+
+        if(path == "")
+        {
+            return false;
+        }
+
+        if(StrContains(path, separator + "gameplay" + separator + "community" + separator))
+        {
+            return false;
+        }
+
+        if(StrStartsWith(path, "quests" + separator)
+            || StrContains(path, separator + "quests" + separator)
+            || StrContains(path, separator + "quest" + separator))
+        {
+            return true;
+        }
+
+        fileName = StrAfterLast(path, separator);
+
+        return hasNumericScenePrefix(fileName, "q")
+            || hasNumericScenePrefix(fileName, "sq")
+            || hasNumericScenePrefix(fileName, "mq")
+            || hasNumericScenePrefix(fileName, "mh");
+    }
+
+    private function hasNumericScenePrefix(fileName : string, prefix : string) : bool
+    {
+        var digit : int;
+
+        if(!StrStartsWith(fileName, prefix) || StrLen(fileName) <= StrLen(prefix))
+        {
+            return false;
+        }
+
+        digit = StringToInt(StrMid(fileName, StrLen(prefix), 1), -1);
+
+        return digit >= 0 && digit <= 9;
+    }
+
+    private function scenePathsMatch(a : string, b : string) : bool
+    {
+        return a != "" && b != "" && StrLower(a) == StrLower(b);
+    }
+
+    private function getSceneActorTag(actor : CNewNPC) : name
+    {
+        var tags : array<name>;
+        var text : string;
+        var fallback : name;
+        var i : int;
+
+        if(!actor)
+        {
+            return '';
+        }
+
+        tags = actor.GetTags();
+
+        for(i = 0; i < tags.Size(); i += 1)
+        {
+            text = StrLower(NameToString(tags[i]));
+
+            if(text == "")
+            {
+                continue;
+            }
+
+            if(fallback == '')
+            {
+                fallback = tags[i];
+            }
+
+            if(hasNumericScenePrefix(text, "q")
+                || hasNumericScenePrefix(text, "sq")
+                || hasNumericScenePrefix(text, "mq")
+                || hasNumericScenePrefix(text, "mh"))
+            {
+                return tags[i];
+            }
+        }
+
+        return fallback;
     }
 
     private function announceCutsceneIfInitiator()
@@ -783,57 +958,67 @@ statemachine class r_MultiplayerClient
     {
         var now : float;
 
-        if(!isCoopSession() || sceneJoinStage != 0 || sceneAnnounceAt > 0.0)
+        if(!isCoopSession() || sceneJoinStage != 0)
         {
             return;
         }
 
         now = theGame.GetEngineTimeAsSeconds();
 
-        if(now < sceneSuppressUntil)
+        if(activeScenePath != ""
+            && activeScenePath == lastSceneAnnouncedPath
+            && (now - lastSceneAnnouncedAt) < 20.0)
         {
             return;
         }
 
-        sceneSuppressUntil = now + 20.0;
-        sceneAnnounceAt = now + 1.0;
+        lastSceneAnnouncedPath = activeScenePath;
+        lastSceneAnnouncedAt = now;
+
+        sendActiveSceneSignal(0);
     }
 
     public function updateSceneAnnounce()
     {
-        var anchor : CNewNPC;
-        var pos : Vector;
-        var tag : string;
+    }
 
-        if(sceneAnnounceAt <= 0.0)
+    private function sendActiveSceneSignal(kind : int)
+    {
+        var actorTag : string;
+        var voiceTag : string;
+        var area : int;
+
+        if(!isCoopSession() || !thePlayer)
         {
             return;
         }
 
-        if(theGame.GetEngineTimeAsSeconds() < sceneAnnounceAt)
+        actorTag = NameToString(activeSceneActorTag);
+        voiceTag = NameToString(activeSceneVoice);
+        area = sceneLastGameplayArea;
+
+        if(actorTag == "")
         {
-            return;
+            actorTag = "-";
         }
 
-        sceneAnnounceAt = 0.0;
-
-        if(!isCoopSession() || sceneJoinStage != 0 || !thePlayer)
+        if(voiceTag == "")
         {
-            return;
+            voiceTag = "-";
         }
 
-        pos = thePlayer.GetWorldPosition();
-        anchor = findSceneAnchorNpc(pos, 20.0);
-
-        if(anchor)
+        if(area <= 0)
         {
-            tag = NameToString(anchor.GetVoicetag());
-            pos = anchor.GetWorldPosition();
+            area = theGame.GetCommonMapManager().GetCurrentArea();
         }
 
-        WO_Note("[scene] calling the party, anchor=" + tag + " choices=" + describeChoiceSet());
-
-        WO_SceneStart(tag, pos.X, pos.Y, pos.Z, 0);
+        WO_SceneStart(activeScenePath, actorTag, voiceTag,
+            activeSceneActorPos.X, activeSceneActorPos.Y, activeSceneActorPos.Z,
+            activeScenePos.X, activeScenePos.Y, activeScenePos.Z,
+            sceneLastGameplayPos.X, sceneLastGameplayPos.Y, sceneLastGameplayPos.Z,
+            sceneLastGameplayHeading, area, kind,
+            sceneChoicePhase, sceneChoiceSignature == "" ? "-" : sceneChoiceSignature,
+            dialogChoices.Size());
     }
 
     private function describeChoiceSet() : string
@@ -862,6 +1047,48 @@ statemachine class r_MultiplayerClient
         }
 
         return body;
+    }
+
+    private function describeChoiceIdentity() : string
+    {
+        var body : string;
+        var i : int;
+
+        body = describeChoiceSet();
+
+        for(i = 0; i < dialogChoices.Size(); i += 1)
+        {
+            body += ":";
+
+            if(dialogChoices[i].playGoChunk != '')
+            {
+                body += NameToString(dialogChoices[i].playGoChunk);
+            }
+            else
+            {
+                body += "-";
+            }
+        }
+
+        return body;
+    }
+
+    private function announceChoiceArrival()
+    {
+        if(!isCoopSession() || !hasActiveDialogChoices() || !dialogChoicesMeaningful
+            || sceneChoiceArrivalSent)
+        {
+            return;
+        }
+
+        sceneChoicePhase += 1;
+        sceneChoiceSignature = describeChoiceIdentity();
+        sceneChoiceArrivalSent = true;
+        sceneChoiceArrivalRepeatAt = theGame.GetEngineTimeAsSeconds() + 0.75;
+        sceneChoiceArrivalRepeatUntil = theGame.GetEngineTimeAsSeconds() + 4.0;
+        sceneChoiceArrivalNotified.Clear();
+
+        sendActiveSceneSignal(2);
     }
 
     private function findSceneAnchorNpc(centre : Vector, radius : float) : CNewNPC
@@ -901,33 +1128,88 @@ statemachine class r_MultiplayerClient
         return best;
     }
 
-    public function onRemoteSceneStart(who : string, voiceTag : string, npcX : float, npcY : float, npcZ : float, kind : int)
+    public function onRemoteSceneStart(who : string, scenePath : string, actorTag : string, voiceTag : string,
+        actorX : float, actorY : float, actorZ : float,
+        sceneX : float, sceneY : float, sceneZ : float,
+        entryX : float, entryY : float, entryZ : float,
+        entryHeading : float, area : int, kind : int,
+        choicePhase : int, choiceSignature : string, choiceCount : int)
     {
-        var remotePlayer : r_RemotePlayer;
-        var body : string;
-        var dist : float;
+        var remoteChoiceCount : int;
+        var localChoiceCount : int;
 
         if(!isCoopSession() || who == username)
         {
             return;
         }
 
-        if(sceneJoinStage != 0)
+        if(scenePath == "-")
+        {
+            scenePath = "";
+        }
+
+        scenePath = StrLower(scenePath);
+
+        if(kind == 2)
+        {
+            if(choiceSignature == "-")
+            {
+                choiceSignature = "";
+            }
+
+            remoteChoiceCount = choiceCount;
+            localChoiceCount = dialogChoices.Size();
+
+            if(scenePathsMatch(activeScenePath, scenePath)
+                && hasActiveDialogChoices()
+                && dialogChoicesMeaningful
+                && remoteChoiceCount > 0
+                && remoteChoiceCount == localChoiceCount
+                && !sceneChoiceArrivalNotified.Contains(who))
+            {
+                theGame.GetGuiManager().ShowNotification(
+                    StrReplace(GetLocStringById(2111114315), "%s", who));
+                sceneChoiceArrivalNotified.PushBack(who);
+
+            }
+
+            return;
+        }
+
+        if(inLocalScene() && scenePathsMatch(activeScenePath, scenePath))
         {
             return;
         }
 
-        remotePlayer = mpghosts_getPlayer(who);
+        if(scenePathsMatch(sceneFailedPath, scenePath)
+            && theGame.GetEngineTimeAsSeconds() < sceneFailedUntil)
+        {
+            return;
+        }
 
-        if(!remotePlayer)
+        if(sceneJoinPath != "" && scenePathsMatch(sceneJoinPath, scenePath))
+        {
+            scenePendingUntil = theGame.GetEngineTimeAsSeconds() + SCENE_CALL_LIFETIME;
+            return;
+        }
+
+        if(sceneJoinStage != 0 || sceneJoinPath != "")
         {
             return;
         }
 
         sceneJoinWho = who;
-        sceneJoinVoice = WO_ToName(voiceTag);
-        sceneJoinNpcPos = Vector(npcX, npcY, npcZ);
-        sceneCallIsStuck = (kind == 1);
+        sceneJoinPath = scenePath;
+        sceneJoinActorTag = actorTag == "-" ? '' : WO_ToName(actorTag);
+        sceneJoinVoice = voiceTag == "-" ? '' : WO_ToName(voiceTag);
+        sceneJoinActorPos = Vector(actorX, actorY, actorZ);
+        sceneJoinScenePos = Vector(sceneX, sceneY, sceneZ);
+        sceneJoinEntryPos = Vector(entryX, entryY, entryZ);
+        sceneJoinEntryHeading = entryHeading;
+        sceneJoinArea = area;
+        sceneWaitNoticeShown = false;
+        sceneMoveNoticeShown = false;
+        sceneJoinRetryPrompted = false;
 
         scenePendingUntil = theGame.GetEngineTimeAsSeconds() + SCENE_CALL_LIFETIME;
 
@@ -936,11 +1218,6 @@ statemachine class r_MultiplayerClient
 
     public function updateScenePending()
     {
-        var remotePlayer : r_RemotePlayer;
-        var body : string;
-        var dist : float;
-        var sameArea : bool;
-
         if(scenePendingUntil <= 0.0)
         {
             return;
@@ -952,73 +1229,31 @@ statemachine class r_MultiplayerClient
             return;
         }
 
-        remotePlayer = mpghosts_getPlayer(sceneJoinWho);
-
-        if(!remotePlayer)
+        if(inLocalScene() && scenePathsMatch(activeScenePath, sceneJoinPath))
         {
-            clearScenePending();
-            return;
-        }
-
-        sameArea = (remotePlayer.area == theGame.GetCommonMapManager().GetCurrentArea());
-        dist = VecDistance(thePlayer.GetWorldPosition(), remotePlayer.pos);
-
-        if(inLocalScene() && sameArea && dist <= 5.0)
-        {
-            clearScenePending();
+            completeSceneJoin(sceneJoinPath);
             return;
         }
 
         if(theGame.GetEngineTimeAsSeconds() >= scenePendingUntil)
         {
-            WO_Note("[scene] call from " + sceneJoinWho + " expired while busy");
-            clearScenePending();
+            resetSceneJoin();
             return;
         }
 
         if(isBusyForSceneJoin())
         {
-            return;
-        }
+            if(!sceneWaitNoticeShown)
+            {
+                sceneWaitNoticeShown = true;
+                theGame.GetGuiManager().ShowNotification(GetLocStringById(2111114312));
+            }
 
-        if(sceneCallIsStuck && inLocalScene())
-        {
-            thePlayer.StopAllScenes();
-
-            clearScenePending();
-
-            body = StrReplace(GetLocStringById(2111114305), "%s", sceneJoinWho);
-            showConfirmPopup(3, sceneJoinWho, GetLocStringById(2111114304), body);
-            return;
-        }
-
-        if(inLocalScene() || confirmPopupOpen)
-        {
             return;
         }
 
         clearScenePending();
-
-        if(sameArea && dist <= 50.0)
-        {
-            beginSceneJoin();
-            return;
-        }
-
-        if(sceneCallIsStuck)
-        {
-            body = StrReplace(GetLocStringById(2111114305), "%s", sceneJoinWho);
-        }
-        else if(isPartyLeader())
-        {
-            body = StrReplace(GetLocStringById(2111114303), "%s", sceneJoinWho);
-        }
-        else
-        {
-            body = StrReplace(GetLocStringById(2111114302), "%s", sceneJoinWho);
-        }
-
-        showConfirmPopup(3, sceneJoinWho, GetLocStringById(2111114304), body);
+        beginSceneJoin();
     }
 
     private function clearScenePending()
@@ -1038,7 +1273,28 @@ statemachine class r_MultiplayerClient
             return true;
         }
 
-        return thePlayer.IsInCombat() || thePlayer.IsThreatened() || !thePlayer.IsAlive();
+        if(!theGame.IsActive() || theGame.IsPaused() || theGame.IsStopped()
+            || theGame.IsLoadingScreenVideoPlaying() || theGame.IsStreaming()
+            || theGame.IsFading() || theGame.IsBlackscreen() || theGame.HasBlackscreenRequested())
+        {
+            return true;
+        }
+
+        if(inLocalScene() || theGame.GetGuiManager().IsAnyMenu() || confirmPopupOpen
+            || inGwentGame || shownGwentRequestWindow || tradeInProgress)
+        {
+            return true;
+        }
+
+        if(thePlayer.IsInCombat() || thePlayer.IsThreatened() || !thePlayer.IsAlive())
+        {
+            return true;
+        }
+
+        return thePlayer.IsSwimming() || thePlayer.IsDiving() || thePlayer.IsFalling()
+            || thePlayer.IsSailing() || thePlayer.IsUsingHorse()
+            || thePlayer.IsUsingBoat() || thePlayer.IsUsingVehicle()
+            || thePlayer.IsUsingExploration();
     }
 
     public function beginSceneJoin()
@@ -1048,7 +1304,6 @@ statemachine class r_MultiplayerClient
             return;
         }
 
-        sceneSuppressUntil = theGame.GetEngineTimeAsSeconds() + 30.0;
         sceneJoinStage = 1;
     }
 
@@ -1063,8 +1318,7 @@ statemachine class r_MultiplayerClient
 
         if(!isCoopSession())
         {
-            sceneJoinStage = 0;
-            sceneJoinWho = "";
+            resetSceneJoin();
             return;
         }
 
@@ -1077,16 +1331,69 @@ statemachine class r_MultiplayerClient
                 return;
             }
 
-            if(inLocalScene())
+            if(!sceneMoveNoticeShown)
             {
-                thePlayer.StopAllScenes();
+                sceneMoveNoticeShown = true;
+                theGame.GetGuiManager().ShowNotification(GetLocStringById(2111114313));
             }
 
-            mpghosts_teleport(sceneJoinWho);
+            stopRiding();
 
-            sceneProbeIndex = 0;
-            sceneJoinAt = now + 0.5;
-            sceneJoinStage = 2;
+            if(sceneJoinArea > 0
+                && sceneJoinArea != theGame.GetCommonMapManager().GetCurrentArea())
+            {
+                theGame.ScheduleWorldChangeToPosition(
+                    theGame.GetCommonMapManager().GetWorldPathFromAreaType(sceneJoinArea),
+                    sceneJoinEntryPos, EulerAngles(0.0, sceneJoinEntryHeading, 0.0));
+
+                sceneJoinAt = now + 1.0;
+                sceneJoinStage = 2;
+            }
+            else
+            {
+                teleportToSceneEntry(false);
+                sceneJoinAt = now + 1.5;
+                sceneJoinStage = 3;
+            }
+
+            return;
+        }
+
+        if(sceneJoinStage == 2)
+        {
+            if(sceneJoinArea != theGame.GetCommonMapManager().GetCurrentArea()
+                || isBusyForSceneJoin())
+            {
+                return;
+            }
+
+            teleportToSceneEntry(false);
+            sceneJoinAt = now + 1.5;
+            sceneJoinStage = 3;
+            return;
+        }
+
+        if(sceneJoinStage == 8)
+        {
+            if(isBusyForSceneJoin())
+            {
+                return;
+            }
+
+            if(!teleportToSceneHost())
+            {
+                sceneJoinStage = 12;
+                sceneJoinAt = now;
+                return;
+            }
+
+            sceneJoinAt = now + 1.5;
+            sceneJoinStage = 9;
+            return;
+        }
+
+        if(sceneJoinStage >= 9 && isBusyForSceneJoin())
+        {
             return;
         }
 
@@ -1095,44 +1402,274 @@ statemachine class r_MultiplayerClient
             return;
         }
 
-        if(inLocalScene())
+        if(sceneJoinStage == 3)
+        {
+            tryStartSceneDialog(true);
+            sceneJoinAt = now + 1.5;
+            sceneJoinStage = 4;
+            return;
+        }
+
+        if(sceneJoinStage == 4)
+        {
+            teleportToSceneEntry(true);
+            sceneJoinAt = now + 0.35;
+            sceneJoinStage = 5;
+            return;
+        }
+
+        if(sceneJoinStage == 5)
+        {
+            teleportToSceneEntry(false);
+            sceneJoinAt = now + 2.0;
+            sceneJoinStage = 6;
+            return;
+        }
+
+        if(sceneJoinStage == 6)
+        {
+            tryStartSceneDialog(false);
+            sceneJoinAt = now + 1.5;
+            sceneJoinStage = 7;
+            return;
+        }
+
+        if(sceneJoinStage == 9)
+        {
+            tryStartSceneDialog(true);
+            sceneJoinAt = now + 2.0;
+            sceneJoinStage = 10;
+            return;
+        }
+
+        if(sceneJoinStage == 10)
+        {
+            teleportToSceneHost();
+            sceneJoinAt = now + 0.5;
+            sceneJoinStage = 11;
+            return;
+        }
+
+        if(sceneJoinStage == 11)
+        {
+            tryStartSceneDialog(false);
+            sceneJoinAt = now + 2.0;
+            sceneJoinStage = 12;
+            return;
+        }
+
+        if(!sceneJoinRetryPrompted)
         {
             sceneJoinStage = 0;
+            sceneJoinRetryPrompted = true;
+
+            showConfirmPopup(3, sceneJoinWho, GetLocStringById(2111114304),
+                GetLocStringById(2111114314));
             return;
         }
 
-        if(sceneProbeIndex < 3)
-        {
-            sceneProbeIndex += 1;
-
-            tryStartSceneDialog();
-
-            sceneJoinAt = now + 0.5;
-            return;
-        }
-
-        sceneJoinStage = 0;
-
-        WO_Note("[scene] dialog did not start after 3 attempts, leaving it to the player");
-
-        notice(GetLocStringById(2111114306));
+        suppressFailedSceneJoin();
+        theGame.GetGuiManager().ShowNotification(GetLocStringById(2111114309));
     }
 
-    private function tryStartSceneDialog()
+    private function teleportToSceneEntry(outside : bool)
+    {
+        var target : Vector;
+
+        target = sceneJoinEntryPos;
+
+        if(outside)
+        {
+            target = target - VecFromHeading(sceneJoinEntryHeading) * 2.0;
+        }
+
+        thePlayer.TeleportWithRotation(target, EulerAngles(0.0, sceneJoinEntryHeading, 0.0));
+    }
+
+    private function tryStartSceneDialog(exactOnly : bool) : bool
     {
         var anchor : CNewNPC;
+        var started : bool;
 
-        anchor = findSceneAnchorNpc(sceneJoinNpcPos, 20.0);
-
-        if(!anchor || anchor.GetVoicetag() != sceneJoinVoice)
+        if(sceneJoinActorTag != '')
         {
-            anchor = findSceneAnchorNpc(thePlayer.GetWorldPosition(), 20.0);
+            anchor = findSceneAnchorNpcByTag(sceneJoinActorTag, sceneJoinVoice,
+                sceneJoinActorPos);
+        }
+
+        if(!anchor && sceneJoinVoice != '')
+        {
+            anchor = findSceneAnchorNpcByVoice(sceneJoinActorPos, 40.0, sceneJoinVoice);
+
+            if(!anchor)
+            {
+                anchor = findSceneAnchorNpcByVoice(thePlayer.GetWorldPosition(), 40.0,
+                    sceneJoinVoice);
+            }
+
+            if(!anchor)
+            {
+                anchor = findSceneAnchorNpcByVoice(sceneJoinEntryPos, 60.0, sceneJoinVoice);
+            }
+
+            if(!anchor)
+            {
+                anchor = findSceneAnchorNpcByVoice(sceneJoinScenePos, 60.0, sceneJoinVoice);
+            }
+        }
+
+        if(!anchor && sceneJoinVoice == '' && !exactOnly)
+        {
+            anchor = findSceneAnchorNpc(sceneJoinActorPos, 30.0);
+
+            if(!anchor)
+            {
+                anchor = findSceneAnchorNpc(sceneJoinScenePos, 30.0);
+            }
+
+            if(!anchor)
+            {
+                anchor = findSceneAnchorNpc(thePlayer.GetWorldPosition(), 30.0);
+            }
         }
 
         if(anchor)
         {
-            anchor.PlayDialog();
+            started = anchor.PlayDialog(true);
+            return started;
         }
+
+        return false;
+    }
+
+    private function findSceneAnchorNpcByTag(tag : name, voice : name,
+        centre : Vector) : CNewNPC
+    {
+        var nodes : array<CNode>;
+        var npc : CNewNPC;
+        var best : CNewNPC;
+        var bestDist : float;
+        var dist : float;
+        var i : int;
+
+        theGame.GetNodesByTag(tag, nodes);
+
+        for(i = 0; i < nodes.Size(); i += 1)
+        {
+            npc = (CNewNPC)nodes[i];
+
+            if(!npc || (voice != '' && npc.GetVoicetag() != voice))
+            {
+                continue;
+            }
+
+            dist = VecDistance(centre, npc.GetWorldPosition());
+
+            if(!best || dist < bestDist)
+            {
+                best = npc;
+                bestDist = dist;
+            }
+        }
+
+        return best;
+    }
+
+    private function beginSceneHostRetry()
+    {
+        if(sceneJoinWho == "" || !isCoopSession())
+        {
+            suppressFailedSceneJoin();
+            return;
+        }
+
+        sceneJoinStage = 8;
+        sceneJoinAt = 0.0;
+    }
+
+    private function teleportToSceneHost() : bool
+    {
+        var host : r_RemotePlayer;
+        var target : Vector;
+
+        host = getGlobalPlayerByUsername(sceneJoinWho);
+
+        if(!host)
+        {
+            return false;
+        }
+
+        if(host.area != theGame.GetCommonMapManager().GetCurrentArea())
+        {
+            theGame.ScheduleWorldChangeToPosition(
+                theGame.GetCommonMapManager().GetWorldPathFromAreaType(host.area),
+                host.pos, EulerAngles(0.0, host.heading, 0.0));
+            return true;
+        }
+
+        target = host.pos - VecFromHeading(host.heading) * 1.5;
+        thePlayer.TeleportWithRotation(target, EulerAngles(0.0, host.heading, 0.0));
+        return true;
+    }
+
+    private function findSceneAnchorNpcByVoice(centre : Vector, radius : float, voice : name) : CNewNPC
+    {
+        var entities : array<CGameplayEntity>;
+        var npc : CNewNPC;
+        var best : CNewNPC;
+        var bestDist : float;
+        var dist : float;
+        var i : int;
+
+        FindGameplayEntitiesInSphere(entities, centre, radius, 64, '', FLAG_ExcludePlayer + FLAG_OnlyActors);
+
+        for(i = 0; i < entities.Size(); i += 1)
+        {
+            npc = (CNewNPC)entities[i];
+
+            if(!npc || npc.GetVoicetag() != voice)
+            {
+                continue;
+            }
+
+            dist = VecDistance(centre, npc.GetWorldPosition());
+
+            if(!best || dist < bestDist)
+            {
+                best = npc;
+                bestDist = dist;
+            }
+        }
+
+        return best;
+    }
+
+    private function completeSceneJoin(path : string)
+    {
+        resetSceneJoin();
+    }
+
+    private function resetSceneJoin()
+    {
+        sceneJoinStage = 0;
+        sceneJoinAt = 0.0;
+        sceneJoinWho = "";
+        sceneJoinPath = "";
+        sceneJoinActorTag = '';
+        sceneJoinVoice = '';
+        sceneJoinActorPos = Vector(0.0, 0.0, 0.0);
+        sceneJoinArea = 0;
+        scenePendingUntil = 0.0;
+        sceneWaitNoticeShown = false;
+        sceneMoveNoticeShown = false;
+        sceneJoinRetryPrompted = false;
+    }
+
+    private function suppressFailedSceneJoin()
+    {
+        sceneFailedPath = sceneJoinPath;
+        sceneFailedUntil = theGame.GetEngineTimeAsSeconds() + 120.0;
+        resetSceneJoin();
     }
 
     public function reportQuestItemPickup(inv : CInventoryComponent, id : SItemUniqueId, quantity : int)
@@ -1292,7 +1829,7 @@ statemachine class r_MultiplayerClient
 
         for(i = 0; i < coopRoster.Size(); i += 1)
         {
-            if(coopRoster[i] == who)
+            if(StrLower(coopRoster[i]) == StrLower(who))
             {
                 return true;
             }
@@ -1332,7 +1869,7 @@ statemachine class r_MultiplayerClient
 
     public function leaveCoopForMainMenu()
     {
-        if(!coopMode && !coopLeader && !getCoopSave().isActive())
+        if(!coopMode && !coopPending && !coopLeader && !getCoopSave().isActive())
         {
             return;
         }
@@ -1343,13 +1880,12 @@ statemachine class r_MultiplayerClient
         }
 
         coopMode = false;
+        coopPending = false;
         coopLeader = false;
         coopOffered = false;
         partyDialogReady = false;
         dialogChoicesMeaningful = false;
-        sceneJoinStage = 0;
-        sceneJoinWho = "";
-        scenePendingUntil = 0.0;
+        resetSceneJoin();
         coopRoster.Clear();
 
         getCoopSave().abandonSession();
@@ -1424,6 +1960,11 @@ statemachine class r_MultiplayerClient
     public function setDialogChoices(val : array<SSceneChoice>)
     {
         var i : int;
+        var previousChoiceSignature : string;
+        var wasMeaningful : bool;
+
+        wasMeaningful = dialogChoicesActive && dialogChoicesMeaningful;
+        previousChoiceSignature = sceneChoiceSignature;
 
         dialogChoices = val;
         dialogChoicesActive = val.Size() > 0;
@@ -1458,6 +1999,13 @@ statemachine class r_MultiplayerClient
         if(dialogChoicesMeaningful)
         {
             announceSceneIfInitiator();
+
+            if(!wasMeaningful || describeChoiceIdentity() != previousChoiceSignature)
+            {
+                sceneChoiceArrivalSent = false;
+            }
+
+            announceChoiceArrival();
         }
 
         if(dialogChoicesActive)
@@ -1485,12 +2033,19 @@ statemachine class r_MultiplayerClient
         }
 
         announceSceneIfInitiator();
+        sceneChoiceArrivalSent = false;
+        announceChoiceArrival();
         applyLeaderChoiceLock();
     }
 
     public function clearActiveDialogChoices()
     {
         dialogChoicesActive = false;
+        sceneChoiceArrivalSent = false;
+        sceneChoiceArrivalRepeatAt = -999.0;
+        sceneChoiceArrivalRepeatUntil = -999.0;
+        sceneChoiceSignature = "";
+        sceneChoiceArrivalNotified.Clear();
         currentDialogHighlightIndex = -1;
         partyDialogReady = false;
         applyLeaderChoiceLock();
@@ -2378,11 +2933,10 @@ statemachine class r_MultiplayerClient
                 inParty = false;
                 joinedParty = "";
                 coopMode = false;
+                coopPending = false;
                 coopLeader = false;
                 coopOffered = false;
-                sceneJoinStage = 0;
-                sceneJoinWho = "";
-                scenePendingUntil = 0.0;
+                resetSceneJoin();
                 coopRoster.Clear();
                 getCoopSave().endSession();
                 pendingInviteFrom = "";
@@ -2549,11 +3103,11 @@ statemachine class r_MultiplayerClient
         {
             if(approved)
             {
-                beginSceneJoin();
+                beginSceneHostRetry();
             }
             else
             {
-                sceneJoinWho = "";
+                suppressFailedSceneJoin();
             }
         }
     }
@@ -2591,16 +3145,25 @@ statemachine class r_MultiplayerClient
             return;
         }
 
-        coopMode = enabled;
-        WO_PartyCoopMode(enabled);
+        if(enabled && coopMode && !coopPending)
+        {
+            return;
+        }
 
         if(enabled)
         {
+            coopMode = false;
+            coopPending = true;
+            WO_PartyCoopMode(false);
             notice(GetLocStringById(2111114296));
             getCoopSave().beginSession();
         }
         else
         {
+            coopMode = false;
+            coopPending = false;
+            WO_PartyCoopMode(false);
+
             if(!coopLeader)
             {
                 getCoopSave().endSession();
@@ -2612,6 +3175,7 @@ statemachine class r_MultiplayerClient
 
     public function restoreCoopAfterLoad()
     {
+        coopPending = false;
         coopMode = true;
         WO_PartyCoopMode(true);
 
@@ -2758,6 +3322,16 @@ statemachine class r_MultiplayerClient
         return inParty && playerName != "" && joinedParty == playerName;
     }
 
+    private function isCoopRosterName(playerName : string) : bool
+    {
+        if(!isCoopSession() || playerName == "")
+        {
+            return false;
+        }
+
+        return isInCoopRoster(playerName);
+    }
+
     public function partyDisplayName(member : r_RemotePlayer) : string
     {
         var displayName : string;
@@ -2767,7 +3341,18 @@ statemachine class r_MultiplayerClient
             return "";
         }
 
-        if(isPartyLeaderName(member.username))
+        if(isCoopRosterName(member.username))
+        {
+            if(isPartyLeaderName(member.username))
+            {
+                displayName = GetLocStringById(2111114308) + " " + member.username;
+            }
+            else
+            {
+                displayName = GetLocStringById(2111114307) + " " + member.username;
+            }
+        }
+        else if(isPartyLeaderName(member.username))
         {
             displayName = GetLocStringById(2111114270) + " " + member.username;
         }

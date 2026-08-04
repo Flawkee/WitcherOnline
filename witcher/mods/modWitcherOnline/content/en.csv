@@ -307,3 +307,16 @@
 2111114304||wo_scene_join_title|A Conversation Begins
 2111114305||wo_scene_stuck|%s is held fast in a conversation the party must join, else they cannot go on. Ride there now?
 2111114306||wo_scene_manual|Walk about or speak to the quest NPC to begin.
+2111114307||wo_party_coop_member|[CO-OP]
+2111114308||wo_party_coop_leader|[CO-OP LEADER]
+2111114309||wo_scene_join_failed|The scene could not start automatically. Speak to the quest character to join.
+2111114310||wo_dlg_wait_coop_members|Waiting for all Co-Op members to proceed %ready%/%total%
+2111114311||wo_dlg_wait_coop_leader|Waiting for Co-Op leader (%s) to choose
+2111114312||wo_scene_wait_safe|Your party is waiting in a Co-op scene. Finish what you're doing so you can join.
+2111114313||wo_scene_moving|Moving you to your party's Co-op scene...
+2111114314||wo_scene_retry|The Co-op scene did not start automatically. Try joining again?
+2111114315||wo_scene_player_joined|%s has joined the scene.
+2111114316||wo_char_snapshot_saved|Character snapshot saved
+2111114317||wo_char_restored|Character restored
+2111114318||wo_hud_region_singular|region
+2111114319||wo_hud_region_plural|regions

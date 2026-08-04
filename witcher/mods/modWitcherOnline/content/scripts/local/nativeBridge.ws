@@ -38,7 +38,12 @@ import function WO_SaveProgress() : int;
 import function WO_SaveError() : string;
 import function WO_SaveFile() : string;
 import function WO_SaveReset();
-import function WO_SceneStart(voiceTag : string, npcX : float, npcY : float, npcZ : float, kind : int);
+import function WO_SceneStart(scenePath : string, actorTag : string, voiceTag : string,
+    actorX : float, actorY : float, actorZ : float,
+    sceneX : float, sceneY : float, sceneZ : float,
+    entryX : float, entryY : float, entryZ : float,
+    entryHeading : float, area : int, kind : int,
+    choicePhase : int, choiceSignature : string, choiceCount : int);
 import function WO_QuestItem(kind : int, subject : string, quantity : int);
 import function WO_SavePurge(marker : string) : int;
 import function WO_SaveLeftovers(marker : string) : int;
@@ -49,7 +54,7 @@ import function WO_EntityTemplatePath(target : CEntity) : string;
 import function WO_NpcBeginOwned();
 import function WO_NpcPushOwned(guid : int, area : int, localCount : int, typeCode : string, appearance : string,
     x : float, y : float, z : float, heading : float,
-    hpPermille : int, flags : int, targetPlayerId : int) : bool;
+    hpPermille : int, flags : int, targetPlayerId : int, terminalState : int, terminalAttackerId : int) : bool;
 import function WO_NpcEndOwned();
 import function WO_NpcPull() : int;
 import function WO_NpcId(index : int) : int;
@@ -63,6 +68,9 @@ import function WO_NpcSpeed(index : int) : float;
 import function WO_NpcHp(index : int) : int;
 import function WO_NpcFlags(index : int) : int;
 import function WO_NpcTarget(index : int) : int;
+import function WO_NpcTerminalState(index : int) : int;
+import function WO_NpcTerminalRevision(index : int) : int;
+import function WO_NpcTerminalAttacker(index : int) : int;
 import function WO_NpcType(index : int) : string;
 import function WO_NpcAppearance(index : int) : name;
 import function WO_NpcBind(index : int, localGuid : int);
@@ -76,6 +84,7 @@ import function WO_NpcDropGuid(index : int) : int;
 import function WO_NpcDropsDone();
 import function WO_NpcKillCount() : int;
 import function WO_NpcKillGuid(index : int) : int;
+import function WO_NpcKillAttacker(index : int) : int;
 import function WO_NpcKillsDone();
 import function WO_NpcReportHit(canonicalId : int, permille : int) : int;
 import function WO_NpcHitCount() : int;
@@ -314,13 +323,18 @@ function WO_ApplyQuestItem()
 
 function WO_ApplySceneStart()
 {
-    if(WO_FieldCount() < 5)
+    if(WO_FieldCount() < 19)
     {
         return;
     }
 
-    theGame.r_getMultiplayerClient().onRemoteSceneStart(WO_Str(0), WO_Str(1),
-        WO_Float(2), WO_Float(3), WO_Float(4), WO_Int(5));
+    theGame.r_getMultiplayerClient().onRemoteSceneStart(
+        WO_Str(0), WO_Str(1), WO_Str(2), WO_Str(3),
+        WO_Float(4), WO_Float(5), WO_Float(6),
+        WO_Float(7), WO_Float(8), WO_Float(9),
+        WO_Float(10), WO_Float(11), WO_Float(12),
+        WO_Float(13), WO_Int(14), WO_Int(15),
+        WO_Int(16), WO_Str(17), WO_Int(18));
 }
 
 function WO_ApplyParty()

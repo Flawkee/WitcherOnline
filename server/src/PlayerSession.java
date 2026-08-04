@@ -54,6 +54,9 @@ public class PlayerSession
         public int hpPermille = Integer.MIN_VALUE;
         public int flags = Integer.MIN_VALUE;
         public int targetPlayerId = Integer.MIN_VALUE;
+        public int terminalState = Integer.MIN_VALUE;
+        public int terminalRevision = Integer.MIN_VALUE;
+        public int terminalAttackerId = Integer.MIN_VALUE;
         public boolean valid = false;
     }
 

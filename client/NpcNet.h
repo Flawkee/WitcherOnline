@@ -12,7 +12,8 @@ namespace w3mp {
 		Spawn = 1,
 		Despawn = 2,
 		Kill = 3,
-		Promote = 4
+		Promote = 4,
+		ReleaseLocal = 5
 	};
 
 	struct ReplicaCommand
@@ -28,6 +29,9 @@ namespace w3mp {
 		int hpPermille = -1;
 		int flags = 0;
 		int targetPlayerId = 0;
+		int terminalState = 0;
+		int terminalRevision = 0;
+		int terminalAttackerId = 0;
 		std::string typeCode;
 		std::string appearance;
 	};
@@ -73,7 +77,9 @@ namespace w3mp {
 			float heading,
 			int hpPermille,
 			int flags,
-			int targetPlayerId);
+			int targetPlayerId,
+			int terminalState,
+			int terminalAttackerId);
 		static void EndOwned();
 
 		static int Pull();
@@ -89,6 +95,7 @@ namespace w3mp {
 		static void ClearDrops();
 		static int PullKills();
 		static int KillGuid(int index);
+		static int KillAttacker(int index);
 		static void ClearKills();
 
 		static int ReportHit(int canonicalId, int permille);
