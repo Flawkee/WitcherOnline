@@ -2183,6 +2183,15 @@ namespace w3mp {
 			*static_cast<int*>(result) = command ? command->terminalAttackerId : 0;
 	}
 
+	static void WO_NpcTerminalAck(void* context, void* frame, void* result)
+	{
+		const int canonicalId = ReadIntParameter(frame);
+		const int revision = ReadIntParameter(frame);
+		AdvanceFrame(frame);
+
+		NpcNet::AckTerminal(canonicalId, revision);
+	}
+
 	static void WO_NpcBindId(void* context, void* frame, void* result)
 	{
 		const int canonicalId = ReadIntParameter(frame);
@@ -2391,6 +2400,15 @@ namespace w3mp {
 	{
 		AdvanceFrame(frame);
 		WriteStringResult(result, NpcNet::Report());
+	}
+
+	static void WO_NpcDropCanonical(void* context, void* frame, void* result)
+	{
+		const int index = ReadIntParameter(frame);
+		AdvanceFrame(frame);
+
+		if (result)
+			*static_cast<int*>(result) = NpcNet::DropCanonical(index);
 	}
 
 	static void WO_NpcKillAttacker(void* context, void* frame, void* result)
@@ -2659,6 +2677,7 @@ namespace w3mp {
 		RegisterOne(L"WO_NpcTerminalState", reinterpret_cast<void*>(&WO_NpcTerminalState), "WO_NpcTerminalState");
 		RegisterOne(L"WO_NpcTerminalRevision", reinterpret_cast<void*>(&WO_NpcTerminalRevision), "WO_NpcTerminalRevision");
 		RegisterOne(L"WO_NpcTerminalAttacker", reinterpret_cast<void*>(&WO_NpcTerminalAttacker), "WO_NpcTerminalAttacker");
+		RegisterOne(L"WO_NpcTerminalAck", reinterpret_cast<void*>(&WO_NpcTerminalAck), "WO_NpcTerminalAck");
 		RegisterOne(L"WO_NpcType", reinterpret_cast<void*>(&WO_NpcType), "WO_NpcType");
 		RegisterOne(L"WO_NpcAppearance", reinterpret_cast<void*>(&WO_NpcAppearance), "WO_NpcAppearance");
 		RegisterOne(L"WO_NpcBind", reinterpret_cast<void*>(&WO_NpcBind), "WO_NpcBind");
@@ -2669,6 +2688,7 @@ namespace w3mp {
 		RegisterOne(L"WO_NpcSuspend", reinterpret_cast<void*>(&WO_NpcSuspend), "WO_NpcSuspend");
 		RegisterOne(L"WO_NpcDropCount", reinterpret_cast<void*>(&WO_NpcDropCount), "WO_NpcDropCount");
 		RegisterOne(L"WO_NpcDropGuid", reinterpret_cast<void*>(&WO_NpcDropGuid), "WO_NpcDropGuid");
+		RegisterOne(L"WO_NpcDropCanonical", reinterpret_cast<void*>(&WO_NpcDropCanonical), "WO_NpcDropCanonical");
 		RegisterOne(L"WO_NpcDropsDone", reinterpret_cast<void*>(&WO_NpcDropsDone), "WO_NpcDropsDone");
 		RegisterOne(L"WO_NpcKillCount", reinterpret_cast<void*>(&WO_NpcKillCount), "WO_NpcKillCount");
 		RegisterOne(L"WO_NpcKillGuid", reinterpret_cast<void*>(&WO_NpcKillGuid), "WO_NpcKillGuid");

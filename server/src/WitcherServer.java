@@ -168,8 +168,8 @@ public class WitcherServer
         }
     }
     private static final int MAX_PENDING_HITS = 64;
-    private static final int NPC_SPAWN_PACKETS_PER_TICK = 6;
-    private static final int NPC_MOVE_PACKETS_PER_TICK = 6;
+    private static final int NPC_SPAWN_PACKETS_PER_TICK = 18;
+    private static final int NPC_MOVE_PACKETS_PER_TICK = 13;
 
     private static final long NPC_HEARTBEAT_NANOS = 30_000_000_000L;
 
@@ -679,6 +679,7 @@ public class WitcherServer
                 || "NPCDEL".equals(opcode)
                 || "NPCHIT".equals(opcode)
                 || "NPCACK".equals(opcode)
+                || "NPCTERM".equals(opcode)
                 || "NPCTAKE".equals(opcode)
                 || "NPCNOPE".equals(opcode)
                 || "NPCFREE".equals(opcode)
@@ -1045,6 +1046,7 @@ public class WitcherServer
             }
 
             final long stamp = clampSnapshotTime(snapshotMs);
+            Set<Integer> claimedBindings = new HashSet<>();
 
             for (int i = 0; i < count; i++)
             {
@@ -1114,9 +1116,22 @@ public class WitcherServer
 
                 if (admitted == null)
                 {
+                    NpcRegistry.Npc bindable = rejectedQuestType ? null : NpcRegistry.findBindable(
+                            session.playerId,
+                            area,
+                            typeCode,
+                            sanitizeToken(fields.get(base + 3)),
+                            x, y, z,
+                            claimedBindings);
+
+                    if (bindable != null)
+                    {
+                        claimedBindings.add(bindable.npcId);
+                    }
                     List<String> drop = new ArrayList<>();
                     drop.add("1");
                     drop.add(Integer.toString(guid));
+                    drop.add(Integer.toString(bindable == null ? 0 : bindable.npcId));
 
                     queueOutbound(session, "NPCDROP", drop);
                 }
@@ -1452,11 +1467,11 @@ public class WitcherServer
                 }
                 else
                 {
-                    int replayed = NpcRegistry.requestQuestDeathReplay(session, now);
+                    int replayed = NpcRegistry.requestDeathReplayForKnown(session, now);
 
                     if (replayed > 0)
                     {
-                        dbg("QFOE replay queued for resumed %s: %d deaths\n",
+                        dbg("NPC replay queued for resumed %s: %d deaths\n",
                                 describePlayerId(session.playerId), replayed);
                     }
                 }
@@ -1652,6 +1667,7 @@ public class WitcherServer
                 List<String> drop = new ArrayList<>();
                 drop.add("1");
                 drop.add(Integer.toString(previous[1]));
+                drop.add(Integer.toString(canonicalId));
 
                 queueOutbound(loser, "NPCDROP", drop);
             }
@@ -1758,6 +1774,36 @@ public class WitcherServer
                 ack.add(accepted != 0 ? "1" : "0");
 
                 queueOutbound(attacker, "NPCACKF", ack);
+            }
+
+            return;
+        }
+
+        if ("NPCTERM".equals(opcode))
+        {
+            Integer count = parseIntegerOrNull(fields.get(0));
+
+            if (count == null || count < 0)
+            {
+                return;
+            }
+
+            for (int i = 0; i < count; i++)
+            {
+                int base = 1 + (i * 2);
+
+                if (base + 2 > fields.size())
+                {
+                    break;
+                }
+
+                Integer canonicalId = parseIntegerOrNull(fields.get(base));
+                Integer revision = parseIntegerOrNull(fields.get(base + 1));
+
+                if (canonicalId != null && revision != null)
+                {
+                    NpcRegistry.acknowledgeTerminal(session.playerId, canonicalId, revision);
+                }
             }
 
             return;
@@ -3225,15 +3271,21 @@ public class WitcherServer
         return isQuestCoopParticipant(session, npc.questPartyId);
     }
 
-    static int sanitizeQuestTerminalAttacker(NpcRegistry.Npc npc, int attackerPlayerId)
+    static int sanitizeTerminalAttacker(NpcRegistry.Npc npc, int attackerPlayerId)
     {
-        if (npc == null || attackerPlayerId <= 0 || !NpcRegistry.isQuestFoe(npc))
+        if (npc == null || attackerPlayerId <= 0)
         {
             return 0;
         }
 
         PlayerSession attacker = sessionByPlayerId(attackerPlayerId);
-        return questVisibleTo(attacker, npc) ? attackerPlayerId : 0;
+
+        if (NpcRegistry.isQuestFoe(npc))
+        {
+            return questVisibleTo(attacker, npc) ? attackerPlayerId : 0;
+        }
+
+        return canShareNpcs(attacker, sessionByPlayerId(npc.ownerPlayerId)) ? attackerPlayerId : 0;
     }
 
     private static void notifyLeaderOfCoop(PlayerSession session)
@@ -3422,6 +3474,9 @@ public class WitcherServer
 
         for (NpcRegistry.Npc npc : visible)
         {
+            int authorityToken = npc.ownerPlayerId == 0
+                    ? -npc.authorityRevision
+                    : npc.authorityRevision;
             if (NpcRegistry.isQuestFoe(npc) && !questVisibleTo(session, npc))
             {
                 continue;
@@ -3464,6 +3519,7 @@ public class WitcherServer
                 spawn.add(Integer.toString(npc.terminalState));
                 spawn.add(Integer.toString(npc.terminalRevision));
                 spawn.add(Integer.toString(npc.terminalAttackerId));
+                spawn.add(Integer.toString(authorityToken));
                 spawnCount++;
 
                 if (spawnCount >= NPC_SPAWN_BATCH)
@@ -3542,6 +3598,11 @@ public class WitcherServer
                 mask |= 64;
             }
 
+            if (!view.valid || view.authorityRevision != authorityToken)
+            {
+                mask |= 128;
+            }
+
             if (mask == 0 && (nowNanos - view.lastSentNanos) < NPC_VIEW_KEEPALIVE_NANOS)
             {
                 continue;
@@ -3588,6 +3649,11 @@ public class WitcherServer
                 move.add(Integer.toString(npc.terminalAttackerId));
             }
 
+            if ((mask & 128) != 0)
+            {
+                move.add(Integer.toString(authorityToken));
+            }
+
             view.x = npc.x;
             view.y = npc.y;
             view.z = npc.z;
@@ -3598,6 +3664,7 @@ public class WitcherServer
             view.terminalState = npc.terminalState;
             view.terminalRevision = npc.terminalRevision;
             view.terminalAttackerId = npc.terminalAttackerId;
+            view.authorityRevision = authorityToken;
             view.lastSentNanos = nowNanos;
             view.valid = true;
 
@@ -3626,6 +3693,7 @@ public class WitcherServer
 
             it.remove();
             session.npcViews.remove(known);
+            NpcRegistry.forgetTerminalRecipient(known, session.playerId);
 
             if (removeCount < NPC_REMOVE_BATCH)
             {
@@ -3706,21 +3774,27 @@ public class WitcherServer
 
         for (NpcRegistry.Npc npc : pending)
         {
+            NpcRegistry.initializeTerminalRecipients(npc, sessions, now);
             npc.lastDeathSendNanos = now;
 
             for (PlayerSession session : sessions)
             {
-                if (session.paused
-                        || session.playerId == npc.ownerPlayerId
-                        || !session.knownNpcs.contains(npc.npcId))
+                if (!npc.terminalPending.contains(session.playerId)
+                        || !session.knownNpcs.contains(npc.npcId)
+                        || !NpcRegistry.sharesSyncGroup(session, npc))
                 {
                     continue;
                 }
 
                 Integer sent = npc.deathSends.get(session.playerId);
                 int count = (sent == null) ? 0 : sent;
+                Long lastSent = npc.terminalLastSends.get(session.playerId);
 
-                if (count >= NpcRegistry.DEATH_BROADCAST_REPEATS)
+                if ((session.paused && count >= NpcRegistry.DEATH_BROADCAST_REPEATS)
+                        || (!session.paused
+                            && count >= NpcRegistry.DEATH_BROADCAST_REPEATS
+                            && lastSent != null
+                            && (now - lastSent) < NpcRegistry.TERMINAL_RETRY_NANOS))
                 {
                     continue;
                 }
@@ -3734,6 +3808,7 @@ public class WitcherServer
 
                 sendNpcPacket(socket, session, "NPCDEAD", fields);
                 npc.deathSends.put(session.playerId, count + 1);
+                npc.terminalLastSends.put(session.playerId, now);
             }
 
             if (!npc.deathBroadcast)
@@ -3871,6 +3946,7 @@ public class WitcherServer
             List<String> drop = new ArrayList<>();
             drop.add("1");
             drop.add(Integer.toString(pending[1]));
+            drop.add(Integer.toString(pending[2]));
 
             queueOutbound(loser, "NPCDROP", drop);
         }
@@ -4041,16 +4117,8 @@ public class WitcherServer
             fields.add(Integer.toString(npc.ownerLocalGuid));
             fields.add(Integer.toString(npc.pendingDamageAttackerId));
 
-            if (NpcRegistry.isQuestFoe(npc))
-            {
-                NpcRegistry.markKillOrderSent(npc, now);
-                logBatch = logBatch || npc.killOrderSends == 1 || (npc.killOrderSends % 10) == 0;
-            }
-            else
-            {
-                NpcRegistry.clearKillOrder(npc);
-                logBatch = true;
-            }
+            NpcRegistry.markKillOrderSent(npc, now);
+            logBatch = logBatch || npc.killOrderSends == 1 || (npc.killOrderSends % 10) == 0;
             count++;
         }
 

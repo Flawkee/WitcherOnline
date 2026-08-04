@@ -57,6 +57,7 @@ public class PlayerSession
         public int terminalState = Integer.MIN_VALUE;
         public int terminalRevision = Integer.MIN_VALUE;
         public int terminalAttackerId = Integer.MIN_VALUE;
+        public int authorityRevision = Integer.MIN_VALUE;
         public boolean valid = false;
     }
 

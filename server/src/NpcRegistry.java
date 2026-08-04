@@ -21,7 +21,9 @@ public final class NpcRegistry
     public static final long HANDOVER_RELEASE_GRACE_NANOS = 5_000_000_000L;
     public static final int DEATH_BROADCAST_REPEATS = 3;
     public static final long DEATH_BROADCAST_INTERVAL_NANOS = 200_000_000L;
-    public static final long DEATH_BROADCAST_WINDOW_NANOS = 3_000_000_000L;
+    public static final long TERMINAL_RETRY_NANOS = 2_000_000_000L;
+    public static final long TERMINAL_TOMBSTONE_MIN_NANOS = 5_000_000_000L;
+    public static final long TERMINAL_TOMBSTONE_MAX_NANOS = 600_000_000_000L;
     public static final long HANDOVER_DECLINE_NANOS = 3_000_000_000L;
     public static final long NPC_STREAM_FRESH_NANOS = 12_000_000_000L;
     public static final long HANDOVER_SILENCE_NANOS = 1_500_000_000L;
@@ -30,7 +32,6 @@ public final class NpcRegistry
     public static final long HANDOVER_COOLDOWN_NANOS = 15_000_000_000L;
     public static final long UNACKED_DAMAGE_GRACE_NANOS = 1_200_000_000L;
     public static final long QUEST_KILL_ORDER_RETRY_NANOS = 200_000_000L;
-    public static final long DEAD_RETENTION_NANOS = 30_000_000_000L;
     public static final long HANDOVER_IDLE_EVAL_NANOS = 250_000_000L;
 
     public static final int MAX_NPCS_PER_OWNER = 250;
@@ -78,9 +79,15 @@ public final class NpcRegistry
         public volatile int terminalState = TERMINAL_ACTIVE;
         public volatile int terminalRevision;
         public volatile int terminalAttackerId;
+        public volatile int authorityRevision = 1;
         public volatile boolean alive = true;
         public volatile boolean deathBroadcast;
         public final java.util.Map<Integer, Integer> deathSends = new java.util.concurrent.ConcurrentHashMap<>();
+        public final java.util.Map<Integer, Long> terminalLastSends = new java.util.concurrent.ConcurrentHashMap<>();
+        public final java.util.Set<Integer> terminalPending = java.util.concurrent.ConcurrentHashMap.newKeySet();
+        public final java.util.Set<Integer> terminalAcked = java.util.concurrent.ConcurrentHashMap.newKeySet();
+        public volatile boolean terminalRecipientsInitialized;
+        public volatile long terminalExpiresNanos;
         public volatile long lastDeathSendNanos;
         public volatile long lastUpdateNanos;
         public volatile long deadSinceNanos;
@@ -432,11 +439,12 @@ public final class NpcRegistry
 
             if (npc.releasedByPlayerId != 0 && npc.releasedByPlayerId != ownerPlayerId)
             {
-                pendingDrops.add(new int[] { npc.releasedByPlayerId, npc.releasedLocalGuid });
+                pendingDrops.add(new int[] { npc.releasedByPlayerId, npc.releasedLocalGuid, npc.npcId });
             }
 
             npc.releasedByPlayerId = 0;
             npc.releasedLocalGuid = 0;
+            npc.authorityRevision += 1;
 
             ownerGuidToCanonical.put(ownerKey(ownerPlayerId, ownerLocalGuid), npc.npcId);
 
@@ -581,6 +589,7 @@ public final class NpcRegistry
                     slot.handoverSentNanos = 0L;
                     slot.handoverAttempts = 0;
                     slot.lastUpdateNanos = now;
+                    slot.authorityRevision += 1;
                     ownerGuidToCanonical.put(key, slot.npcId);
 
                     npc = slot;
@@ -674,6 +683,62 @@ public final class NpcRegistry
         }
 
         return npc;
+    }
+
+    public static Npc findBindable(
+            int ownerPlayerId,
+            int area,
+            String typeCode,
+            String appearance,
+            double x,
+            double y,
+            double z,
+            java.util.Set<Integer> excluded)
+    {
+        PlayerSession owner = WitcherServer.sessionByPlayerId(ownerPlayerId);
+        Npc best = null;
+        double bestDistance = Double.MAX_VALUE;
+
+        for (Npc npc : npcs.values())
+        {
+            if (!npc.alive || npc.ownerPlayerId == 0 || npc.ownerPlayerId == ownerPlayerId)
+            {
+                continue;
+            }
+
+            if (excluded != null && excluded.contains(npc.boxedId))
+            {
+                continue;
+            }
+
+            if (!npc.typeCode.equals(typeCode))
+            {
+                continue;
+            }
+
+            if (!WitcherServer.canShareNpcs(owner, WitcherServer.sessionByPlayerId(npc.ownerPlayerId)))
+            {
+                continue;
+            }
+
+            if (!withinReservation(npc, area, x, y, z))
+            {
+                continue;
+            }
+
+            double dx = npc.x - x;
+            double dy = npc.y - y;
+            double dz = npc.z - z;
+            double distance = dx * dx + dy * dy + dz * dz;
+
+            if (distance < bestDistance)
+            {
+                bestDistance = distance;
+                best = npc;
+            }
+        }
+
+        return best;
     }
 
     public static Npc move(
@@ -783,7 +848,7 @@ public final class NpcRegistry
                 npc.terminalAttackerId = 0;
                 npc.terminalRevision += 1;
                 npc.deathBroadcast = false;
-                npc.deathSends.clear();
+                clearTerminalDelivery(npc);
                 npc.deadSinceNanos = 0L;
 
                 return;
@@ -809,11 +874,11 @@ public final class NpcRegistry
 
         if (wasAlive && !npc.alive)
         {
-            int resolvedAttacker = WitcherServer.sanitizeQuestTerminalAttacker(npc, terminalAttackerId);
+            int resolvedAttacker = WitcherServer.sanitizeTerminalAttacker(npc, terminalAttackerId);
 
             if (resolvedAttacker == 0)
             {
-                resolvedAttacker = WitcherServer.sanitizeQuestTerminalAttacker(
+                resolvedAttacker = WitcherServer.sanitizeTerminalAttacker(
                         npc, npc.pendingDamageAttackerId);
             }
 
@@ -823,6 +888,7 @@ public final class NpcRegistry
             npc.terminalAttackerId = resolvedAttacker;
             npc.terminalRevision += 1;
             npc.deadSinceNanos = now;
+            resetTerminalDelivery(npc, now);
             lastDeathNanos = now;
 
             WitcherServer.dbg("NPC %s DIED | owner=%s spot=%s\n",
@@ -830,13 +896,13 @@ public final class NpcRegistry
                     WitcherServer.describePlayerId(npc.ownerPlayerId),
                     describeSpot(npc));
         }
-        else if (!wasAlive && !npc.alive && isQuestFoe(npc))
+        else if (!wasAlive && !npc.alive)
         {
             final int refinedState = previousTerminalState == TERMINAL_DEAD
                     && terminalState != TERMINAL_DEAD
                     ? terminalState
                     : previousTerminalState;
-            final int claimedAttacker = WitcherServer.sanitizeQuestTerminalAttacker(
+            final int claimedAttacker = WitcherServer.sanitizeTerminalAttacker(
                     npc, terminalAttackerId);
             final int refinedAttacker = previousTerminalAttacker == 0
                     ? claimedAttacker
@@ -849,9 +915,8 @@ public final class NpcRegistry
                 npc.terminalAttackerId = refinedAttacker;
                 npc.terminalRevision += 1;
                 npc.deathBroadcast = false;
-                npc.deathSends.clear();
-                npc.lastDeathSendNanos = 0L;
                 npc.deadSinceNanos = now;
+                resetTerminalDelivery(npc, now);
                 lastDeathNanos = now;
 
             }
@@ -885,7 +950,7 @@ public final class NpcRegistry
 
         ownerGuidToCanonical.remove(key);
 
-        if (isQuestFoe(npc) && !npc.alive)
+        if (!npc.alive)
         {
             npc.ownerPlayerId = 0;
             npc.ownerLocalGuid = 0;
@@ -895,9 +960,9 @@ public final class NpcRegistry
             npc.handoverBlockedUntil = 0L;
             npc.releasedByPlayerId = 0;
             npc.releasedLocalGuid = 0;
+            npc.authorityRevision += 1;
 
-            WitcherServer.dbg("QFOE %s slot #%d TOMBSTONED after owner despawn\n",
-                    npc.typeCode, npc.npcId);
+            WitcherServer.dbg("NPC %s TOMBSTONED after owner despawn\n", describeNpc(npc));
 
             return true;
         }
@@ -916,6 +981,8 @@ public final class NpcRegistry
     {
         for (Npc npc : npcs.values())
         {
+            forgetTerminalRecipient(npc, playerId);
+
             if (npc.ownerPlayerId != playerId)
             {
                 continue;
@@ -926,6 +993,7 @@ public final class NpcRegistry
             npc.ownerPlayerId = 0;
             npc.ownerLocalGuid = 0;
             npc.handoverTarget = 0;
+            npc.authorityRevision += 1;
         }
     }
 
@@ -938,7 +1006,11 @@ public final class NpcRegistry
                 continue;
             }
 
-            if (!npc.alive && npc.deathBroadcast && (now - npc.deadSinceNanos) > DEAD_RETENTION_NANOS)
+            if (!npc.alive
+                    && ((npc.terminalExpiresNanos > 0L && now >= npc.terminalExpiresNanos)
+                        || (npc.terminalRecipientsInitialized
+                            && npc.terminalPending.isEmpty()
+                            && (now - npc.deadSinceNanos) >= TERMINAL_TOMBSTONE_MIN_NANOS)))
             {
                 unregister(npc);
                 ownerGuidToCanonical.remove(ownerKey(npc.ownerPlayerId, npc.ownerLocalGuid));
@@ -1052,29 +1124,13 @@ public final class NpcRegistry
 
             if (npc.hpPermille == 0)
             {
-                if (isQuestFoe(npc))
+                npc.hpPermille = 1;
+
+                if (!npc.killOrderPending)
                 {
-                    npc.hpPermille = 1;
-
-                    if (!npc.killOrderPending)
-                    {
-                        npc.killOrderPending = true;
-                        killOrdersPending.incrementAndGet();
-                    }
-
-                    continue;
+                    npc.killOrderPending = true;
+                    killOrdersPending.incrementAndGet();
                 }
-
-                npc.alive = false;
-                npc.flags = npc.flags & ~1;
-                npc.terminalState = TERMINAL_DEAD;
-                npc.terminalRevision += 1;
-                npc.deadSinceNanos = now;
-                lastDeathNanos = now;
-
-                WitcherServer.dbg("NPC %s DIED (server authority, owner silent) | owner=%s\n",
-                        describeNpc(npc),
-                        WitcherServer.describePlayerId(npc.ownerPlayerId));
             }
         }
     }
@@ -1098,8 +1154,7 @@ public final class NpcRegistry
             if (npc.killOrderPending
                     && npc.ownerPlayerId == ownerPlayerId
                     && npc.ownerLocalGuid != 0
-                    && (!isQuestFoe(npc)
-                        || npc.lastKillOrderSendNanos == 0L
+                    && (npc.lastKillOrderSendNanos == 0L
                         || (now - npc.lastKillOrderSendNanos) >= QUEST_KILL_ORDER_RETRY_NANOS))
             {
                 orders.add(npc);
@@ -1132,8 +1187,7 @@ public final class NpcRegistry
 
     public static List<Npc> pendingDeaths(long now)
     {
-        if (lastDeathNanos == 0L
-                || (now - lastDeathNanos) > (DEATH_BROADCAST_WINDOW_NANOS + 1_000_000_000L))
+        if (lastDeathNanos == 0L)
         {
             return EMPTY_NPCS;
         }
@@ -1147,9 +1201,7 @@ public final class NpcRegistry
                 continue;
             }
 
-            if (!isQuestFoe(npc)
-                    && npc.deathBroadcast
-                    && (now - npc.deadSinceNanos) > DEATH_BROADCAST_WINDOW_NANOS)
+            if (npc.terminalRecipientsInitialized && npc.terminalPending.isEmpty())
             {
                 continue;
             }
@@ -1165,19 +1217,32 @@ public final class NpcRegistry
         return pending;
     }
 
-    public static void requestDeathReplay(Npc npc, int playerId, long now)
+    public static boolean requestDeathReplay(Npc npc, int playerId, long now)
     {
-        if (npc == null || npc.alive || !isQuestFoe(npc) || playerId <= 0)
+        if (npc == null || npc.alive || playerId <= 0)
         {
-            return;
+            return false;
         }
 
+        if (!isQuestFoe(npc) && npc.terminalExpiresNanos > 0L && now >= npc.terminalExpiresNanos)
+        {
+            return false;
+        }
+
+        if (npc.terminalAcked.contains(playerId))
+        {
+            return false;
+        }
+
+        npc.terminalPending.add(playerId);
         npc.deathSends.remove(playerId);
+        npc.terminalLastSends.remove(playerId);
         npc.lastDeathSendNanos = 0L;
         lastDeathNanos = now;
+        return true;
     }
 
-    public static int requestQuestDeathReplay(PlayerSession session, long now)
+    public static int requestDeathReplayForKnown(PlayerSession session, long now)
     {
         if (session == null)
         {
@@ -1189,18 +1254,106 @@ public final class NpcRegistry
         for (Npc npc : npcs.values())
         {
             if (npc.alive
-                    || !isQuestFoe(npc)
                     || !session.knownNpcs.contains(npc.boxedId)
-                    || !WitcherServer.questVisibleTo(session, npc))
+                    || (isQuestFoe(npc) && !WitcherServer.questVisibleTo(session, npc)))
             {
                 continue;
             }
 
-            requestDeathReplay(npc, session.playerId, now);
-            count++;
+            if (requestDeathReplay(npc, session.playerId, now))
+            {
+                count++;
+            }
         }
 
         return count;
+    }
+
+    public static void initializeTerminalRecipients(Npc npc, List<PlayerSession> sessions, long now)
+    {
+        if (npc == null || npc.alive || npc.terminalRecipientsInitialized)
+        {
+            return;
+        }
+
+        synchronized (npc)
+        {
+            if (npc.terminalRecipientsInitialized)
+            {
+                return;
+            }
+
+            for (PlayerSession session : sessions)
+            {
+                if (session.playerId == npc.ownerPlayerId
+                        || !session.knownNpcs.contains(npc.boxedId)
+                        || !sharesSyncGroup(session, npc)
+                        || npc.terminalAcked.contains(session.playerId))
+                {
+                    continue;
+                }
+
+                npc.terminalPending.add(session.playerId);
+            }
+
+            npc.terminalRecipientsInitialized = true;
+            npc.lastDeathSendNanos = 0L;
+            lastDeathNanos = now;
+        }
+    }
+
+    public static boolean acknowledgeTerminal(int playerId, int canonicalId, int revision)
+    {
+        Npc npc = npcs.get(canonicalId);
+
+        if (npc == null || npc.alive || revision != npc.terminalRevision
+                || !npc.terminalPending.remove(playerId))
+        {
+            return false;
+        }
+
+        npc.terminalAcked.add(playerId);
+        npc.deathSends.remove(playerId);
+        npc.terminalLastSends.remove(playerId);
+        return true;
+    }
+
+    public static void forgetTerminalRecipient(int canonicalId, int playerId)
+    {
+        forgetTerminalRecipient(npcs.get(canonicalId), playerId);
+    }
+
+    private static void forgetTerminalRecipient(Npc npc, int playerId)
+    {
+        if (npc == null)
+        {
+            return;
+        }
+
+        npc.terminalPending.remove(playerId);
+        npc.terminalAcked.remove(playerId);
+        npc.deathSends.remove(playerId);
+        npc.terminalLastSends.remove(playerId);
+    }
+
+    private static void resetTerminalDelivery(Npc npc, long now)
+    {
+        long expires = npc.terminalExpiresNanos;
+        clearTerminalDelivery(npc);
+        npc.terminalExpiresNanos = expires > now
+                ? expires
+                : now + TERMINAL_TOMBSTONE_MAX_NANOS;
+    }
+
+    private static void clearTerminalDelivery(Npc npc)
+    {
+        npc.deathSends.clear();
+        npc.terminalLastSends.clear();
+        npc.terminalPending.clear();
+        npc.terminalAcked.clear();
+        npc.terminalRecipientsInitialized = false;
+        npc.terminalExpiresNanos = 0L;
+        npc.lastDeathSendNanos = 0L;
     }
 
     public static int removeQuestParty(int partyId)
@@ -1435,8 +1588,6 @@ public final class NpcRegistry
                 continue;
             }
 
-            final boolean questFoe = isQuestFoe(npc);
-
             if (now < npc.nextHandoverEvalNanos)
             {
                 continue;
@@ -1481,18 +1632,7 @@ public final class NpcRegistry
                     continue;
                 }
 
-                if (!questFoe && session.playerId == npc.releasedByPlayerId)
-                {
-                    continue;
-                }
-
                 if (session.paused)
-                {
-                    continue;
-                }
-
-                if (!questFoe
-                        && (now - session.lastReleaseNanos) < HANDOVER_RELEASE_GRACE_NANOS)
                 {
                     continue;
                 }
@@ -1506,11 +1646,6 @@ public final class NpcRegistry
                 double dy = npc.y - session.posY;
                 double dz = npc.z - session.posZ;
                 double squared = (dx * dx) + (dy * dy) + (dz * dz);
-
-                if (!questFoe && squared > radiusSquared)
-                {
-                    continue;
-                }
 
                 if (!session.knownNpcs.contains(npc.boxedId))
                 {
@@ -1601,14 +1736,7 @@ public final class NpcRegistry
                     continue;
                 }
 
-                if (questFoe && !proximityWin)
-                {
-                    continue;
-                }
-
-                if (!questFoe
-                        && !proximityWin
-                        && (bestLatency + LATENCY_MIGRATION_MARGIN_MS) >= ownerLatency)
+                if (!proximityWin)
                 {
                     continue;
                 }
@@ -1630,14 +1758,7 @@ public final class NpcRegistry
             npc.handoverSentNanos = now;
             npc.handoverAttempts++;
 
-            if (questFoe)
-            {
-                orders.add(0, new int[] { npc.npcId, best.playerId });
-            }
-            else
-            {
-                orders.add(new int[] { npc.npcId, best.playerId });
-            }
+            orders.add(0, new int[] { npc.npcId, best.playerId });
         }
 
         return orders;
@@ -1698,6 +1819,7 @@ public final class NpcRegistry
 
         npc.ownerPlayerId = 0;
         npc.ownerLocalGuid = 0;
+        npc.authorityRevision += 1;
         npc.handoverTarget = 0;
         npc.handoverSentNanos = 0L;
         npc.handoverAttempts = 0;
@@ -1743,6 +1865,7 @@ public final class NpcRegistry
         npc.handoverAttempts = 0;
         npc.handoverBlockedUntil = 0L;
         npc.lastUpdateNanos = now;
+        npc.authorityRevision += 1;
 
         ownerGuidToCanonical.put(ownerKey(playerId, localGuid), npc.npcId);
 

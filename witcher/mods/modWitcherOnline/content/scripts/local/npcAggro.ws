@@ -611,8 +611,7 @@ class r_NpcAggro
 
             index = indexOfState(trackedList[i].npcId);
 
-            if(!npc.IsAlive()
-                || (trackedList[i].questTag == "" && !npc.IsInCombat()))
+            if(!npc.IsAlive())
             {
                 if(index >= 0)
                 {

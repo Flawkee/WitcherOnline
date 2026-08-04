@@ -26,7 +26,7 @@ namespace w3mp {
 		constexpr int kUpdPerPacket = 20;
 		constexpr int kDelPerPacket = 40;
 		constexpr int kMaxAddPacketsPerSend = 4;
-		constexpr int kMaxUpdPacketsPerSend = 8;
+		constexpr int kMaxUpdPacketsPerSend = 13;
 		constexpr size_t kMaxPacketBytes = 1050;
 		constexpr int kWantPerPacket = 16;
 		constexpr int kWantIntervalMs = 700;
@@ -34,7 +34,7 @@ namespace w3mp {
 		constexpr int kKeepaliveMs = 500;
 		constexpr int kOwnedGraceMs = 900;
 		constexpr int kReplicaStaleMs = 6000;
-		constexpr int kQuestAuthorityTimeoutMs = 1500;
+		constexpr int kAuthorityTimeoutMs = 1500;
 		constexpr int kDeathAnimGraceMs = 2000;
 		constexpr float kPositionDeadband = 0.08f;
 		constexpr float kHeadingDeadband = 2.0f;
@@ -103,6 +103,8 @@ namespace w3mp {
 			int terminalState = 0;
 			int terminalRevision = 0;
 			int terminalAttackerId = 0;
+			int authorityRevision = 0;
+			bool authorityActive = true;
 			int emittedTerminalRevision = 0;
 			bool promote = false;
 			bool unspawnable = false;
@@ -127,6 +129,12 @@ namespace w3mp {
 			int attackerPlayerId = 0;
 		};
 
+		struct DropOrder
+		{
+			int guid = 0;
+			int canonicalId = 0;
+		};
+
 		std::mutex g_mutex;
 		PacketSender g_sender;
 
@@ -139,9 +147,10 @@ namespace w3mp {
 		std::vector<HitAck> g_acks;
 		std::vector<PendingHit> g_pending;
 		std::vector<std::string> g_ackQueue;
-		std::vector<int> g_dropGuids;
+		std::vector<DropOrder> g_dropOrders;
 		std::vector<KillOrder> g_killOrders;
 		std::vector<int> g_giveNacks;
+		std::unordered_map<int, int> g_terminalAcks;
 		std::unordered_map<int, bool> g_pausedPlayers;
 		std::unordered_map<int, int> g_scales;
 		std::unordered_map<int, int> g_scaleStaging;
@@ -681,7 +690,7 @@ namespace w3mp {
 
 				if (isSpawn)
 				{
-					entrySize = 14;
+					entrySize = 15;
 				}
 				else
 				{
@@ -705,6 +714,8 @@ namespace w3mp {
 						entrySize += 2;
 					if (mask & 64)
 						entrySize += 1;
+					if (mask & 128)
+						entrySize += 1;
 				}
 
 				if (cursor + entrySize > fields.size())
@@ -720,8 +731,6 @@ namespace w3mp {
 
 				Replica& replica = g_replicas[canonicalId];
 				replica.canonicalId = canonicalId;
-				replica.lastPacketMs = now;
-
 				TransformSample sample;
 				sample.t = snapshotMs > 0 ? snapshotMs : now;
 
@@ -739,6 +748,17 @@ namespace w3mp {
 					sample.terminalState = ParseInt(fields, base + 11);
 					sample.terminalRevision = ParseInt(fields, base + 12);
 					sample.terminalAttackerId = ParseInt(fields, base + 13);
+					const int authorityToken = ParseInt(fields, base + 14);
+					const int authorityRevision = std::abs(authorityToken);
+
+					if (replica.authorityRevision != 0 && replica.authorityRevision != authorityRevision)
+					{
+						replica.samples.clear();
+						replica.avgIntervalMs = 0;
+					}
+
+					replica.authorityRevision = authorityRevision;
+					replica.authorityActive = authorityToken > 0;
 
 					replica.terminalState = sample.terminalState;
 					replica.terminalRevision = sample.terminalRevision;
@@ -812,11 +832,30 @@ namespace w3mp {
 						at += 1;
 					}
 
+					if (mask & 128)
+					{
+						const int authorityToken = ParseInt(fields, at);
+						const int authorityRevision = std::abs(authorityToken);
+						at += 1;
+
+						if (replica.authorityRevision != 0 && replica.authorityRevision != authorityRevision)
+						{
+							replica.samples.clear();
+							replica.avgIntervalMs = 0;
+						}
+
+						replica.authorityRevision = authorityRevision;
+						replica.authorityActive = authorityToken > 0;
+					}
+
 					replica.terminalState = sample.terminalState;
 					replica.terminalRevision = sample.terminalRevision;
 					replica.terminalAttackerId = sample.terminalAttackerId;
 					replica.dead = sample.terminalState != 0 || (sample.flags & 1) == 0 || sample.hpPermille <= 0;
 				}
+
+				if (replica.authorityActive || replica.lastPacketMs == 0)
+					replica.lastPacketMs = now;
 
 				if (!replica.samples.empty() && sample.t < replica.samples.back().t)
 					sample.t = replica.samples.back().t;
@@ -859,6 +898,8 @@ namespace w3mp {
 		g_hits.clear();
 		g_acks.clear();
 		g_killOrders.clear();
+		g_dropOrders.clear();
+		g_terminalAcks.clear();
 		g_pending.clear();
 		g_pendingCount.store(0, std::memory_order_relaxed);
 		g_ackQueue.clear();
@@ -939,12 +980,13 @@ namespace w3mp {
 
 			for (int i = 0; i < count; ++i)
 			{
-				const size_t base = 1 + static_cast<size_t>(i);
+				const size_t base = 1 + static_cast<size_t>(i) * 2;
 
-				if (base >= fields.size())
+				if (base + 2 > fields.size())
 					break;
 
 				const int canonicalId = ParseInt(fields, base);
+				g_terminalAcks.erase(canonicalId);
 				auto it = g_replicas.find(canonicalId);
 
 				if (it != g_replicas.end())
@@ -982,18 +1024,36 @@ namespace w3mp {
 
 			for (int i = 0; i < count; ++i)
 			{
-				const size_t base = 1 + static_cast<size_t>(i);
+				const size_t base = 1 + static_cast<size_t>(i) * 2;
 
-				if (base >= fields.size())
+				if (base + 2 > fields.size())
 					break;
 
 				const int guid = ParseInt(fields, base);
+				const int canonicalId = ParseInt(fields, base + 1);
 
 				if (guid == 0)
 					continue;
 
+				auto owned = g_owned.find(guid);
+
+				if (canonicalId > 0)
+				{
+					Replica& replica = g_replicas[canonicalId];
+					replica.canonicalId = canonicalId;
+					replica.localGuid = guid;
+					replica.spawnRequested = false;
+					replica.spawnEmitted = true;
+
+					if (owned != g_owned.end())
+					{
+						replica.typeCode = owned->second.typeCode;
+						replica.appearance = owned->second.appearance;
+					}
+				}
+
 				g_owned.erase(guid);
-				g_dropGuids.push_back(guid);
+				g_dropOrders.push_back({ guid, canonicalId });
 			}
 
 			return;
@@ -1100,10 +1160,19 @@ namespace w3mp {
 				if (canonicalId <= 0)
 					continue;
 
+				const int revision = ParseInt(fields, base + 2);
+				auto acknowledged = g_terminalAcks.find(canonicalId);
+
+				if (acknowledged != g_terminalAcks.end() && acknowledged->second >= revision)
+				{
+					Send("NPCTERM", { "1", std::to_string(canonicalId), std::to_string(revision) });
+					continue;
+				}
+
 				Replica& replica = g_replicas[canonicalId];
 				replica.canonicalId = canonicalId;
 				replica.terminalState = ParseInt(fields, base + 1);
-				replica.terminalRevision = ParseInt(fields, base + 2);
+				replica.terminalRevision = revision;
 				replica.terminalAttackerId = ParseInt(fields, base + 3);
 				replica.dead = true;
 				replica.lastPacketMs = ServerNow();
@@ -1390,10 +1459,7 @@ namespace w3mp {
 			const long long now = ServerNow();
 
 			for (auto& pair : g_replicas)
-			{
-				if (pair.second.typeCode.rfind("quest:", 0) == 0)
-					pair.second.lastPacketMs = now;
-			}
+				pair.second.lastPacketMs = now;
 		}
 	}
 
@@ -1470,7 +1536,6 @@ namespace w3mp {
 		{
 			Replica& replica = it->second;
 			const bool questReplica = replica.typeCode.rfind("quest:", 0) == 0;
-
 			if (replica.despawn)
 			{
 				if (replica.dead
@@ -1514,7 +1579,7 @@ namespace w3mp {
 				continue;
 			}
 
-			if (!questReplica && (serverNow - replica.lastPacketMs) > kReplicaStaleMs)
+			if (replica.localGuid == 0 && (serverNow - replica.lastPacketMs) > kReplicaStaleMs)
 			{
 				if (replica.localGuid != 0 || replica.spawnEmitted)
 				{
@@ -1530,10 +1595,9 @@ namespace w3mp {
 				continue;
 			}
 
-			if (questReplica
-				&& replica.localGuid != 0
+			if (replica.localGuid != 0
 				&& !replica.promote
-				&& (serverNow - replica.lastPacketMs) > kQuestAuthorityTimeoutMs)
+				&& (serverNow - replica.lastPacketMs) > kAuthorityTimeoutMs)
 			{
 				ReplicaCommand command;
 				command.canonicalId = replica.canonicalId;
@@ -1688,23 +1752,33 @@ namespace w3mp {
 	int NpcNet::PullDrops()
 	{
 		std::lock_guard<std::mutex> lock(g_mutex);
-		return static_cast<int>(g_dropGuids.size());
+		return static_cast<int>(g_dropOrders.size());
 	}
 
 	int NpcNet::Drop(int index)
 	{
 		std::lock_guard<std::mutex> lock(g_mutex);
 
-		if (index < 0 || index >= static_cast<int>(g_dropGuids.size()))
+		if (index < 0 || index >= static_cast<int>(g_dropOrders.size()))
 			return 0;
 
-		return g_dropGuids[index];
+		return g_dropOrders[index].guid;
+	}
+
+	int NpcNet::DropCanonical(int index)
+	{
+		std::lock_guard<std::mutex> lock(g_mutex);
+
+		if (index < 0 || index >= static_cast<int>(g_dropOrders.size()))
+			return 0;
+
+		return g_dropOrders[index].canonicalId;
 	}
 
 	void NpcNet::ClearDrops()
 	{
 		std::lock_guard<std::mutex> lock(g_mutex);
-		g_dropGuids.clear();
+		g_dropOrders.clear();
 	}
 
 	int NpcNet::PullKills()
@@ -1815,6 +1889,21 @@ namespace w3mp {
 	{
 		std::lock_guard<std::mutex> lock(g_mutex);
 		g_replicas.erase(canonicalId);
+	}
+
+	void NpcNet::AckTerminal(int canonicalId, int revision)
+	{
+		std::lock_guard<std::mutex> lock(g_mutex);
+
+		if (canonicalId <= 0 || revision <= 0)
+			return;
+
+		auto acknowledged = g_terminalAcks.find(canonicalId);
+
+		if (acknowledged == g_terminalAcks.end() || revision > acknowledged->second)
+			g_terminalAcks[canonicalId] = revision;
+
+		Send("NPCTERM", { "1", std::to_string(canonicalId), std::to_string(revision) });
 	}
 
 	void NpcNet::Take(int canonicalId, int localGuid)

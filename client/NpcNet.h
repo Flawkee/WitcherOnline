@@ -92,6 +92,7 @@ namespace w3mp {
 		static void SetSuspended(bool suspended);
 		static int PullDrops();
 		static int Drop(int index);
+		static int DropCanonical(int index);
 		static void ClearDrops();
 		static int PullKills();
 		static int KillGuid(int index);
@@ -108,6 +109,7 @@ namespace w3mp {
 		static int PullAcks();
 		static const HitAck* Ack(int index);
 		static void ClearAcks();
+		static void AckTerminal(int canonicalId, int revision);
 
 		static void SetPlayerPaused(int playerId, bool paused);
 		static bool IsPlayerPaused(int playerId);
