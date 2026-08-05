@@ -272,6 +272,44 @@ class r_EntityClassifier
         return npc.GetAttitude(thePlayer) == AIA_Hostile;
     }
 
+    public function persistentNpcIdentity(npc : CNewNPC, typeCode : string, questTag : string) : string
+    {
+        var huntBoss : W3MonsterHuntNPC;
+
+        if(!npc)
+        {
+            return "";
+        }
+
+        if(questTag != "")
+        {
+            return "quest:" + questTag;
+        }
+
+        huntBoss = (W3MonsterHuntNPC)npc;
+
+        if(!npc.HasAbility('Boss')
+            && !npc.HasAbility('SkillBoss')
+            && !npc.HasAbility('MonsterMHBoss')
+            && !npc.GetCharacterStats().HasAbilityWithTag('Boss')
+            && !huntBoss)
+        {
+            return "";
+        }
+
+        return "special:" + typeCode;
+    }
+
+    public function persistentNpcIdentityFlags(npc : CNewNPC, identityKey : string) : int
+    {
+        if(!npc || identityKey == "")
+        {
+            return 0;
+        }
+
+        return 3;
+    }
+
     private function hasQuestTag(tags : array<name>, out matched : string) : bool
     {
         var text : string;
@@ -440,8 +478,15 @@ class r_EntityClassifier
         if(!npc.IsHuman())
         {
             sample.entityClass = REC_Wildlife;
-            sample.reason = "animal";
-            sample.syncEligible = true;
+            if(sample.hostileNow)
+            {
+                sample.reason = "hostile animal";
+                sample.syncEligible = true;
+            }
+            else
+            {
+                sample.reason = "calm animal";
+            }
             return;
         }
 

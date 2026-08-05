@@ -18,6 +18,8 @@ class r_TrackedNpc
     public var appliedScale : int;
     public var questTag   : string;
     public var appearanceText : string;
+    public var identityKey : string;
+    public var identityFlags : int;
     public var isMonster  : bool;
     public var cachedForcedTarget : int;
     public var terminalState : int;
@@ -25,6 +27,8 @@ class r_TrackedNpc
 
     default questTag = "";
     default appearanceText = "";
+    default identityKey = "";
+    default identityFlags = 0;
     default isMonster = false;
     default cachedForcedTarget = 0;
     default terminalState = 0;
@@ -193,7 +197,6 @@ class r_NpcSync
 
     default actionLogging = false;
     default actionForceMode = 1;
-
     default enabled = true;
     default debugLogging = false;
     default suspended = false;
@@ -223,6 +226,7 @@ class r_NpcSync
     private var TRACK_GRACE    : float;
     private var PUSH_INTERVAL  : float;
     private var SCAN_INTERVAL  : float;
+    private var IDLE_SCAN_INTERVAL : float;
     private var DRIVE_INTERVAL : float;
     private var AGGRO_INTERVAL : float;
     private var SCALE_INTERVAL : float;
@@ -258,6 +262,7 @@ class r_NpcSync
     default TRACK_GRACE = 3.0;
     default PUSH_INTERVAL = 0.025;
     default SCAN_INTERVAL = 0.25;
+    default IDLE_SCAN_INTERVAL = 0.5;
     default DRIVE_INTERVAL = 0.025;
     default AGGRO_INTERVAL = 0.4;
     default SCALE_INTERVAL = 0.5;
@@ -732,7 +737,6 @@ class r_NpcSync
         var classifier : r_EntityClassifier;
         var coop : bool;
         var now : float;
-
         if(!enabled || !thePlayer)
         {
             return;
@@ -759,7 +763,14 @@ class r_NpcSync
 
         if(now >= nextScanAt)
         {
-            nextScanAt = now + SCAN_INTERVAL;
+            if(tracked.Size() == 0 && replicas.Size() == 0)
+            {
+                nextScanAt = now + IDLE_SCAN_INTERVAL;
+            }
+            else
+            {
+                nextScanAt = now + SCAN_INTERVAL;
+            }
             coop = coopActive();
 
             if(gateOpen || coop)
@@ -782,9 +793,10 @@ class r_NpcSync
 
             scanQuestEnemies(now);
             updateQuestBindings(now);
+
         }
 
-        if(now >= nextAggroAt)
+        if(tracked.Size() > 0 && now >= nextAggroAt)
         {
             nextAggroAt = now + AGGRO_INTERVAL;
             getAggro().update(now, tracked);
@@ -800,7 +812,7 @@ class r_NpcSync
             }
         }
 
-        if(now >= nextScaleAt)
+        if((tracked.Size() > 0 || replicas.Size() > 0) && now >= nextScaleAt)
         {
             nextScaleAt = now + SCALE_INTERVAL;
             updateHealthScaling();
@@ -1707,11 +1719,10 @@ class r_NpcSync
             }
 
             replicaCount = countReplicasOfSpecies(typeCode, pos);
+            localCount = countLocalOfSpecies(typeCode, pos, scanEntities, classifier);
 
             if(replicaCount > 0)
             {
-                localCount = countLocalOfSpecies(typeCode, pos, scanEntities, classifier);
-
                 if(replicaCount >= localCount)
                 {
                     for(j = 0; j < replicas.Size(); j += 1)
@@ -1740,11 +1751,6 @@ class r_NpcSync
                     continue;
                 }
             }
-            else
-            {
-                localCount = 1;
-            }
-
             if(!allowOffer(now))
             {
                 continue;
@@ -1757,6 +1763,8 @@ class r_NpcSync
             record.appearanceText = NameToString(record.appearance);
             record.isMonster = npc.IsMonster();
             record.typeCode = typeCode;
+            record.identityKey = classifier.persistentNpcIdentity(npc, typeCode, "");
+            record.identityFlags = classifier.persistentNpcIdentityFlags(npc, record.identityKey);
             record.lastSeenAt = now;
             record.lastHp = -1;
             record.offerLocalCount = localCount;
@@ -1913,6 +1921,8 @@ class r_NpcSync
                     tracked[index].appearance = npc.GetAppearance();
                     tracked[index].appearanceText = NameToString(tracked[index].appearance);
                     tracked[index].isMonster = npc.IsMonster();
+                    tracked[index].identityKey = "quest:" + questTag;
+                    tracked[index].identityFlags = 3;
                     tracked[index].baseMaxHealth = -1.0;
                     tracked[index].appliedScale = 1000;
                     tracked[index].cachedForcedTarget = 0;
@@ -1936,6 +1946,8 @@ class r_NpcSync
             record.isMonster = npc.IsMonster();
             record.typeCode = "quest:" + questTag;
             record.questTag = questTag;
+            record.identityKey = "quest:" + questTag;
+            record.identityFlags = 3;
             record.lastSeenAt = now;
             record.lastHp = -1;
             record.offerLocalCount = 1;
@@ -2138,7 +2150,7 @@ class r_NpcSync
             record.appearance = npc.GetAppearance();
             record.lastLocalHp = healthPermille(npc);
 
-            WO_NpcBindId(record.canonicalId, record.localGuid);
+            WO_NpcBindId(record.canonicalId, record.localGuid, 1);
 
             dbg("npc_quest", "bound canonical=" + record.canonicalId
                 + " tag=" + record.questTag + " guid=" + record.localGuid
@@ -2231,7 +2243,7 @@ class r_NpcSync
 
         best.AddTag('WOReplica');
         applyQuestHealthProtection(record, best);
-        WO_NpcBindId(record.canonicalId, record.localGuid);
+        WO_NpcBindId(record.canonicalId, record.localGuid, 1);
 
         dbg("npc_bind", "canonical=" + record.canonicalId
             + " guid=" + record.localGuid
@@ -2292,7 +2304,7 @@ class r_NpcSync
 
         if(keepNetwork)
         {
-            WO_NpcBindId(record.canonicalId, 0);
+            WO_NpcBindId(record.canonicalId, 0, 1);
         }
     }
 
@@ -2618,6 +2630,8 @@ class r_NpcSync
                 tracked[i].offerLocalCount,
                 tracked[i].typeCode,
                 tracked[i].appearanceText,
+                tracked[i].identityKey,
+                tracked[i].identityFlags,
                 pos.X, pos.Y, pos.Z,
                 npc.GetHeading(),
                 hp,
@@ -2770,7 +2784,7 @@ class r_NpcSync
         applyQuestHealthProtection(record, owned.actor);
         tracked.Erase(index);
         scheduleOwnedFlush(now);
-        WO_NpcBindId(canonicalId, record.localGuid);
+        WO_NpcBindId(canonicalId, record.localGuid, 1);
 
         dbg("npc_bind", "converted canonical=" + canonicalId
             + " guid=" + record.localGuid
@@ -2931,8 +2945,28 @@ class r_NpcSync
                 continue;
             }
 
+            if(op == 6)
+            {
+                yieldQuestReplicaLocally(replicas[index]);
+                continue;
+            }
+
             driveReplica(replicas[index], i, now);
         }
+    }
+
+    private function yieldQuestReplicaLocally(record : r_Replica)
+    {
+        if(!record || record.questTag == "" || !record.actor)
+        {
+            return;
+        }
+
+        cancelReplicaMovement(record);
+        wo_releaseNpcTarget(record.actor);
+        record.appliedTarget = -1;
+        record.authorityReady = false;
+        record.nextDriveAt = 0.0;
     }
 
     private function spawnReplica(commandIndex : int, canonicalId : int, now : float)
@@ -3025,7 +3059,7 @@ class r_NpcSync
 
         replicas.PushBack(record);
 
-        WO_NpcBind(commandIndex, record.localGuid);
+        WO_NpcBind(commandIndex, record.localGuid, 2);
         prepareReplica(record);
 
         statSpawned += 1;
@@ -3278,6 +3312,7 @@ class r_NpcSync
         var owned : r_TrackedNpc;
         var preservedTargetId : int;
         var preservedTarget : CActor;
+        var classifier : r_EntityClassifier;
 
         npc = record.actor;
 
@@ -3353,6 +3388,7 @@ class r_NpcSync
         var owned : r_TrackedNpc;
         var preservedTargetId : int;
         var preservedTarget : CActor;
+        var classifier : r_EntityClassifier;
 
         npc = record.actor;
 
@@ -3395,6 +3431,12 @@ class r_NpcSync
         owned.isMonster = npc.IsMonster();
         owned.typeCode = record.typeCode;
         owned.questTag = record.questTag;
+        classifier = theGame.r_getMultiplayerClient().getEntityClassifier();
+        owned.identityKey = classifier.persistentNpcIdentity(npc, owned.typeCode, owned.questTag);
+        owned.identityFlags = classifier.persistentNpcIdentityFlags(npc, owned.identityKey);
+        classifier = theGame.r_getMultiplayerClient().getEntityClassifier();
+        owned.identityKey = classifier.persistentNpcIdentity(npc, owned.typeCode, owned.questTag);
+        owned.identityFlags = classifier.persistentNpcIdentityFlags(npc, owned.identityKey);
         owned.lastSeenAt = now;
         owned.lastHp = -1;
         owned.baseMaxHealth = record.baseMaxHealth;
@@ -3427,6 +3469,8 @@ class r_NpcSync
         var heading : float;
         var speed : float;
         var distance : float;
+        var viewerDistance : float;
+        var driveInterval : float;
         var snapLimit : float;
         var freeRadius : float;
         var slideWindow : float;
@@ -3488,6 +3532,22 @@ class r_NpcSync
 
         current = npc.GetWorldPosition();
         distance = VecDistance(current, target);
+        viewerDistance = 0.0;
+
+        if(thePlayer)
+        {
+            viewerDistance = VecDistance(thePlayer.GetWorldPosition(), current);
+        }
+        driveInterval = DRIVE_INTERVAL;
+
+        if(viewerDistance > 55.0)
+        {
+            driveInterval = 0.1;
+        }
+        else if(viewerDistance > 40.0)
+        {
+            driveInterval = 0.05;
+        }
         snapLimit = QUEST_HARD_SNAP;
         freeRadius = QUEST_FREE_RADIUS;
         slideWindow = QUEST_SLIDE_WINDOW;
@@ -3503,7 +3563,7 @@ class r_NpcSync
 
             npc.TeleportWithRotation(target, rot);
             record.authorityReady = true;
-            record.nextDriveAt = now + DRIVE_INTERVAL;
+            record.nextDriveAt = now + driveInterval;
             statTeleports += 1;
             return;
         }
@@ -3515,7 +3575,7 @@ class r_NpcSync
             return;
         }
 
-        record.nextDriveAt = now + DRIVE_INTERVAL;
+        record.nextDriveAt = now + driveInterval;
 
         if(distance < freeRadius)
         {

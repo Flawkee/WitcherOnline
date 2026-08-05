@@ -32,6 +32,8 @@ namespace w3mp {
 		constexpr int kWantIntervalMs = 700;
 		constexpr int kSpawnAttemptLimit = 3;
 		constexpr int kKeepaliveMs = 500;
+		constexpr int kReliableCheckpointMs = 1000;
+		constexpr int kRegistrationRetryMs = 2000;
 		constexpr int kOwnedGraceMs = 900;
 		constexpr int kReplicaStaleMs = 6000;
 		constexpr int kAuthorityTimeoutMs = 1500;
@@ -63,6 +65,11 @@ namespace w3mp {
 			int localCount = 1;
 			std::string typeCode;
 			std::string appearance;
+			std::string identityKey;
+			int identityFlags = 0;
+			int canonicalId = 0;
+			int authorityRevision = 0;
+			int fastSequence = 0;
 			float x = 0.0f;
 			float y = 0.0f;
 			float z = 0.0f;
@@ -74,9 +81,12 @@ namespace w3mp {
 			int terminalAttackerId = 0;
 
 			bool registered = false;
+			bool registrationPending = false;
 			bool seenThisFrame = false;
 			long long lastSeenMs = 0;
 			long long lastSentMs = 0;
+			long long registrationSentMs = 0;
+			long long lastReliableSentMs = 0;
 
 			float sentX = 0.0f;
 			float sentY = 0.0f;
@@ -87,6 +97,11 @@ namespace w3mp {
 			int sentTarget = -1;
 			int sentTerminalState = -1;
 			int sentTerminalAttacker = -1;
+			int reliableHp = -2;
+			int reliableFlags = -1;
+			int reliableTarget = -1;
+			int reliableTerminalState = -1;
+			int reliableTerminalAttacker = -1;
 		};
 
 		struct Replica
@@ -104,7 +119,11 @@ namespace w3mp {
 			int terminalRevision = 0;
 			int terminalAttackerId = 0;
 			int authorityRevision = 0;
+			int lifecycleRevision = 0;
+			int fastSequence = 0;
+			int bindingKind = 0;
 			bool authorityActive = true;
+			bool authorityYielded = false;
 			int emittedTerminalRevision = 0;
 			bool promote = false;
 			bool unspawnable = false;
@@ -336,6 +355,33 @@ namespace w3mp {
 			entity.lastSentMs = now;
 		}
 
+		int ComputeReliableMask(const OwnedEntity& entity, bool checkpoint)
+		{
+			if (checkpoint)
+				return 4 | 8 | 16 | 32 | 64;
+
+			int mask = 0;
+			if (entity.hpPermille <= 0 && entity.hpPermille != entity.reliableHp)
+				mask |= 4;
+			if ((entity.flags & 1) != (entity.reliableFlags & 1))
+				mask |= 8;
+			if (entity.terminalState != entity.reliableTerminalState)
+				mask |= 32;
+			if (entity.terminalAttackerId != entity.reliableTerminalAttacker)
+				mask |= 64;
+			return mask;
+		}
+
+		void MarkReliableSent(OwnedEntity& entity, long long now)
+		{
+			entity.reliableHp = entity.hpPermille;
+			entity.reliableFlags = entity.flags;
+			entity.reliableTarget = entity.targetPlayerId;
+			entity.reliableTerminalState = entity.terminalState;
+			entity.reliableTerminalAttacker = entity.terminalAttackerId;
+			entity.lastReliableSentMs = now;
+		}
+
 		size_t FieldsBytes(const std::vector<std::string>& fields, size_t fromIndex)
 		{
 			size_t total = 0;
@@ -370,15 +416,19 @@ namespace w3mp {
 
 			std::vector<std::string> addFields;
 			std::vector<std::string> updFields;
+			std::vector<std::string> fastFields;
 			std::vector<std::string> delFields;
 			int addCount = 0;
 			int updCount = 0;
+			int fastCount = 0;
 			int delCount = 0;
 			size_t addBytes = 0;
 			size_t updBytes = 0;
+			size_t fastBytes = 0;
 
-			addFields.reserve(kAddPerPacket * 14 + 2);
+			addFields.reserve(kAddPerPacket * 16 + 2);
 			updFields.reserve(kUpdPerPacket * 11 + 2);
+			fastFields.reserve(kUpdPerPacket * 10 + 2);
 
 			for (int guid : g_ownedRemoved)
 			{
@@ -406,9 +456,11 @@ namespace w3mp {
 
 			int addPackets = 0;
 			int updPackets = 0;
+			int fastPackets = 0;
 
 			BeginSnapshotFields(addFields);
 			BeginSnapshotFields(updFields);
+			BeginSnapshotFields(fastFields);
 
 			for (auto& pair : g_owned)
 			{
@@ -416,6 +468,10 @@ namespace w3mp {
 
 				if (!entity.registered)
 				{
+					if (entity.registrationPending
+						&& (now - entity.registrationSentMs) < kRegistrationRetryMs)
+						continue;
+
 					if (addPackets >= kMaxAddPacketsPerSend)
 					{
 						g_statAddBudgetHit++;
@@ -438,9 +494,13 @@ namespace w3mp {
 					addFields.push_back(std::to_string(entity.localCount));
 					addFields.push_back(std::to_string(entity.terminalState));
 					addFields.push_back(std::to_string(entity.terminalAttackerId));
+					addFields.push_back(entity.identityKey.empty() ? "-" : entity.identityKey);
+					addFields.push_back(std::to_string(entity.identityFlags));
 
-					entity.registered = true;
+					entity.registrationPending = true;
+					entity.registrationSentMs = now;
 					MarkSent(entity, now);
+					MarkReliableSent(entity, now);
 					addCount++;
 					addBytes += FieldsBytes(addFields, before);
 					g_statAdds++;
@@ -459,12 +519,43 @@ namespace w3mp {
 					continue;
 				}
 
-				const int mask = ComputeMask(entity);
-				const bool keepalive = (now - entity.lastSentMs) >= kKeepaliveMs;
+				const int fastMask = ComputeMask(entity);
+				const bool fastKeepalive = (now - entity.lastSentMs) >= kKeepaliveMs;
+				if ((fastMask != 0 || fastKeepalive) && entity.canonicalId > 0
+					&& entity.authorityRevision > 0 && fastPackets < kMaxUpdPacketsPerSend)
+				{
+					const size_t before = fastFields.size();
+					entity.fastSequence += 1;
+					fastFields.push_back(std::to_string(entity.guid));
+					fastFields.push_back(std::to_string(entity.authorityRevision));
+					fastFields.push_back(std::to_string(entity.fastSequence));
+					fastFields.push_back(FormatFloat(entity.x));
+					fastFields.push_back(FormatFloat(entity.y));
+					fastFields.push_back(FormatFloat(entity.z));
+					fastFields.push_back(FormatFloat(entity.heading));
+					fastFields.push_back(std::to_string(entity.hpPermille));
+					fastFields.push_back(std::to_string(entity.flags));
+					fastFields.push_back(std::to_string(entity.targetPlayerId));
+					MarkSent(entity, now);
+					fastCount++;
+					fastBytes += FieldsBytes(fastFields, before);
 
-				if (mask == 0 && !keepalive)
+					if (fastCount >= kUpdPerPacket || fastBytes >= kMaxPacketBytes)
+					{
+						SealSnapshotFields(fastFields, snapshotMs, fastCount);
+						QueuePacket(outbox, "NPCFAST", std::move(fastFields));
+						fastFields = std::vector<std::string>();
+						BeginSnapshotFields(fastFields);
+						fastCount = 0;
+						fastBytes = 0;
+						fastPackets++;
+					}
+				}
+
+				const bool checkpoint = (now - entity.lastReliableSentMs) >= kReliableCheckpointMs;
+				const int reliableMask = ComputeReliableMask(entity, checkpoint);
+				if (reliableMask == 0)
 					continue;
-
 				if (updPackets >= kMaxUpdPacketsPerSend)
 				{
 					g_statUpdBudgetHit++;
@@ -472,36 +563,20 @@ namespace w3mp {
 				}
 
 				const size_t before = updFields.size();
-
 				updFields.push_back(std::to_string(entity.guid));
-				updFields.push_back(std::to_string(mask));
-
-				if (mask & 1)
-				{
-					updFields.push_back(FormatFloat(entity.x));
-					updFields.push_back(FormatFloat(entity.y));
-					updFields.push_back(FormatFloat(entity.z));
-				}
-
-				if (mask & 2)
-					updFields.push_back(FormatFloat(entity.heading));
-
-				if (mask & 4)
+				updFields.push_back(std::to_string(reliableMask));
+				if (reliableMask & 4)
 					updFields.push_back(std::to_string(entity.hpPermille));
-
-				if (mask & 8)
+				if (reliableMask & 8)
 					updFields.push_back(std::to_string(entity.flags));
-
-				if (mask & 16)
+				if (reliableMask & 16)
 					updFields.push_back(std::to_string(entity.targetPlayerId));
-
-				if (mask & 32)
+				if (reliableMask & 32)
 					updFields.push_back(std::to_string(entity.terminalState));
-
-				if (mask & 64)
+				if (reliableMask & 64)
 					updFields.push_back(std::to_string(entity.terminalAttackerId));
 
-				MarkSent(entity, now);
+				MarkReliableSent(entity, now);
 				updCount++;
 				updBytes += FieldsBytes(updFields, before);
 				g_statUpdates++;
@@ -528,6 +603,12 @@ namespace w3mp {
 			{
 				SealSnapshotFields(updFields, snapshotMs, updCount);
 				QueuePacket(outbox, "NPCUPD", std::move(updFields));
+			}
+
+			if (fastCount > 0)
+			{
+				SealSnapshotFields(fastFields, snapshotMs, fastCount);
+				QueuePacket(outbox, "NPCFAST", std::move(fastFields));
 			}
 
 			g_statSnapshotsSent++;
@@ -690,7 +771,7 @@ namespace w3mp {
 
 				if (isSpawn)
 				{
-					entrySize = 15;
+					entrySize = 16;
 				}
 				else
 				{
@@ -750,6 +831,7 @@ namespace w3mp {
 					sample.terminalAttackerId = ParseInt(fields, base + 13);
 					const int authorityToken = ParseInt(fields, base + 14);
 					const int authorityRevision = std::abs(authorityToken);
+					const int lifecycleRevision = ParseInt(fields, base + 15);
 
 					if (replica.authorityRevision != 0 && replica.authorityRevision != authorityRevision)
 					{
@@ -759,6 +841,7 @@ namespace w3mp {
 
 					replica.authorityRevision = authorityRevision;
 					replica.authorityActive = authorityToken > 0;
+					replica.lifecycleRevision = lifecycleRevision;
 
 					replica.terminalState = sample.terminalState;
 					replica.terminalRevision = sample.terminalRevision;
@@ -968,6 +1051,55 @@ namespace w3mp {
 			return;
 		}
 
+		if (opcode == "NPCFAST")
+		{
+			const long long snapshotMs = ParseLong(fields, 0);
+			const int count = ParseInt(fields, 1);
+			const long long now = ServerNow();
+			const size_t stride = 11;
+			for (int i = 0; i < count; ++i)
+			{
+				const size_t base = 2 + static_cast<size_t>(i) * stride;
+				if (base + stride > fields.size())
+					break;
+				const int canonicalId = ParseInt(fields, base);
+				auto found = g_replicas.find(canonicalId);
+				if (found == g_replicas.end())
+					continue;
+				Replica& replica = found->second;
+				const int lifecycleRevision = ParseInt(fields, base + 1);
+				const int authorityRevision = ParseInt(fields, base + 2);
+				const int sequence = ParseInt(fields, base + 3);
+				if (replica.localGuid == 0 || replica.dead
+					|| lifecycleRevision != replica.lifecycleRevision
+					|| authorityRevision != replica.authorityRevision
+					|| sequence <= replica.fastSequence)
+				{
+					continue;
+				}
+				replica.fastSequence = sequence;
+				TransformSample sample;
+				sample.t = snapshotMs > 0 ? snapshotMs : now;
+				sample.x = ParseFloat(fields, base + 4);
+				sample.y = ParseFloat(fields, base + 5);
+				sample.z = ParseFloat(fields, base + 6);
+				sample.heading = ParseFloat(fields, base + 7);
+				sample.hpPermille = ParseInt(fields, base + 8);
+				sample.flags = ParseInt(fields, base + 9) | 1;
+				sample.targetPlayerId = ParseInt(fields, base + 10);
+				sample.terminalState = replica.terminalState;
+				sample.terminalRevision = replica.terminalRevision;
+				sample.terminalAttackerId = replica.terminalAttackerId;
+			if (!replica.samples.empty() && sample.t < replica.samples.back().t)
+				sample.t = replica.samples.back().t;
+			replica.samples.push_back(sample);
+			while (static_cast<int>(replica.samples.size()) > kReplicaSampleCap)
+				replica.samples.pop_front();
+			replica.lastPacketMs = now;
+			}
+			return;
+		}
+
 		if (opcode == "NPCMOV")
 		{
 			HandleSnapshot(fields, false);
@@ -1024,9 +1156,9 @@ namespace w3mp {
 
 			for (int i = 0; i < count; ++i)
 			{
-				const size_t base = 1 + static_cast<size_t>(i) * 2;
+				const size_t base = 1 + static_cast<size_t>(i) * 3;
 
-				if (base + 2 > fields.size())
+				if (base + 3 > fields.size())
 					break;
 
 				const int guid = ParseInt(fields, base);
@@ -1040,10 +1172,14 @@ namespace w3mp {
 				if (canonicalId > 0)
 				{
 					Replica& replica = g_replicas[canonicalId];
+					if (replica.dead && replica.localGuid != guid)
+						replica.emittedTerminalRevision = 0;
 					replica.canonicalId = canonicalId;
+					replica.lifecycleRevision = ParseInt(fields, base + 2);
 					replica.localGuid = guid;
 					replica.spawnRequested = false;
 					replica.spawnEmitted = true;
+					g_terminalAcks.erase(canonicalId);
 
 					if (owned != g_owned.end())
 					{
@@ -1097,9 +1233,39 @@ namespace w3mp {
 				if (it != g_owned.end())
 				{
 					it->second.registered = false;
+					it->second.registrationPending = false;
+					it->second.registrationSentMs = 0;
 					it->second.lastSentMs = 0;
 					g_statReregisters++;
 				}
+			}
+
+			return;
+		}
+
+		if (opcode == "NPCREG")
+		{
+			const int count = ParseInt(fields, 0);
+
+			for (int i = 0; i < count; ++i)
+			{
+				const size_t base = 1 + static_cast<size_t>(i) * 3;
+
+				if (base + 3 > fields.size())
+					break;
+
+				const int guid = ParseInt(fields, base);
+				auto it = g_owned.find(guid);
+
+				if (it == g_owned.end())
+					continue;
+
+				it->second.registered = true;
+				it->second.canonicalId = ParseInt(fields, base + 1);
+				it->second.authorityRevision = ParseInt(fields, base + 2);
+				it->second.fastSequence = 0;
+				it->second.registrationPending = false;
+				it->second.registrationSentMs = 0;
 			}
 
 			return;
@@ -1364,6 +1530,8 @@ namespace w3mp {
 		int localCount,
 		const std::string& typeCode,
 		const std::string& appearance,
+		const std::string& identityKey,
+		int identityFlags,
 		float x,
 		float y,
 		float z,
@@ -1386,14 +1554,22 @@ namespace w3mp {
 			entity.guid = guid;
 			entity.typeCode = typeCode;
 			entity.appearance = appearance;
+			entity.identityKey = identityKey;
+			entity.identityFlags = identityFlags;
 		}
-		else if (entity.appearance != appearance)
+		else if (entity.appearance != appearance || entity.typeCode != typeCode)
 		{
 			entity.registered = false;
+			entity.registrationPending = false;
+			entity.registrationSentMs = 0;
 			entity.appearance = appearance;
 			entity.typeCode = typeCode;
+			entity.identityKey = identityKey;
+			entity.identityFlags = identityFlags;
 		}
 
+		entity.identityKey = identityKey;
+		entity.identityFlags = identityFlags;
 		entity.area = area;
 		entity.localCount = localCount;
 		entity.x = x;
@@ -1429,7 +1605,7 @@ namespace w3mp {
 			{
 				g_scales.erase(pair.first);
 
-				if (!pair.second.registered)
+				if (!pair.second.registered && !pair.second.registrationPending)
 					continue;
 
 				freeFields.push_back(std::to_string(pair.first));
@@ -1579,6 +1755,26 @@ namespace w3mp {
 				continue;
 			}
 
+			if (replica.localGuid != 0
+				&& replica.dead
+				&& replica.terminalRevision > replica.emittedTerminalRevision)
+			{
+				ReplicaCommand command;
+				command.canonicalId = replica.canonicalId;
+				command.localGuid = replica.localGuid;
+				command.op = static_cast<int>(ReplicaOp::Kill);
+				command.terminalState = replica.terminalState;
+				command.terminalRevision = replica.terminalRevision;
+				command.terminalAttackerId = replica.terminalAttackerId;
+				g_commands.push_back(command);
+
+				replica.emittedTerminalRevision = replica.terminalRevision;
+				g_statKills++;
+
+				++it;
+				continue;
+			}
+
 			if (replica.localGuid == 0 && (serverNow - replica.lastPacketMs) > kReplicaStaleMs)
 			{
 				if (replica.localGuid != 0 || replica.spawnEmitted)
@@ -1594,6 +1790,25 @@ namespace w3mp {
 				it = g_replicas.erase(it);
 				continue;
 			}
+
+			if (questReplica && !replica.authorityActive && replica.localGuid != 0)
+			{
+				if (!replica.authorityYielded)
+				{
+					ReplicaCommand command;
+					command.canonicalId = replica.canonicalId;
+					command.localGuid = replica.localGuid;
+					command.op = static_cast<int>(ReplicaOp::YieldLocal);
+					g_commands.push_back(command);
+					replica.authorityYielded = true;
+				}
+
+				++it;
+				continue;
+			}
+
+			if (replica.authorityActive)
+				replica.authorityYielded = false;
 
 			if (replica.localGuid != 0
 				&& !replica.promote
@@ -1646,7 +1861,7 @@ namespace w3mp {
 			{
 				if (replica.dead && !questReplica)
 				{
-					it = g_replicas.erase(it);
+					++it;
 					continue;
 				}
 
@@ -1838,7 +2053,7 @@ namespace w3mp {
 		return cachedCommand;
 	}
 
-	void NpcNet::Bind(int index, int localGuid)
+	void NpcNet::Bind(int index, int localGuid, int kind)
 	{
 		std::lock_guard<std::mutex> lock(g_mutex);
 
@@ -1855,13 +2070,23 @@ namespace w3mp {
 			it->second.emittedTerminalRevision = 0;
 
 		it->second.localGuid = localGuid;
+		it->second.bindingKind = kind;
 		it->second.spawnAttempts = 0;
 		it->second.spawnRequested = false;
 		it->second.unspawnable = false;
 		g_commands[index].localGuid = localGuid;
+		if (localGuid != 0)
+		{
+			Send("NPCBIND", {
+				"1",
+				std::to_string(canonicalId),
+				std::to_string(localGuid),
+				std::to_string(kind),
+				std::to_string(it->second.lifecycleRevision) });
+		}
 	}
 
-	void NpcNet::BindCanonical(int canonicalId, int localGuid)
+	void NpcNet::BindCanonical(int canonicalId, int localGuid, int kind)
 	{
 		std::lock_guard<std::mutex> lock(g_mutex);
 
@@ -1874,6 +2099,7 @@ namespace w3mp {
 			it->second.emittedTerminalRevision = 0;
 
 		it->second.localGuid = localGuid;
+		it->second.bindingKind = kind;
 		it->second.spawnAttempts = 0;
 		it->second.spawnRequested = false;
 		it->second.unspawnable = false;
@@ -1883,12 +2109,34 @@ namespace w3mp {
 			it->second.wantedAtMs = 0;
 			it->second.promote = false;
 		}
+		else
+		{
+			Send("NPCBIND", {
+				"1",
+				std::to_string(canonicalId),
+				std::to_string(localGuid),
+				std::to_string(kind),
+				std::to_string(it->second.lifecycleRevision) });
+		}
 	}
 
 	void NpcNet::Forget(int canonicalId)
 	{
 		std::lock_guard<std::mutex> lock(g_mutex);
 		g_replicas.erase(canonicalId);
+	}
+
+	void NpcNet::Decline(int canonicalId)
+	{
+		std::lock_guard<std::mutex> lock(g_mutex);
+
+		auto it = g_replicas.find(canonicalId);
+
+		if (it != g_replicas.end())
+			it->second.promote = false;
+
+		if (canonicalId > 0)
+			Send("NPCNOPE", { "1", std::to_string(canonicalId) });
 	}
 
 	void NpcNet::AckTerminal(int canonicalId, int revision)

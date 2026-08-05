@@ -35,6 +35,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 public class WitcherServer
 {
+    private static final Object NPC_WORLD_LOCK = new Object();
     private static final Map<String, PlayerSession> players = new ConcurrentHashMap<>();
     private static final Map<Integer, PlayerSession> playersById = new ConcurrentHashMap<>();
     private static final Set<String> bannedIps = ConcurrentHashMap.newKeySet();
@@ -70,7 +71,9 @@ public class WitcherServer
 
     private static final AtomicLong totalPacketsSent = new AtomicLong(0);
     private static final AtomicLong totalSendFailures = new AtomicLong(0);
+    private static final AtomicLong transportMisroutes = new AtomicLong(0);
     private static final AtomicLong totalBroadcastTicks = new AtomicLong(0);
+    private static final Map<String, AtomicLong> transportRoutes = new ConcurrentHashMap<>();
 
     private static volatile long lastBroadcastTickNanos = 0L;
 
@@ -87,6 +90,7 @@ public class WitcherServer
     private static final double PLAYER_VIS_ENTER_SQUARED = PLAYER_VIS_ENTER_RADIUS * PLAYER_VIS_ENTER_RADIUS;
     private static final double PLAYER_VIS_LEAVE_SQUARED = PLAYER_VIS_LEAVE_RADIUS * PLAYER_VIS_LEAVE_RADIUS;
     private static final long PLAYER_VIS_RESEND_NANOS = 1_000_000_000L;
+    private static final int PLAYER_VIS_TICK_DIVIDER = 4;
 
     private static final long NPC_LOD_NEAR_NANOS = 33_000_000L;
     private static final long NPC_LOD_MID_NANOS = 50_000_000L;
@@ -124,6 +128,10 @@ public class WitcherServer
     private static final AtomicLong npcResends = new AtomicLong();
     private static final AtomicLong tickOverruns = new AtomicLong();
     private static final AtomicLong scaleEpoch = new AtomicLong();
+    private static final AtomicLong passiveHitDistanceOutliers = new AtomicLong();
+    private static final AtomicLong malformedPackets = new AtomicLong();
+    private static final AtomicLong unknownPackets = new AtomicLong();
+    private static final AtomicLong oversizedPackets = new AtomicLong();
 
     private static final int TICK_SAMPLE_SLOTS = 512;
     private static final long[] tickSamples = new long[TICK_SAMPLE_SLOTS];
@@ -149,6 +157,19 @@ public class WitcherServer
     static long serverMs()
     {
         return (System.nanoTime() - SERVER_START_NANOS) / 1_000_000L;
+    }
+
+    private static List<PlayerSession> activeSessions()
+    {
+        List<PlayerSession> active = new ArrayList<>();
+        for (PlayerSession session : players.values())
+        {
+            if (session.transportReady())
+            {
+                active.add(session);
+            }
+        }
+        return active;
     }
 
     private static Long parseLongOrNull(String value)
@@ -186,17 +207,6 @@ public class WitcherServer
     private static final int MAX_USERNAME_LENGTH = 16;
     private static final int MAX_PACKET_FIELDS = 512;
 
-    private static final long RATE_LIMIT_WINDOW_NANOS = 1_000_000_000L;
-    private static final int RATE_LIMIT_PACKETS_PER_WINDOW = 600;
-
-    private static final Map<String, RateLimitState> rateLimits = new ConcurrentHashMap<>();
-
-    private static final class RateLimitState
-    {
-        private long windowStartNanos;
-        private int count;
-    }
-
     private static final int DEFAULT_PORT = 40000;
     private static final DateTimeFormatter LOG_TIME = DateTimeFormatter.ofPattern("HH:mm:ss");
 
@@ -204,6 +214,9 @@ public class WitcherServer
 
     private static volatile HttpServer statusServer = null;
     private static volatile String cachedStatusFontBase64 = "";
+    private static volatile DatagramSocket udpSocket = null;
+    private static volatile TcpTransport tcpTransport = null;
+    private static volatile UdpBatcher udpBatcher = null;
 
     private static final AtomicInteger nextPlayerId = new AtomicInteger(1);
 
@@ -212,7 +225,6 @@ public class WitcherServer
         Properties serverProperties = loadServerProperties();
         int port = choosePort(args, serverProperties);
         whitelistEnabled.set(readBoolean(serverProperties, "whitelist", false));
-
         loadBannedIps();
         loadWhitelistIps();
         NpcScaling.load();
@@ -221,6 +233,53 @@ public class WitcherServer
         DatagramSocket socket = new DatagramSocket(port);
         socket.setSendBufferSize(1 << 20);
         socket.setReceiveBufferSize(1 << 20);
+        udpSocket = socket;
+        udpBatcher = new UdpBatcher(socket, new UdpBatcher.Listener()
+        {
+            @Override
+            public void sent(PlayerSession session, int bytes, int logicalPackets)
+            {
+                totalPacketsSent.incrementAndGet();
+                if (session != null)
+                {
+                    session.udpPacketsSent.incrementAndGet();
+                    session.udpBytesSent.addAndGet(bytes);
+                }
+            }
+
+            @Override
+            public void failed(PlayerSession session, int logicalPackets)
+            {
+                totalSendFailures.addAndGet(Math.max(1, logicalPackets));
+            }
+        });
+
+        tcpTransport = new TcpTransport(port, new TcpTransport.Handler()
+        {
+            @Override
+            public void onMessage(TcpTransport.Connection connection, String message)
+            {
+                handleTcpMessage(connection, message);
+            }
+
+            @Override
+            public void onClosed(TcpTransport.Connection connection)
+            {
+                PlayerSession session = connection.session();
+                if (session != null)
+                {
+                    for (String pending : connection.drainPending())
+                    {
+                        if (!isRealtimeOpcode(packetOpcode(pending))
+                                && !session.pendingTcpReplay.offer(pending))
+                        {
+                            session.outboundDropped.incrementAndGet();
+                        }
+                    }
+                    session.clearTcp(connection);
+                }
+            }
+        });
 
         boolean svgEnabled = readBoolean(serverProperties, "svgEnabled", false);
         int svgPort = DEFAULT_STATUS_PORT;
@@ -234,7 +293,7 @@ public class WitcherServer
 
         dbgNotime("Launching Witcher Online for The Witcher 3: Wild Hunt...\n");
         dbgNotime("Author: rejuvenate7 - Github: https://github.com/rejuvenate7\n");
-        dbg("Starting Witcher Online server on *:%d\n", port);
+        dbg("Starting Witcher Online server on *:%d (UDP+TCP required)\n", port);
 
         if (svgEnabled)
         {
@@ -244,11 +303,12 @@ public class WitcherServer
 
         dbg("For help, type \"help\" or \"?\"\n");
 
-        Thread recvThread = startThread("udp-recv", () -> receiveLoop(socket));
-        Thread sendThread = startThread("udp-broadcast", () -> broadcastLoop(socket));
+        final DatagramSocket activeSocket = socket;
+        Thread recvThread = startThread("udp-recv", () -> receiveLoop(activeSocket));
+        Thread sendThread = startThread("broadcast", () -> broadcastLoop(activeSocket));
         Thread cleanupThread = startThread("udp-cleanup", WitcherServer::cleanupLoop);
-        Thread npcThread = startThread("npc-sync", () -> npcLoop(socket));
-        Thread consoleThread = startThread("console", () -> consoleLoop(socket));
+        Thread npcThread = startThread("npc-sync", () -> npcLoop(activeSocket));
+        Thread consoleThread = startThread("console", () -> consoleLoop(activeSocket));
 
         recvThread.join();
         sendThread.join();
@@ -506,7 +566,7 @@ public class WitcherServer
     {
         List<String> names = new ArrayList<>();
 
-        for (PlayerSession session : players.values())
+        for (PlayerSession session : activeSessions())
         {
             if (session != null && session.username != null && !session.username.trim().isEmpty())
             {
@@ -606,13 +666,6 @@ public class WitcherServer
                 ClientEndpoint sender = new ClientEndpoint(packet.getAddress(), packet.getPort());
                 String senderIp = normalizeIp(sender.address.getHostAddress());
 
-                String msg = new String(
-                        packet.getData(),
-                        packet.getOffset(),
-                        packet.getLength(),
-                        StandardCharsets.UTF_8
-                );
-
                 if (isIpBanned(senderIp))
                 {
                     safeSend(socket, sender, "ERROR\tBANNED");
@@ -625,7 +678,24 @@ public class WitcherServer
                     continue;
                 }
 
-                handleMessage(socket, sender, msg);
+                List<String> messages;
+                try
+                {
+                    messages = BinaryPacketCodec.decodeDatagram(packet.getData(), packet.getLength());
+                }
+                catch (IllegalArgumentException invalid)
+                {
+                    malformedPackets.incrementAndGet();
+                    continue;
+                }
+
+                for (String msg : messages)
+                {
+                    if (!handleUdpTransportMessage(socket, sender, msg))
+                    {
+                        handleMessage(socket, sender, msg);
+                    }
+                }
             }
             catch (SocketException e)
             {
@@ -655,39 +725,14 @@ public class WitcherServer
                 || "UPDATE4".equals(opcode);
     }
 
+    private static boolean isNpcWorldOpcode(String opcode)
+    {
+        return "PSTATE".equals(opcode) || opcode.startsWith("NPC");
+    }
+
     private static boolean isUpdateOpcode(String opcode)
     {
-        return "PRESP".equals(opcode)
-                || "PCOOP".equals(opcode)
-                || "SCENE".equals(opcode)
-                || "QITEM".equals(opcode)
-                || "SAVEBEG".equals(opcode)
-                || "SAVECHK".equals(opcode)
-                || "SAVEEND".equals(opcode)
-                || "SAVENACK".equals(opcode)
-                || "SAVEACK".equals(opcode)
-                || "SAVEWANT".equals(opcode)
-                || "MOVE".equals(opcode)
-                || "UPDATE1A".equals(opcode)
-                || "UPDATE1B".equals(opcode)
-                || "UPDATE2A".equals(opcode)
-                || "UPDATE2B".equals(opcode)
-                || "UPDATE3".equals(opcode)
-                || "UPDATE4".equals(opcode)
-                                || "NPCADD".equals(opcode)
-                || "NPCUPD".equals(opcode)
-                || "NPCDEL".equals(opcode)
-                || "NPCHIT".equals(opcode)
-                || "NPCACK".equals(opcode)
-                || "NPCTERM".equals(opcode)
-                || "NPCTAKE".equals(opcode)
-                || "NPCNOPE".equals(opcode)
-                || "NPCFREE".equals(opcode)
-                || "PJOIN".equals(opcode)
-                || "PLEAVE".equals(opcode)
-                || "PSTATE".equals(opcode)
-                || "NPCWANT".equals(opcode)
-                || "TSYNC".equals(opcode);
+        return PacketRegistry.acceptsClient(opcode) && !"HELLO".equals(opcode) && !"PING".equals(opcode);
     }
 
     private static boolean isValidUsername(String value)
@@ -709,23 +754,6 @@ public class WitcherServer
         }
 
         return true;
-    }
-
-    private static boolean allowPacket(ClientEndpoint sender, long nowNanos)
-    {
-        RateLimitState state = rateLimits.computeIfAbsent(sender.toString(), key -> new RateLimitState());
-
-        synchronized (state)
-        {
-            if (nowNanos - state.windowStartNanos >= RATE_LIMIT_WINDOW_NANOS)
-            {
-                state.windowStartNanos = nowNanos;
-                state.count = 0;
-            }
-
-            state.count++;
-            return state.count <= RATE_LIMIT_PACKETS_PER_WINDOW;
-        }
     }
 
     private static boolean isInteger(String value)
@@ -755,10 +783,32 @@ public class WitcherServer
 
     private static void handleMessage(DatagramSocket socket, ClientEndpoint sender, String msg) throws Exception
     {
+        handleMessage(socket, sender, null, msg);
+    }
+
+    private static void handleMessage(
+            DatagramSocket socket,
+            ClientEndpoint sender,
+            TcpTransport.Connection tcpConnection,
+            String msg) throws Exception
+    {
+        if (msg == null || msg.isEmpty())
+        {
+            malformedPackets.incrementAndGet();
+            return;
+        }
+
+        if (msg.length() > (1 << 20))
+        {
+            oversizedPackets.incrementAndGet();
+            return;
+        }
+
         String[] parts = msg.split("\t", -1);
 
         if (parts.length < 2 || parts.length > MAX_PACKET_FIELDS)
         {
+            malformedPackets.incrementAndGet();
             return;
         }
 
@@ -766,11 +816,7 @@ public class WitcherServer
 
         if (!isUpdateOpcode(opcode))
         {
-            return;
-        }
-
-        if (!allowPacket(sender, System.nanoTime()))
-        {
+            unknownPackets.incrementAndGet();
             return;
         }
 
@@ -800,7 +846,13 @@ public class WitcherServer
 
         if (!isValidUsername(username))
         {
-            safeSend(socket, sender, "ERROR\tINVALID_USERNAME");
+            safeReply(socket, sender, tcpConnection, "ERROR\tINVALID_USERNAME");
+            return;
+        }
+
+        if (tcpConnection != null && !username.equalsIgnoreCase(tcpConnection.helloUsername()))
+        {
+            tcpConnection.close();
             return;
         }
 
@@ -812,21 +864,13 @@ public class WitcherServer
 
         if (current != null)
         {
-            String currentIp = normalizeIp(current.endpoint.address.getHostAddress());
-
-            boolean sameEndpoint = current.endpoint.equals(sender);
+            String currentIp = normalizeIp(current.remoteIp);
+            boolean sameEndpoint = tcpConnection == null && current.endpoint != null && current.endpoint.equals(sender);
             boolean sameIp = currentIp.equals(senderIp);
             boolean expired = (now - current.lastSeen) > PLAYER_TIMEOUT_NANOS;
 
-            if (sameEndpoint)
+            if (sameEndpoint || sameIp)
             {
-                // normal packet from same endpoint
-            }
-            else if (sameIp)
-            {
-                ClientEndpoint old = current.endpoint;
-                current.endpoint = sender;
-                dbg("Updated endpoint for %s from %s to %s\n", username, old, sender);
             }
             else if (expired)
             {
@@ -835,7 +879,7 @@ public class WitcherServer
                 if (reserved)
                 {
                     dbg("Rejected %s from %s because username is reserved for previous IP\n", username, sender);
-                    safeSend(socket, sender, "ERROR\tUSERNAME_TAKEN");
+                    safeReply(socket, sender, tcpConnection, "ERROR\tUSERNAME_TAKEN");
                     return;
                 }
 
@@ -844,18 +888,23 @@ public class WitcherServer
                 if (current != null)
                 {
                     dbg("Rejected duplicate username %s from %s because owned by %s\n",
-                            username, sender, current.endpoint);
-                    safeSend(socket, sender, "ERROR\tUSERNAME_TAKEN");
+                            username, sender, describeSessionAddress(current));
+                    safeReply(socket, sender, tcpConnection, "ERROR\tUSERNAME_TAKEN");
                     return;
                 }
             }
             else
             {
                 dbg("Rejected duplicate username %s from %s because owned by %s\n",
-                        username, sender, current.endpoint);
-                safeSend(socket, sender, "ERROR\tUSERNAME_TAKEN");
+                        username, sender, describeSessionAddress(current));
+                safeReply(socket, sender, tcpConnection, "ERROR\tUSERNAME_TAKEN");
                 return;
             }
+        }
+
+        if (!players.containsKey(usernameKey) && tcpConnection == null)
+        {
+            return;
         }
 
         if (!players.containsKey(usernameKey))
@@ -874,7 +923,7 @@ public class WitcherServer
                 {
                     dbg("Rejected username %s from %s because it is reserved for IP %s\n",
                             username, sender, reservation.ip);
-                    safeSend(socket, sender, "ERROR\tUSERNAME_TAKEN");
+                    safeReply(socket, sender, tcpConnection, "ERROR\tUSERNAME_TAKEN");
                     return;
                 }
 
@@ -896,7 +945,7 @@ public class WitcherServer
                             packetPlayerId,
                             idOwner.username);
 
-                    safeSend(socket, sender, "ERROR\tID_TAKEN");
+                    safeReply(socket, sender, tcpConnection, "ERROR\tID_TAKEN");
                     return;
                 }
 
@@ -908,7 +957,12 @@ public class WitcherServer
                 playerIdToUse = allocateNewPlayerId();
             }
 
-            PlayerSession created = new PlayerSession(playerIdToUse, username, sender, now);
+            PlayerSession created = new PlayerSession(
+                    playerIdToUse,
+                    username,
+                    tcpConnection == null ? sender : null,
+                    now);
+            created.remoteIp = senderIp;
             PlayerSession race = players.putIfAbsent(usernameKey, created);
 
             if (race == null)
@@ -921,21 +975,37 @@ public class WitcherServer
             {
                 current = race;
 
-                String currentIp = normalizeIp(current.endpoint.address.getHostAddress());
+                String currentIp = normalizeIp(current.remoteIp);
 
-                if (!currentIp.equals(senderIp) && !current.endpoint.equals(sender))
+                if (!currentIp.equals(senderIp))
                 {
                     dbg("Rejected duplicate username %s from %s because owned by %s\n",
-                            username, sender, current.endpoint);
-                    safeSend(socket, sender, "ERROR\tUSERNAME_TAKEN");
+                            username, sender, describeSessionAddress(current));
+                    safeReply(socket, sender, tcpConnection, "ERROR\tUSERNAME_TAKEN");
                     return;
                 }
-
-                current.endpoint = sender;
             }
         }
 
-        current.lastSeen = now;
+        if (tcpConnection != null)
+        {
+            current.markTcp(tcpConnection, now);
+            current.tcpPacketsReceived.incrementAndGet();
+            current.tcpBytesReceived.addAndGet(msg.length());
+            recordTransportRoute("TCP RX", opcode, msg.length());
+        }
+        else
+        {
+            current.markUdp(sender, now);
+            current.udpPacketsReceived.incrementAndGet();
+            current.udpBytesReceived.addAndGet(msg.length());
+            recordTransportRoute("UDP RX", opcode, msg.length());
+        }
+
+        if (!current.transportReady())
+        {
+            return;
+        }
 
         List<String> fields = new ArrayList<>();
 
@@ -946,9 +1016,26 @@ public class WitcherServer
 
         List<String> frozenFields = Collections.unmodifiableList(fields);
 
+        boolean realtimeRoute = isClientRealtimeOpcode(opcode);
+        if ((tcpConnection != null) == realtimeRoute)
+        {
+            transportMisroutes.incrementAndGet();
+            return;
+        }
+
         if (!isPlayerStateOpcode(opcode))
         {
-            handleNpcMessage(opcode, current, frozenFields, now);
+            if (isNpcWorldOpcode(opcode))
+            {
+                synchronized (NPC_WORLD_LOCK)
+                {
+                    handleNpcMessage(opcode, current, frozenFields, now);
+                }
+            }
+            else
+            {
+                handleNpcMessage(opcode, current, frozenFields, now);
+            }
             return;
         }
 
@@ -961,8 +1048,7 @@ public class WitcherServer
 
             storePosition(current, frozenFields, MOVE_POSITION_OFFSET);
 
-            int sent = sendChunk(socket, nearbyRecipients(current), current, "MOVE", frozenFields);
-            totalPacketsSent.addAndGet(sent);
+            sendChunk(socket, nearbyRecipients(current), current, "MOVE", frozenFields);
             return;
         }
 
@@ -1035,7 +1121,7 @@ public class WitcherServer
 
         if ("NPCADD".equals(opcode))
         {
-            final int stride = 14;
+            final int stride = 16;
 
             Long snapshotMs = parseLongOrNull(fields.get(0));
             Integer count = fields.size() > 1 ? parseIntegerOrNull(fields.get(1)) : null;
@@ -1047,6 +1133,7 @@ public class WitcherServer
 
             final long stamp = clampSnapshotTime(snapshotMs);
             Set<Integer> claimedBindings = new HashSet<>();
+            List<String> registered = new ArrayList<>();
 
             for (int i = 0; i < count; i++)
             {
@@ -1064,6 +1151,8 @@ public class WitcherServer
                     continue;
                 }
 
+                session.goneGuids.remove(guid);
+
                 Integer area = parseIntegerOrNull(fields.get(base + 1));
                 Double x = parseDoubleOrNull(fields.get(base + 4));
                 Double y = parseDoubleOrNull(fields.get(base + 5));
@@ -1075,10 +1164,12 @@ public class WitcherServer
                 Integer localCount = parseIntegerOrNull(fields.get(base + 11));
                 Integer terminalState = parseIntegerOrNull(fields.get(base + 12));
                 Integer terminalAttacker = parseIntegerOrNull(fields.get(base + 13));
+                String identityKey = sanitizeToken(fields.get(base + 14));
+                Integer identityFlags = parseIntegerOrNull(fields.get(base + 15));
 
                 if (area == null || x == null || y == null || z == null || heading == null
                         || hp == null || flags == null || target == null || localCount == null
-                        || terminalState == null || terminalAttacker == null)
+                        || terminalState == null || terminalAttacker == null || identityFlags == null)
                 {
                     continue;
                 }
@@ -1089,8 +1180,55 @@ public class WitcherServer
                         && rawTypeCode.trim().startsWith("quest:")
                         && "-".equals(typeCode);
                 NpcRegistry.Npc admitted = null;
+                NpcRegistry.Npc forcedBinding = null;
 
-                if (rejectedQuestType)
+                NpcRegistry.Binding existingBinding = NpcRegistry.bindingByGuid(session.playerId, guid);
+                boolean exactBindingMatches = NpcRegistry.bindingIdentityMatches(
+                        existingBinding, typeCode, sanitizeToken(fields.get(base + 3)), identityKey);
+                if (exactBindingMatches)
+                {
+                    NpcRegistry.Npc bound = NpcRegistry.get(existingBinding.canonicalId);
+                    if (bound != null && (!bound.alive
+                            || (bound.ownerPlayerId != 0 && bound.ownerPlayerId != session.playerId)))
+                    {
+                        forcedBinding = bound;
+                    }
+                    else if (bound != null && bound.ownerPlayerId == 0)
+                    {
+                        NpcRegistry.reclaimExactBinding(session.playerId, guid, now);
+                    }
+                }
+
+                if (forcedBinding == null && !exactBindingMatches && !rejectedQuestType)
+                {
+                    forcedBinding = NpcRegistry.findIdentityBindable(
+                            session.playerId,
+                            guid,
+                            typeCode,
+                            sanitizeToken(fields.get(base + 3)),
+                            identityKey,
+                            identityFlags);
+                }
+
+                if (forcedBinding == null && !exactBindingMatches && !rejectedQuestType)
+                {
+                    forcedBinding = NpcRegistry.findBindable(
+                            session.playerId,
+                            guid,
+                            area,
+                            typeCode,
+                            sanitizeToken(fields.get(base + 3)),
+                            identityKey,
+                            identityFlags,
+                            x, y, z,
+                            claimedBindings);
+                }
+
+                if (forcedBinding != null)
+                {
+                    admitted = null;
+                }
+                else if (rejectedQuestType)
                 {
                     dbg("QFOE invalid type rejected from %s guid=%d\n",
                             describePlayerId(session.playerId), guid);
@@ -1103,6 +1241,8 @@ public class WitcherServer
                             area,
                             typeCode,
                             sanitizeToken(fields.get(base + 3)),
+                            identityKey,
+                            identityFlags,
                             x, y, z, heading,
                             clampPermille(hp),
                             flags,
@@ -1116,27 +1256,120 @@ public class WitcherServer
 
                 if (admitted == null)
                 {
-                    NpcRegistry.Npc bindable = rejectedQuestType ? null : NpcRegistry.findBindable(
+                    NpcRegistry.Npc bindable = forcedBinding != null ? forcedBinding
+                            : rejectedQuestType ? null : NpcRegistry.findBindable(
                             session.playerId,
+                            guid,
                             area,
-                            typeCode,
-                            sanitizeToken(fields.get(base + 3)),
-                            x, y, z,
+                             typeCode,
+                             sanitizeToken(fields.get(base + 3)),
+                             identityKey,
+                             identityFlags,
+                             x, y, z,
                             claimedBindings);
 
                     if (bindable != null)
                     {
                         claimedBindings.add(bindable.npcId);
+
+                        if (!bindable.alive)
+                        {
+                            NpcRegistry.requestTerminalRebind(bindable, session.playerId, guid, now);
+                        }
+                        NpcRegistry.bindObservation(
+                                session.playerId, guid, bindable.npcId,
+                                NpcRegistry.BINDING_NATIVE, false, now);
                     }
                     List<String> drop = new ArrayList<>();
                     drop.add("1");
                     drop.add(Integer.toString(guid));
                     drop.add(Integer.toString(bindable == null ? 0 : bindable.npcId));
+                    drop.add(Integer.toString(bindable == null ? 0 : bindable.lifecycleRevision));
 
                     queueOutbound(session, "NPCDROP", drop);
                 }
+                else
+                {
+                    registered.add(Integer.toString(guid));
+                    registered.add(Integer.toString(admitted.npcId));
+                    registered.add(Integer.toString(admitted.authorityRevision));
+                }
             }
 
+            if (!registered.isEmpty())
+            {
+                registered.add(0, Integer.toString(registered.size() / 3));
+                queueOutbound(session, "NPCREG", registered);
+            }
+
+            return;
+        }
+
+        if ("NPCBIND".equals(opcode))
+        {
+            Integer count = parseIntegerOrNull(fields.get(0));
+            if (count == null || count < 0)
+            {
+                return;
+            }
+            for (int i = 0; i < count; i++)
+            {
+                int base = 1 + i * 4;
+                if (base + 4 > fields.size())
+                {
+                    break;
+                }
+                Integer canonicalId = parseIntegerOrNull(fields.get(base));
+                Integer localGuid = parseIntegerOrNull(fields.get(base + 1));
+                Integer kind = parseIntegerOrNull(fields.get(base + 2));
+                Integer lifecycleRevision = parseIntegerOrNull(fields.get(base + 3));
+                if (canonicalId == null || localGuid == null || kind == null || lifecycleRevision == null)
+                {
+                    continue;
+                }
+                NpcRegistry.acknowledgeBinding(
+                        session.playerId, canonicalId, localGuid, kind, lifecycleRevision, now);
+            }
+            return;
+        }
+
+        if ("NPCFAST".equals(opcode))
+        {
+            Long snapshotMs = parseLongOrNull(fields.get(0));
+            Integer count = fields.size() > 1 ? parseIntegerOrNull(fields.get(1)) : null;
+            if (snapshotMs == null || count == null || count < 0)
+            {
+                return;
+            }
+            final long stamp = clampSnapshotTime(snapshotMs);
+            final int stride = 10;
+            for (int i = 0; i < count; i++)
+            {
+                int base = 2 + i * stride;
+                if (base + stride > fields.size())
+                {
+                    break;
+                }
+                Integer guid = parseIntegerOrNull(fields.get(base));
+                Integer authorityRevision = parseIntegerOrNull(fields.get(base + 1));
+                Integer sequence = parseIntegerOrNull(fields.get(base + 2));
+                Double x = parseDoubleOrNull(fields.get(base + 3));
+                Double y = parseDoubleOrNull(fields.get(base + 4));
+                Double z = parseDoubleOrNull(fields.get(base + 5));
+                Double heading = parseDoubleOrNull(fields.get(base + 6));
+                Integer hp = parseIntegerOrNull(fields.get(base + 7));
+                Integer flags = parseIntegerOrNull(fields.get(base + 8));
+                Integer target = parseIntegerOrNull(fields.get(base + 9));
+                if (guid == null || authorityRevision == null || sequence == null
+                        || x == null || y == null || z == null || heading == null
+                        || hp == null || flags == null || target == null)
+                {
+                    continue;
+                }
+                NpcRegistry.moveFast(
+                        session.playerId, guid, authorityRevision, sequence,
+                        x, y, z, heading, clampPermille(hp), flags, target, stamp, now);
+            }
             return;
         }
 
@@ -1394,7 +1627,14 @@ public class WitcherServer
 
                 if (guid != null)
                 {
-                    NpcRegistry.remove(session.playerId, guid);
+                    NpcRegistry.Npc existing = NpcRegistry.getByOwnerGuid(session.playerId, guid);
+                    boolean wasAlive = existing != null && existing.alive;
+
+                    if (NpcRegistry.remove(session.playerId, guid) && wasAlive)
+                    {
+                        NpcRegistry.forgetKnown(session, existing.npcId);
+                        session.goneGuids.remove(guid);
+                    }
                 }
             }
 
@@ -1668,6 +1908,8 @@ public class WitcherServer
                 drop.add("1");
                 drop.add(Integer.toString(previous[1]));
                 drop.add(Integer.toString(canonicalId));
+                NpcRegistry.Npc taken = NpcRegistry.get(canonicalId);
+                drop.add(Integer.toString(taken == null ? 0 : taken.lifecycleRevision));
 
                 queueOutbound(loser, "NPCDROP", drop);
             }
@@ -1779,6 +2021,12 @@ public class WitcherServer
             return;
         }
 
+        if ("TPREQ".equals(opcode))
+        {
+            teleportRequest(session, fields.get(0));
+            return;
+        }
+
         if ("NPCTERM".equals(opcode))
         {
             Integer count = parseIntegerOrNull(fields.get(0));
@@ -1879,26 +2127,11 @@ public class WitcherServer
             return;
         }
 
-        if (!attacker.allowHit(nowMs))
-        {
-            rejectHit(attacker, eventId, npc.hpPermille, "rate limited");
-            npcHitsRejected.incrementAndGet();
-            return;
-        }
-
         final double distance = NpcRegistry.hitDistance(npc, attacker, atMs);
 
         if (distance > NpcRegistry.HIT_RANGE)
         {
-            rejectHit(attacker, eventId, npc.hpPermille, "out of range");
-            npcHitsRejected.incrementAndGet();
-
-            dbg("NPC %s HIT REJECTED by %s | rewindMs=%d distance=%.1f\n",
-                    NpcRegistry.describeNpc(npc),
-                    describePlayerId(attacker.playerId),
-                    nowMs - atMs,
-                    distance);
-            return;
+            passiveHitDistanceOutliers.incrementAndGet();
         }
 
         PlayerSession owner = findPlayerById(npc.ownerPlayerId);
@@ -2026,8 +2259,7 @@ public class WitcherServer
                 long tickStart = System.nanoTime();
                 long now = tickStart;
                 tickCounter++;
-
-                List<PlayerSession> sessions = new ArrayList<>(players.values());
+                List<PlayerSession> sessions = activeSessions();
 
                 Set<Integer> ownerOnline = new HashSet<>();
 
@@ -2036,60 +2268,59 @@ public class WitcherServer
                     ownerOnline.add(session.playerId);
                 }
 
-                purgeExpiredPartyRequests(now);
-                purgeStaleSaveRelays(now);
-                pumpSaveRelays();
-
-                NpcRegistry.applyUnackedDamage(now);
-                NpcRegistry.pruneStale(ownerOnline, now);
-
-                if (tickCounter % NPC_SCALE_TICK_DIVIDER == 0)
+                synchronized (NPC_WORLD_LOCK)
                 {
-                    if (NpcRegistry.recomputeScaling(sessions, NpcRegistry.HIT_RANGE_SQUARED))
+                    purgeExpiredPartyRequests(now);
+                    purgeStaleSaveRelays(now);
+                    pumpSaveRelays();
+
+                    NpcRegistry.applyUnackedDamage(now);
+                    NpcRegistry.pruneStale(ownerOnline, now);
+                    if (tickCounter % NPC_SCALE_TICK_DIVIDER == 0)
                     {
-                        scaleEpoch.incrementAndGet();
+                        if (NpcRegistry.recomputeScaling(sessions, NpcRegistry.HIT_RANGE_SQUARED))
+                        {
+                            scaleEpoch.incrementAndGet();
+                        }
+                    }
+                    final long snapshotMs = serverMs();
+
+                    for (PlayerSession session : sessions)
+                    {
+                        relaySessionWork(socket, session, now, snapshotMs);
+                    }
+                    relayPauseStates(socket, sessions);
+                    relayDeaths(socket, sessions, now);
+                    if (tickCounter % PLAYER_VIS_TICK_DIVIDER == 0)
+                    {
+                        relayVisibility(socket, sessions, now);
+                    }
+                    relayHandovers(socket, sessions, now);
+                    relayPartyHeartbeat(now);
+
+                    if (!sessions.isEmpty() && (now - lastHeartbeat) >= NPC_HEARTBEAT_NANOS)
+                    {
+                        lastHeartbeat = now;
+
+                        dbg("NPC sync: players=%d npcs=%d admitted=%d rejectedDup=%d | packets spawn=%d move=%d end=%d | tick p99=%.2fms overruns=%d\n",
+                                sessions.size(),
+                                NpcRegistry.npcCount(),
+                                NpcRegistry.admittedCount(),
+                                NpcRegistry.rejectedDuplicateCount(),
+                                npcSpawnPacketsSent.get(),
+                                npcMovePacketsSent.get(),
+                                npcEndPacketsSent.get(),
+                                tickP99Ms(),
+                                tickOverruns.get());
+
+                        logSyncGroups(sessions);
+                        logTargetSnapshot();
                     }
                 }
-
-                final long snapshotMs = serverMs();
-
-                for (PlayerSession session : sessions)
-                {
-                    relayNpcs(socket, session, now, snapshotMs);
-                    relayScaling(socket, session, now);
-                    relayHits(socket, session);
-                    relayKillOrders(socket, session);
-                    drainOutbound(socket, session);
-                }
-
-                relayPauseStates(socket, sessions);
-                relayDeaths(socket, sessions, now);
-                relayVisibility(socket, sessions, now);
-                relayHandovers(socket, sessions, now);
-                relayPartyHeartbeat(now);
 
                 final long tickNanos = System.nanoTime() - tickStart;
 
                 recordTickDuration(tickNanos);
-
-                if (!sessions.isEmpty() && (now - lastHeartbeat) >= NPC_HEARTBEAT_NANOS)
-                {
-                    lastHeartbeat = now;
-
-                    dbg("NPC sync: players=%d npcs=%d admitted=%d rejectedDup=%d | packets spawn=%d move=%d end=%d | tick p99=%.2fms overruns=%d\n",
-                            sessions.size(),
-                            NpcRegistry.npcCount(),
-                            NpcRegistry.admittedCount(),
-                            NpcRegistry.rejectedDuplicateCount(),
-                            npcSpawnPacketsSent.get(),
-                            npcMovePacketsSent.get(),
-                            npcEndPacketsSent.get(),
-                            tickP99Ms(),
-                            tickOverruns.get());
-
-                    logSyncGroups(sessions);
-                    logTargetSnapshot();
-                }
 
                 final long remainingNanos = NPC_TICK_NANOS - (System.nanoTime() - tickStart);
 
@@ -2381,7 +2612,11 @@ public class WitcherServer
 
         parties.remove(party.partyId);
 
-        int removedQuestFoes = NpcRegistry.removeQuestParty(party.partyId);
+        int removedQuestFoes;
+        synchronized (NPC_WORLD_LOCK)
+        {
+            removedQuestFoes = NpcRegistry.removeQuestParty(party.partyId);
+        }
 
         if (removedQuestFoes > 0)
         {
@@ -2470,9 +2705,7 @@ public class WitcherServer
     private static final int SAVE_RATE_CLEAN_TICKS = 40;
 
     private static final int SAVE_RESEND_PER_TICK = 12;
-    private static final int SAVE_QUEUE_LIMIT = 192;
     private static final int SAVE_DRAIN_PER_TICK = 24;
-    private static final int OUTBOUND_QUEUE_LIMIT = 256;
     private static final long SAVE_RELAY_RETAIN_NANOS = 60_000_000_000L;
 
     private static final long MAX_SAVE_BYTES = 32L * 1024L * 1024L;
@@ -2926,7 +3159,7 @@ public class WitcherServer
                     target.credit = SAVE_RESEND_PER_TICK;
                 }
 
-                int space = SAVE_QUEUE_LIMIT - member.pendingSaveOutbound.size();
+                int space = member.pendingSaveOutbound.remainingCapacity();
                 int budget = Math.min((int) target.credit, space);
 
                 if (budget <= 0)
@@ -3024,6 +3257,12 @@ public class WitcherServer
             return;
         }
 
+        if (!shouldSeePlayer(actor, target, actor.visiblePlayers.contains(target.playerId)))
+        {
+            queuePartyNotice(actor, "REQFAIL", target.username, "far");
+            return;
+        }
+
         Party targetParty = partyOf(targetKey);
         Party actorParty = partyOf(actorKey);
 
@@ -3055,6 +3294,43 @@ public class WitcherServer
 
         dbg("PARTY request %s -> %s (expires in %ds)\n",
                 actorKey, targetKey, PARTY_REQUEST_TIMEOUT_NANOS / 1_000_000_000L);
+    }
+
+    private static void teleportRequest(PlayerSession actor, String targetName)
+    {
+        String targetKey = normalizeUsernameKey(targetName);
+        PlayerSession target = targetKey.isEmpty() ? null : players.get(targetKey);
+        List<String> fields = new ArrayList<>();
+
+        if (target == null)
+        {
+            fields.add("0");
+            fields.add(targetName == null ? "" : targetName);
+            fields.add("0");
+            fields.add("0");
+            fields.add("0");
+            fields.add("0");
+        }
+        else if (!target.hasPosition)
+        {
+            fields.add("2");
+            fields.add(target.username);
+            fields.add("0");
+            fields.add("0");
+            fields.add("0");
+            fields.add("0");
+        }
+        else
+        {
+            fields.add("1");
+            fields.add(target.username);
+            fields.add(Integer.toString(target.area));
+            fields.add(Double.toString(target.posX));
+            fields.add(Double.toString(target.posY));
+            fields.add(Double.toString(target.posZ));
+        }
+
+        queueOutbound(actor, "TPPOS", fields);
     }
 
     private static void partyRespond(PlayerSession actor, String requesterName, boolean approved)
@@ -3463,14 +3739,18 @@ public class WitcherServer
     {
         List<NpcRegistry.Npc> visible = NpcRegistry.visibleTo(
                 session, NPC_INTEREST_RADIUS_SQUARED, NPC_INTEREST_LEAVE_SQUARED);
-        Set<Integer> desired = new HashSet<>();
+        Set<Integer> desired = session.npcDesiredScratch;
+        desired.clear();
 
         List<String> spawn = new ArrayList<>();
         List<String> move = new ArrayList<>();
+        List<String> fast = new ArrayList<>();
         int spawnCount = 0;
         int moveCount = 0;
+        int fastCount = 0;
         int spawnPackets = 0;
         int movePackets = 0;
+        int fastPackets = 0;
 
         for (NpcRegistry.Npc npc : visible)
         {
@@ -3493,6 +3773,13 @@ public class WitcherServer
 
             if (session.knownNpcs.add(npc.npcId))
             {
+                NpcRegistry.prepareRecipient(
+                        session.playerId,
+                        npc,
+                        NpcRegistry.isQuestFoe(npc)
+                                ? NpcRegistry.BINDING_NATIVE
+                                : NpcRegistry.BINDING_SYNTHETIC,
+                        nowNanos);
                 if (!npc.alive && NpcRegistry.isQuestFoe(npc))
                 {
                     NpcRegistry.requestDeathReplay(npc, session.playerId, nowNanos);
@@ -3520,6 +3807,7 @@ public class WitcherServer
                 spawn.add(Integer.toString(npc.terminalRevision));
                 spawn.add(Integer.toString(npc.terminalAttackerId));
                 spawn.add(Integer.toString(authorityToken));
+                spawn.add(Integer.toString(npc.lifecycleRevision));
                 spawnCount++;
 
                 if (spawnCount >= NPC_SPAWN_BATCH)
@@ -3533,7 +3821,7 @@ public class WitcherServer
                 continue;
             }
 
-            if (movePackets >= NPC_MOVE_PACKETS_PER_TICK)
+            if (!NpcRegistry.bindingReady(session.playerId, npc))
             {
                 continue;
             }
@@ -3551,25 +3839,52 @@ public class WitcherServer
                 session.npcViews.put(npc.npcId, view);
             }
 
-            if ((nowNanos - view.lastSentNanos) < npcSendIntervalNanos(session, npc))
+            if (npc.alive && fastPackets < NPC_MOVE_PACKETS_PER_TICK
+                    && (nowNanos - view.lastFastSentNanos) >= npcSendIntervalNanos(session, npc))
+            {
+                view.fastSequence += 1;
+                fast.add(Integer.toString(npc.npcId));
+                fast.add(Integer.toString(npc.lifecycleRevision));
+                fast.add(Integer.toString(npc.authorityRevision));
+                fast.add(Integer.toString(view.fastSequence));
+                fast.add(formatCoord(npc.x));
+                fast.add(formatCoord(npc.y));
+                fast.add(formatCoord(npc.z));
+                fast.add(formatCoord(npc.heading));
+                fast.add(Integer.toString(npc.hpPermille));
+                fast.add(Integer.toString(npc.flags));
+                fast.add(Integer.toString(npc.targetPlayerId));
+                view.lastFastSentNanos = nowNanos;
+                fastCount++;
+
+                if (fastCount >= NPC_MOVE_BATCH)
+                {
+                    sendSnapshot(socket, session, "NPCFAST", fast, fastCount, snapshotMs);
+                    fast = new ArrayList<>();
+                    fastCount = 0;
+                    fastPackets++;
+                }
+            }
+
+            if (movePackets >= NPC_MOVE_PACKETS_PER_TICK)
+            {
+                continue;
+            }
+
+            if ((nowNanos - view.lastSentNanos) < NPC_VIEW_KEEPALIVE_NANOS
+                    && view.valid
+                    && view.hpPermille == npc.hpPermille
+                    && view.flags == npc.flags
+                    && view.targetPlayerId == npc.targetPlayerId
+                    && view.terminalState == npc.terminalState
+                    && view.terminalRevision == npc.terminalRevision
+                    && view.terminalAttackerId == npc.terminalAttackerId
+                    && view.authorityRevision == authorityToken)
             {
                 continue;
             }
 
             int mask = 0;
-
-            if (!view.valid
-                    || Math.abs(view.x - npc.x) > NPC_DELTA_POS_EPSILON
-                    || Math.abs(view.y - npc.y) > NPC_DELTA_POS_EPSILON
-                    || Math.abs(view.z - npc.z) > NPC_DELTA_POS_EPSILON)
-            {
-                mask |= 1;
-            }
-
-            if (!view.valid || Math.abs(view.heading - npc.heading) > NPC_DELTA_HEADING_EPSILON)
-            {
-                mask |= 2;
-            }
 
             if (!view.valid || view.hpPermille != npc.hpPermille)
             {
@@ -3603,9 +3918,9 @@ public class WitcherServer
                 mask |= 128;
             }
 
-            if (mask == 0 && (nowNanos - view.lastSentNanos) < NPC_VIEW_KEEPALIVE_NANOS)
+            if (mask == 0)
             {
-                continue;
+                mask = 4 | 8 | 16 | 32 | 64 | 128;
             }
 
             move.add(Integer.toString(npc.npcId));
@@ -3694,6 +4009,7 @@ public class WitcherServer
             it.remove();
             session.npcViews.remove(known);
             NpcRegistry.forgetTerminalRecipient(known, session.playerId);
+            NpcRegistry.markRecipientUnready(session.playerId, known);
 
             if (removeCount < NPC_REMOVE_BATCH)
             {
@@ -3711,6 +4027,11 @@ public class WitcherServer
         if (moveCount > 0)
         {
             sendSnapshot(socket, session, "NPCMOV", move, moveCount, snapshotMs);
+        }
+
+        if (fastCount > 0)
+        {
+            sendSnapshot(socket, session, "NPCFAST", fast, fastCount, snapshotMs);
         }
 
         if (removeCount > 0)
@@ -3742,8 +4063,9 @@ public class WitcherServer
                 gone.add(0, Integer.toString(goneCount));
                 sendNpcPacket(socket, session, "NPCGONE", gone);
 
-                dbg("NPC re-register requested: %d entities -> %s\n",
+                dbg("NPC re-register requested: %d entities guids=%s -> %s\n",
                         goneCount,
+                        String.join(",", gone.subList(1, gone.size())),
                         describePlayerId(session.playerId));
             }
         }
@@ -3815,7 +4137,7 @@ public class WitcherServer
             {
                 npc.deathBroadcast = true;
 
-                dbg("NPC %s DEATH CONFIRMED | owner=%s cell=%s\n",
+                dbg("NPC %s TERMINAL BROADCAST | owner=%s cell=%s\n",
                         NpcRegistry.describeNpc(npc),
                         describePlayerId(npc.ownerPlayerId),
                         NpcRegistry.describeSpot(npc));
@@ -3868,9 +4190,56 @@ public class WitcherServer
         for (PlayerSession viewer : sessions)
         {
             Set<Integer> next = new HashSet<>();
+            Map<Integer, PlayerSession> candidates = new HashMap<>();
 
-            for (PlayerSession target : sessions)
+            if (viewer.hasPosition)
             {
+                for (PlayerSession target : SpatialIndex.query(
+                        viewer.area, viewer.posX, viewer.posY, PLAYER_VIS_LEAVE_RADIUS))
+                {
+                    candidates.put(target.playerId, target);
+                }
+            }
+
+            for (Integer visibleId : viewer.visiblePlayers)
+            {
+                PlayerSession target = sessionByPlayerId(visibleId);
+                if (target != null)
+                {
+                    candidates.put(target.playerId, target);
+                }
+            }
+
+            for (PlayerSession target : partySessions(viewer.partyId))
+            {
+                candidates.put(target.playerId, target);
+            }
+
+            List<PlayerSession> ordered = new ArrayList<>(candidates.values());
+            ordered.sort((left, right) ->
+            {
+                boolean leftParty = viewer.partyId != 0 && viewer.partyId == left.partyId;
+                boolean rightParty = viewer.partyId != 0 && viewer.partyId == right.partyId;
+                if (leftParty != rightParty)
+                {
+                    return leftParty ? -1 : 1;
+                }
+                boolean leftVisible = viewer.visiblePlayers.contains(left.playerId);
+                boolean rightVisible = viewer.visiblePlayers.contains(right.playerId);
+                if (leftVisible != rightVisible)
+                {
+                    return leftVisible ? -1 : 1;
+                }
+                return Double.compare(distanceSquared(viewer, left), distanceSquared(viewer, right));
+            });
+
+            for (PlayerSession target : ordered)
+            {
+                if (!target.transportReady())
+                {
+                    continue;
+                }
+
                 boolean partyMember = viewer != target
                         && viewer.partyId != 0
                         && viewer.partyId == target.partyId;
@@ -3890,21 +4259,26 @@ public class WitcherServer
 
             if (changed)
             {
-                for (Integer entered : next)
+                int entered = 0;
+                int left = 0;
+                for (Integer id : next)
                 {
-                    if (!viewer.visiblePlayers.contains(entered))
+                    if (!viewer.visiblePlayers.contains(id))
                     {
-                        dbg("VIS %s -> sees %s\n", describePlayerId(viewer.playerId), describePlayerId(entered));
+                        entered++;
                     }
                 }
 
-                for (Integer left : viewer.visiblePlayers)
+                for (Integer id : viewer.visiblePlayers)
                 {
-                    if (!next.contains(left))
+                    if (!next.contains(id))
                     {
-                        dbg("VIS %s -> lost %s\n", describePlayerId(viewer.playerId), describePlayerId(left));
+                        left++;
                     }
                 }
+
+                dbg("VIS %s entered=%d left=%d visible=%d\n",
+                        describePlayerId(viewer.playerId), entered, left, next.size());
 
                 viewer.visiblePlayers.clear();
                 viewer.visiblePlayers.addAll(next);
@@ -3947,6 +4321,8 @@ public class WitcherServer
             drop.add("1");
             drop.add(Integer.toString(pending[1]));
             drop.add(Integer.toString(pending[2]));
+            NpcRegistry.Npc handedOver = NpcRegistry.get(pending[2]);
+            drop.add(Integer.toString(handedOver == null ? 0 : handedOver.lifecycleRevision));
 
             queueOutbound(loser, "NPCDROP", drop);
         }
@@ -4137,6 +4513,198 @@ public class WitcherServer
         }
     }
 
+    private static void relaySessionWork(
+            DatagramSocket socket,
+            PlayerSession session,
+            long now,
+            long snapshotMs)
+    {
+        relayNpcs(socket, session, now, snapshotMs);
+        relayScaling(socket, session, now);
+        relayHits(socket, session);
+        relayKillOrders(socket, session);
+        drainOutbound(socket, session);
+    }
+
+    private static double distanceSquared(PlayerSession source, PlayerSession target)
+    {
+        if (source == target)
+        {
+            return 0.0;
+        }
+        if (!source.hasPosition || !target.hasPosition || source.area != target.area)
+        {
+            return Double.MAX_VALUE;
+        }
+        double dx = source.posX - target.posX;
+        double dy = source.posY - target.posY;
+        double dz = source.posZ - target.posZ;
+        return dx * dx + dy * dy + dz * dz;
+    }
+
+    private static boolean handleUdpTransportMessage(DatagramSocket socket, ClientEndpoint sender, String msg)
+    {
+        String[] parts = msg.split("\t", -1);
+
+        if (parts.length >= 4 && "HELLO".equals(parts[0]) && "2".equals(parts[1]))
+        {
+            String name = unescapeField(parts[2]).trim();
+            if (isValidUsername(name) && "UDP".equals(parts[3]))
+            {
+                PlayerSession session = players.get(normalizeUsernameKey(name));
+                if (session != null && normalizeIp(session.remoteIp).equals(normalizeIp(sender.address.getHostAddress())))
+                {
+                    session.markUdp(sender, System.nanoTime());
+                    safeSend(socket, sender, "HELLOACK\t2\tUDP\t" + session.playerId);
+                }
+            }
+            return true;
+        }
+
+        if (parts.length >= 4 && "PING".equals(parts[0]) && "2".equals(parts[1]) && "UDP".equals(parts[3]))
+        {
+            String name = unescapeField(parts[2]).trim();
+            PlayerSession session = players.get(normalizeUsernameKey(name));
+            if (session != null && normalizeIp(session.remoteIp).equals(normalizeIp(sender.address.getHostAddress())))
+            {
+                session.markUdp(sender, System.nanoTime());
+            }
+            safeSend(socket, sender, "PONG\t2\tUDP");
+            return true;
+        }
+
+        return false;
+    }
+
+    private static void handleTcpMessage(TcpTransport.Connection connection, String msg)
+    {
+        try
+        {
+            String senderIp = normalizeIp(connection.remoteIp());
+
+            if (isIpBanned(senderIp))
+            {
+                connection.sendAndClose("ERROR\tBANNED");
+                return;
+            }
+
+            if (whitelistEnabled.get() && !isIpWhitelisted(senderIp))
+            {
+                connection.sendAndClose("ERROR\tNOT_WHITELISTED");
+                return;
+            }
+
+            String[] parts = msg.split("\t", -1);
+
+            if (parts.length >= 4 && "HELLO".equals(parts[0]) && "2".equals(parts[1]) && "TCP".equals(parts[3]))
+            {
+                String name = unescapeField(parts[2]).trim();
+                if (!isValidUsername(name))
+                {
+                    connection.sendAndClose("ERROR\tINVALID_USERNAME");
+                    return;
+                }
+
+                connection.setHelloUsername(name);
+                if (!bindTcpHello(connection, name, senderIp))
+                {
+                    return;
+                }
+                connection.sendReliable("HELLOACK\t2\tTCP\t" + connection.session().playerId);
+                replayTcpBacklog(connection.session());
+                return;
+            }
+
+            if (connection.helloUsername().isEmpty())
+            {
+                connection.close();
+                return;
+            }
+
+            ClientEndpoint sender = new ClientEndpoint(
+                    java.net.InetAddress.getByName(connection.remoteIp()),
+                    connection.session() == null ? 0 : connection.session().playerId);
+            handleMessage(udpSocket, sender, connection, msg);
+        }
+        catch (Exception e)
+        {
+            if (running.get())
+            {
+                dbg("TCP message failed from %s: %s\n", connection.remoteAddress(), e.toString());
+            }
+        }
+    }
+
+    private static boolean bindTcpHello(TcpTransport.Connection connection, String username, String senderIp)
+    {
+        String usernameKey = normalizeUsernameKey(username);
+        long now = System.nanoTime();
+        PlayerSession session = players.get(usernameKey);
+
+        if (session != null && !normalizeIp(session.remoteIp).equals(senderIp))
+        {
+            connection.sendAndClose("ERROR\tUSERNAME_TAKEN");
+            return false;
+        }
+
+        if (session == null)
+        {
+            UsernameReservation reservation = reservedUsernames.get(usernameKey);
+            if (reservation != null && now >= reservation.expiresAt)
+            {
+                reservedUsernames.remove(usernameKey, reservation);
+                reservation = null;
+            }
+            if (reservation != null && !reservation.ip.equals(senderIp))
+            {
+                connection.sendAndClose("ERROR\tUSERNAME_TAKEN");
+                return false;
+            }
+            if (reservation != null)
+            {
+                reservedUsernames.remove(usernameKey, reservation);
+            }
+
+            PlayerSession created = new PlayerSession(allocateNewPlayerId(), username, null, now);
+            created.remoteIp = senderIp;
+            PlayerSession race = players.putIfAbsent(usernameKey, created);
+            session = race == null ? created : race;
+            if (race == null)
+            {
+                playersById.put(created.playerId, created);
+                dbg("Accepted username %s id=%d for TCP %s\n", username, created.playerId, connection.remoteAddress());
+            }
+            else if (!normalizeIp(race.remoteIp).equals(senderIp))
+            {
+                connection.sendAndClose("ERROR\tUSERNAME_TAKEN");
+                return false;
+            }
+        }
+
+        session.markTcp(connection, now);
+        return true;
+    }
+
+    private static void replayTcpBacklog(PlayerSession session)
+    {
+        if (session == null || !session.tcpAvailable)
+        {
+            return;
+        }
+
+        String pending;
+        int budget = 512;
+        while (budget-- > 0 && (pending = session.pendingTcpReplay.poll()) != null)
+        {
+            String opcode = packetOpcode(pending);
+            if (!sendToSession(session, pending, opcode, opcode + ":replay"))
+            {
+                session.pendingTcpReplay.offer(pending);
+                break;
+            }
+        }
+    }
+
     private static void relayHits(DatagramSocket socket, PlayerSession session)
     {
         List<String> fields = new ArrayList<>();
@@ -4170,50 +4738,78 @@ public class WitcherServer
 
     private static void drainOutbound(DatagramSocket socket, PlayerSession session)
     {
-        Object[] packet;
+        PlayerSession.QueuedPacket packet;
         int guard = 0;
 
-        while ((packet = session.pendingOutbound.poll()) != null && guard < 64)
+        while (guard < 64 && (packet = session.pendingOutbound.poll()) != null)
         {
             guard++;
+            session.outboundDrained.incrementAndGet();
+            recordQueueDelay(session.outboundQueueNanos, session.outboundQueueSamples, packet);
 
-            @SuppressWarnings("unchecked")
-            List<String> fields = (List<String>) packet[1];
-
-            sendNpcPacket(socket, session, (String) packet[0], fields);
+            sendNpcPacket(socket, session, packet.opcode, packet.fields);
         }
 
         guard = 0;
 
-        while ((packet = session.pendingSaveOutbound.poll()) != null && guard < SAVE_DRAIN_PER_TICK)
+        while (guard < SAVE_DRAIN_PER_TICK && (packet = session.pendingSaveOutbound.poll()) != null)
         {
             guard++;
+            session.saveDrained.incrementAndGet();
+            recordQueueDelay(session.saveQueueNanos, session.saveQueueSamples, packet);
 
-            @SuppressWarnings("unchecked")
-            List<String> fields = (List<String>) packet[1];
-
-            sendNpcPacket(socket, session, (String) packet[0], fields);
+            sendNpcPacket(socket, session, packet.opcode, packet.fields);
         }
     }
 
     static void queueOutbound(PlayerSession session, String opcode, List<String> fields)
     {
-        if (session == null || session.pendingOutbound.size() >= OUTBOUND_QUEUE_LIMIT)
+        if (session == null)
         {
             return;
         }
 
-        session.pendingOutbound.add(new Object[] { opcode, fields });
+        if (!session.pendingOutbound.offer(new PlayerSession.QueuedPacket(opcode, fields, System.nanoTime())))
+        {
+            session.outboundDropped.incrementAndGet();
+            return;
+        }
+        session.outboundEnqueued.incrementAndGet();
+        updateHighWater(session.outboundHighWater, session.pendingOutbound.size());
     }
 
     static void queueSaveOutbound(PlayerSession session, String opcode, List<String> fields)
     {
-        if (session == null || session.pendingSaveOutbound.size() >= SAVE_QUEUE_LIMIT)
+        if (session == null)
         {
             return;
         }
 
-        session.pendingSaveOutbound.add(new Object[] { opcode, fields });
+        if (!session.pendingSaveOutbound.offer(new PlayerSession.QueuedPacket(opcode, fields, System.nanoTime())))
+        {
+            session.saveDropped.incrementAndGet();
+            return;
+        }
+        session.saveEnqueued.incrementAndGet();
+        updateHighWater(session.saveHighWater, session.pendingSaveOutbound.size());
+    }
+
+    private static void updateHighWater(java.util.concurrent.atomic.AtomicInteger target, int value)
+    {
+        int current = target.get();
+        while (value > current && !target.compareAndSet(current, value))
+        {
+            current = target.get();
+        }
+    }
+
+    private static void recordQueueDelay(
+            AtomicLong total,
+            AtomicLong samples,
+            PlayerSession.QueuedPacket packet)
+    {
+        total.addAndGet(Math.max(0L, System.nanoTime() - packet.queuedAtNanos));
+        samples.incrementAndGet();
     }
 
     private static String formatCoord(double value)
@@ -4248,17 +4844,131 @@ public class WitcherServer
         return sb.toString();
     }
 
-    private static void sendNpcPacket(DatagramSocket socket, PlayerSession session, String opcode, List<String> fields)
+    private static boolean isRealtimeOpcode(String opcode)
     {
-        String packetText = buildTypedPacket(opcode, session.playerId, session.username, fields);
-        byte[] data = packetText.getBytes(StandardCharsets.UTF_8);
+        return PacketRegistry.route(opcode) == PacketRegistry.Route.REALTIME;
+    }
+
+    private static boolean isClientRealtimeOpcode(String opcode)
+    {
+        return isRealtimeOpcode(opcode);
+    }
+
+    private static String packetOpcode(String packetText)
+    {
+        int separator = packetText.indexOf('\t');
+        return separator < 0 ? packetText : packetText.substring(0, separator);
+    }
+
+    private static boolean isSaveOpcode(String opcode)
+    {
+        return PacketRegistry.route(opcode) == PacketRegistry.Route.BULK;
+    }
+
+    private static boolean sendToSession(PlayerSession session, String packetText, String opcode, String realtimeKey)
+    {
+        if (session == null)
+        {
+            return false;
+        }
+
+        long now = System.nanoTime();
+        boolean realtime = isRealtimeOpcode(opcode);
+        TcpTransport.Connection tcp = session.tcpConnection;
+        boolean tcpReady = session.tcpAvailable && tcp != null && tcp.isOpen();
+
+        if (realtime)
+        {
+            boolean udpReady = session.udpAvailable
+                    && session.endpoint != null
+                    && (now - session.lastUdpSeen) <= 6_000_000_000L;
+            UdpBatcher batcher = udpBatcher;
+            String replaceKey = "NPCMOV".equals(opcode) ? null : realtimeKey;
+            byte[] packetBytes;
+            try
+            {
+                packetBytes = BinaryPacketCodec.encodeText(packetText);
+            }
+            catch (IllegalArgumentException invalid)
+            {
+                malformedPackets.incrementAndGet();
+                return false;
+            }
+            if (udpReady && batcher != null && batcher.enqueue(session, replaceKey, packetBytes))
+            {
+                recordTransportRoute("UDP TX", opcode, packetText.length());
+                return true;
+            }
+            totalSendFailures.incrementAndGet();
+            return false;
+        }
+
+        if (tcpReady)
+        {
+            boolean sent = isSaveOpcode(opcode) ? tcp.sendBulk(packetText) : tcp.sendReliable(packetText);
+            if (sent)
+            {
+                totalPacketsSent.incrementAndGet();
+                session.tcpPacketsSent.incrementAndGet();
+                session.tcpBytesSent.addAndGet(packetText.length() + 4L);
+                recordTransportRoute("TCP TX", opcode, packetText.length() + 4);
+                return true;
+            }
+        }
+
+        if (!session.pendingTcpReplay.offer(packetText))
+        {
+            session.outboundDropped.incrementAndGet();
+        }
+        totalSendFailures.incrementAndGet();
+        return false;
+    }
+
+    private static void recordTransportRoute(String direction, String opcode, int bytes)
+    {
+        String name = opcode == null || opcode.isEmpty() ? "?" : opcode;
+        transportRoutes.computeIfAbsent(direction + " " + name, ignored -> new AtomicLong()).incrementAndGet();
+    }
+
+    private static boolean sendUdp(ClientEndpoint client, String packetText)
+    {
+        DatagramSocket socket = udpSocket;
+
+        if (socket == null || socket.isClosed() || client == null)
+        {
+            return false;
+        }
+
+        byte[] data;
+        try
+        {
+            data = BinaryPacketCodec.encodeText(packetText);
+        }
+        catch (IllegalArgumentException invalid)
+        {
+            malformedPackets.incrementAndGet();
+            return false;
+        }
 
         try
         {
-            ClientEndpoint client = session.endpoint;
             socket.send(new DatagramPacket(data, data.length, client.address, client.port));
-            totalNpcPacketsSent.incrementAndGet();
             totalPacketsSent.incrementAndGet();
+            return true;
+        }
+        catch (Exception e)
+        {
+            totalSendFailures.incrementAndGet();
+            return false;
+        }
+    }
+
+    private static void sendNpcPacket(DatagramSocket socket, PlayerSession session, String opcode, List<String> fields)
+    {
+        String packetText = buildTypedPacket(opcode, session.playerId, session.username, fields);
+        if (sendToSession(session, packetText, opcode, opcode))
+        {
+            totalNpcPacketsSent.incrementAndGet();
 
             if ("NPCNEW".equals(opcode))
             {
@@ -4276,10 +4986,6 @@ public class WitcherServer
             {
                 npcOwnPacketsSent.incrementAndGet();
             }
-        }
-        catch (Exception e)
-        {
-            totalSendFailures.incrementAndGet();
         }
     }
 
@@ -4344,19 +5050,6 @@ public class WitcherServer
         }
     }
 
-    private static void pruneRateLimits(long nowNanos)
-    {
-        rateLimits.entrySet().removeIf(entry ->
-        {
-            RateLimitState state = entry.getValue();
-
-            synchronized (state)
-            {
-                return (nowNanos - state.windowStartNanos) > USERNAME_HOLD_NANOS;
-            }
-        });
-    }
-
     private static void cleanupLoop()
     {
         while (running.get())
@@ -4368,7 +5061,11 @@ public class WitcherServer
                 for (Map.Entry<String, PlayerSession> entry : players.entrySet())
                 {
                     PlayerSession session = entry.getValue();
-                    if ((now - session.lastSeen) > PLAYER_TIMEOUT_NANOS)
+                    session.expireTransportPaths(now);
+                    boolean negotiationExpired = !session.transportReady()
+                            && session.transportIncompleteSince != 0L
+                            && (now - session.transportIncompleteSince) > 10_000_000_000L;
+                    if ((now - session.lastSeen) > PLAYER_TIMEOUT_NANOS || negotiationExpired)
                     {
                         reserveTimedOutPlayer(entry.getKey(), session, now);
                     }
@@ -4389,8 +5086,6 @@ public class WitcherServer
                         }
                     }
                 }
-
-                pruneRateLimits(now);
 
                 Thread.sleep(1000);
             }
@@ -4414,7 +5109,7 @@ public class WitcherServer
         {
             try
             {
-                List<PlayerSession> sessions = new ArrayList<>(players.values());
+                List<PlayerSession> sessions = activeSessions();
                 long tickNanos = System.nanoTime();
 
                 if (BotManager.count() > 0 && !sessions.isEmpty())
@@ -4423,28 +5118,27 @@ public class WitcherServer
 
                     for (PlayerSession bot : BotManager.sessions())
                     {
-                        sendChunk(socket, uniqueEndpoints(sessions), bot, "MOVE", BotManager.movementFields(bot));
+                        sendChunk(socket, nearbyRecipients(sessions, bot), bot, "MOVE", BotManager.movementFields(bot));
                     }
 
                     sessions.addAll(BotManager.sessions());
                 }
 
-                List<ClientEndpoint> everyone = uniqueEndpoints(sessions);
+                List<PlayerSession> everyone = uniqueSessions(sessions);
                 int packetsSentThisTick = 0;
 
                 for (PlayerSession session : sessions)
                 {
-                    List<ClientEndpoint> nearby = nearbyRecipients(sessions, session);
+                    List<PlayerSession> nearby = nearbyRecipients(sessions, session);
 
-                    packetsSentThisTick += broadcastChunk(socket, everyone, session, "UPDATE1A", session.update1A, tickNanos);
-                    packetsSentThisTick += broadcastChunk(socket, everyone, session, "UPDATE1B", session.update1B, tickNanos);
+                    packetsSentThisTick += broadcastChunk(socket, nearby, session, "UPDATE1A", session.update1A, tickNanos);
+                    packetsSentThisTick += broadcastChunk(socket, nearby, session, "UPDATE1B", session.update1B, tickNanos);
                     packetsSentThisTick += broadcastChunk(socket, nearby, session, "UPDATE2A", session.update2A, tickNanos);
                     packetsSentThisTick += broadcastChunk(socket, nearby, session, "UPDATE2B", session.update2B, tickNanos);
-                    packetsSentThisTick += broadcastChunk(socket, everyone, session, "UPDATE3", session.update3, tickNanos);
-                    packetsSentThisTick += broadcastChunk(socket, everyone, session, "UPDATE4", session.update4, tickNanos);
+                    packetsSentThisTick += broadcastChunk(socket, nearby, session, "UPDATE3", session.update3, tickNanos);
+                    packetsSentThisTick += broadcastChunk(socket, nearby, session, "UPDATE4", session.update4, tickNanos);
                 }
 
-                totalPacketsSent.addAndGet(packetsSentThisTick);
                 totalBroadcastTicks.incrementAndGet();
                 lastBroadcastTickNanos = System.nanoTime();
 
@@ -4474,34 +5168,102 @@ public class WitcherServer
         }
     }
 
-    private static List<ClientEndpoint> uniqueEndpoints(List<PlayerSession> sessions)
+    private static List<PlayerSession> uniqueSessions(List<PlayerSession> sessions)
     {
-        Set<ClientEndpoint> unique = new HashSet<>();
+        Set<Integer> ids = new HashSet<>();
+        List<PlayerSession> unique = new ArrayList<>();
         for (PlayerSession session : sessions)
         {
-            unique.add(session.endpoint);
-        }
-        return new ArrayList<>(unique);
-    }
-
-    private static List<ClientEndpoint> nearbyRecipients(PlayerSession source)
-    {
-        return nearbyRecipients(new ArrayList<>(players.values()), source);
-    }
-
-    private static List<ClientEndpoint> nearbyRecipients(List<PlayerSession> sessions, PlayerSession source)
-    {
-        Set<ClientEndpoint> unique = new HashSet<>();
-
-        for (PlayerSession session : sessions)
-        {
-            if (isWithinInterest(source, session))
+            if (session != null && ids.add(session.playerId))
             {
-                unique.add(session.endpoint);
+                unique.add(session);
+            }
+        }
+        return unique;
+    }
+
+    private static List<PlayerSession> nearbyRecipients(PlayerSession source)
+    {
+        Map<Integer, PlayerSession> candidates = new HashMap<>();
+        candidates.put(source.playerId, source);
+
+        if (source.hasPosition)
+        {
+            for (PlayerSession candidate : SpatialIndex.query(
+                    source.area, source.posX, source.posY, INTEREST_RADIUS))
+            {
+                candidates.put(candidate.playerId, candidate);
             }
         }
 
-        return new ArrayList<>(unique);
+        for (PlayerSession candidate : partySessions(source.partyId))
+        {
+            candidates.put(candidate.playerId, candidate);
+        }
+
+        return filterNearbyCandidates(source, candidates);
+    }
+
+    private static List<PlayerSession> nearbyRecipients(List<PlayerSession> sessions, PlayerSession source)
+    {
+        Map<Integer, PlayerSession> candidates = new HashMap<>();
+        candidates.put(source.playerId, source);
+
+        if (source.hasPosition)
+        {
+            for (PlayerSession candidate : SpatialIndex.query(
+                    source.area, source.posX, source.posY, INTEREST_RADIUS))
+            {
+                candidates.put(candidate.playerId, candidate);
+            }
+        }
+
+        for (PlayerSession candidate : partySessions(source.partyId))
+        {
+            candidates.put(candidate.playerId, candidate);
+        }
+
+        return filterNearbyCandidates(source, candidates);
+    }
+
+    private static List<PlayerSession> filterNearbyCandidates(
+            PlayerSession source,
+            Map<Integer, PlayerSession> candidates)
+    {
+        List<PlayerSession> result = new ArrayList<>();
+        for (PlayerSession candidate : candidates.values())
+        {
+            if (candidate.transportReady() && isWithinInterest(source, candidate))
+            {
+                result.add(candidate);
+            }
+        }
+        return result;
+    }
+
+    private static List<PlayerSession> partySessions(int partyId)
+    {
+        if (partyId == 0)
+        {
+            return Collections.emptyList();
+        }
+
+        Party party = parties.get(partyId);
+        if (party == null)
+        {
+            return Collections.emptyList();
+        }
+
+        List<PlayerSession> result = new ArrayList<>();
+        for (String usernameKey : party.snapshot())
+        {
+            PlayerSession session = players.get(usernameKey);
+            if (session != null)
+            {
+                result.add(session);
+            }
+        }
+        return result;
     }
 
     private static boolean isWithinInterest(PlayerSession source, PlayerSession target)
@@ -4540,7 +5302,7 @@ public class WitcherServer
 
     private static int broadcastChunk(
             DatagramSocket socket,
-            List<ClientEndpoint> recipients,
+            List<PlayerSession> recipients,
             PlayerSession session,
             String opcode,
             PlayerSession.ChunkSlot slot,
@@ -4569,7 +5331,7 @@ public class WitcherServer
 
     private static int sendChunk(
             DatagramSocket socket,
-            List<ClientEndpoint> recipients,
+            List<PlayerSession> recipients,
             PlayerSession session,
             String opcode,
             List<String> fields)
@@ -4589,24 +5351,15 @@ public class WitcherServer
 
         int sent = 0;
 
-        for (ClientEndpoint client : recipients)
+        for (PlayerSession recipient : recipients)
         {
-            try
+            if (sendToSession(
+                    recipient,
+                    packetText,
+                    opcode,
+                    opcode + ":" + session.playerId))
             {
-                DatagramPacket packet = new DatagramPacket(
-                        data,
-                        data.length,
-                        client.address,
-                        client.port
-                );
-                socket.send(packet);
                 sent++;
-            }
-            catch (Exception e)
-            {
-                totalSendFailures.incrementAndGet();
-                dbg("Broadcast send failed to %s for %s/%s: %s\n",
-                        client, session.username, opcode, e.toString());
             }
         }
 
@@ -4683,9 +5436,23 @@ public class WitcherServer
                     coordsStr = "(" + coords.get(0) + ", " + coords.get(1) + ", " + coords.get(2) + ")";
                 }
 
-                dbg("name=\"%s\"  ip=%s  location=%s  coords=%s  lastSeen=%ds ago\n",
+                String worked = session.udpWorked && session.tcpWorked
+                        ? "UDP+TCP"
+                        : session.tcpWorked ? "TCP" : session.udpWorked ? "UDP" : "none";
+                boolean udpActive = session.udpAvailable
+                        && session.endpoint != null
+                        && (now - session.lastUdpSeen) <= 6_000_000_000L;
+                boolean tcpActive = session.tcpConnection != null && session.tcpConnection.isOpen();
+                String active = udpActive && tcpActive
+                        ? "UDP+TCP"
+                        : tcpActive ? "TCP" : udpActive ? "UDP" : "none";
+
+                dbg("name=\"%s\"  ip=%s  ready=%s  transportWorked=%s  transportActive=%s  location=%s  coords=%s  lastSeen=%ds ago\n",
                         session.username,
-                        session.endpoint,
+                        session.remoteIp,
+                        session.transportReady() ? "yes" : "no",
+                        worked,
+                        active,
                         locationRaw.isEmpty() ? "?" : region,
                         coordsStr,
                         secsSinceSeen);
@@ -4704,10 +5471,23 @@ public class WitcherServer
 
             dbg("---- Server stats ----\n");
             dbg("players=%d\n", players.size());
+            dbg("activeDualTransport=%d tcpConnections=%d\n",
+                    activeSessions().size(), tcpTransport == null ? 0 : tcpTransport.connectionCount());
             dbg("reservedUsernames=%d\n", reservedUsernames.size());
             dbg("broadcastTicks=%d\n", totalBroadcastTicks.get());
             dbg("totalPacketsSent=%d\n", totalPacketsSent.get());
             dbg("totalSendFailures=%d\n", totalSendFailures.get());
+            dbg("transportMisroutes=%d\n", transportMisroutes.get());
+            dbg("protocolMalformed=%d protocolUnknown=%d protocolOversized=%d passiveHitDistanceOutliers=%d\n",
+                    malformedPackets.get(),
+                    unknownPackets.get(),
+                    oversizedPackets.get(),
+                    passiveHitDistanceOutliers.get());
+            UdpBatcher batcher = udpBatcher;
+            if (batcher != null)
+            {
+                dbg("%s\n", batcher.report());
+            }
             dbg("lastBroadcastTickAgeMs=%d\n", lastTickAgeMs);
             dbg("npcs=%d admitted=%d rejectedDuplicate=%d npcPacketsSent=%d\n\n",
                     NpcRegistry.npcCount(),
@@ -4754,7 +5534,7 @@ public class WitcherServer
             return;
         }
 
-        if (line.equals("npc"))
+        if (line.equals("npc") || line.equals("npcstats"))
         {
             dbg("---- NPC sync ----\n");
             dbg("npcs=%d admitted=%d rejectedDuplicate=%d\n",
@@ -4778,6 +5558,74 @@ public class WitcherServer
             return;
         }
 
+        if (line.equals("transport") || line.equals("netstats"))
+        {
+            dbg("---- Transport routes ----\n");
+
+            for (PlayerSession session : players.values())
+            {
+                dbg("name=\"%s\" txUdp=%d/%dB txTcp=%d/%dB rxUdp=%d/%dB rxTcp=%d/%dB\n",
+                        session.username,
+                        session.udpPacketsSent.get(),
+                        session.udpBytesSent.get(),
+                        session.tcpPacketsSent.get(),
+                        session.tcpBytesSent.get(),
+                        session.udpPacketsReceived.get(),
+                        session.udpBytesReceived.get(),
+                        session.tcpPacketsReceived.get(),
+                        session.tcpBytesReceived.get());
+            }
+
+            for (Map.Entry<String, AtomicLong> route : new java.util.TreeMap<>(transportRoutes).entrySet())
+            {
+                dbg("%s=%d\n", route.getKey(), route.getValue().get());
+            }
+
+            UdpBatcher batcher = udpBatcher;
+            if (batcher != null)
+            {
+                dbg("%s\n", batcher.report());
+            }
+
+            dbgNotime("\n");
+            return;
+        }
+
+        if (line.equals("queues"))
+        {
+            dbg("---- Optimization queues ----\n");
+
+            for (PlayerSession session : players.values())
+            {
+                long outboundSamples = session.outboundQueueSamples.get();
+                long saveSamples = session.saveQueueSamples.get();
+                double outboundAvgMs = outboundSamples == 0L
+                        ? 0.0
+                        : (session.outboundQueueNanos.get() / (double) outboundSamples) / 1_000_000.0;
+                double saveAvgMs = saveSamples == 0L
+                        ? 0.0
+                        : (session.saveQueueNanos.get() / (double) saveSamples) / 1_000_000.0;
+
+                dbg("name=\"%s\" normal=%d high=%d enq=%d drain=%d drop=%d avgMs=%.3f save=%d high=%d enq=%d drain=%d drop=%d avgMs=%.3f\n",
+                        session.username,
+                        session.pendingOutbound.size(),
+                        session.outboundHighWater.get(),
+                        session.outboundEnqueued.get(),
+                        session.outboundDrained.get(),
+                        session.outboundDropped.get(),
+                        outboundAvgMs,
+                        session.pendingSaveOutbound.size(),
+                        session.saveHighWater.get(),
+                        session.saveEnqueued.get(),
+                        session.saveDrained.get(),
+                        session.saveDropped.get(),
+                        saveAvgMs);
+            }
+
+            dbgNotime("\n");
+            return;
+        }
+
         if (line.startsWith("kick"))
         {
             String arg = trimCommandArg(line, "kick");
@@ -4794,7 +5642,7 @@ public class WitcherServer
                 return;
             }
 
-            dbg("Kicking %s (%s)\n", victim.username, victim.endpoint);
+            dbg("Kicking %s (%s)\n", victim.username, victim.remoteIp);
             kickPlayer(socket, victim, "KICK\tKicked by server");
             dbgNotime("\n");
             return;
@@ -4811,7 +5659,7 @@ public class WitcherServer
 
             PlayerSession victim = findPlayer(arg);
             String ipToBan = (victim != null)
-                    ? normalizeIp(victim.endpoint.address.getHostAddress())
+                    ? normalizeIp(victim.remoteIp)
                     : normalizeIp(stripPort(arg));
 
             if (ipToBan.isEmpty())
@@ -4957,7 +5805,11 @@ public class WitcherServer
             dbg("whitelist remove <ip>     - remove IP from whitelist\n");
             dbg("list                      - list connected players\n");
             dbg("stats                     - show broadcast/server health counters\n");
+            dbg("transport                 - show per-path and per-opcode transport counters\n");
             dbg("npc                       - show NPC sync cells, authority and counters\n");
+            dbg("netstats                  - show per-opcode packet and byte counters\n");
+            dbg("npcstats                  - show NPC registry and ownership counters\n");
+            dbg("queues                    - show per-player queue pressure and latency\n");
             dbg("scaling                   - show NPC health scaling config and curve\n");
             dbg("scaling on|off            - enable or disable NPC health scaling\n");
             dbg("scaling step <value>      - extra health per additional player (0.5 = +50%%)\n");
@@ -5087,16 +5939,22 @@ public class WitcherServer
         if (removed != null)
         {
             playersById.remove(removed.playerId, removed);
-            safeSend(socket, removed.endpoint, kickText);
+            SpatialIndex.remove(removed);
+            sendToSession(removed, kickText, "KICK", "KICK");
+            TcpTransport.Connection tcp = removed.tcpConnection;
+            if (tcp != null)
+            {
+                tcp.closeWhenDrained();
+            }
         }
     }
 
     private static void kickAllPlayersByIp(DatagramSocket socket, String ip, String kickText)
     {
         List<PlayerSession> victims = new ArrayList<>();
-        for (PlayerSession session : players.values())
+        for (PlayerSession session : activeSessions())
         {
-            String sessionIp = normalizeIp(session.endpoint.address.getHostAddress());
+            String sessionIp = normalizeIp(session.remoteIp);
             if (sessionIp.equals(ip))
             {
                 victims.add(session);
@@ -5105,7 +5963,7 @@ public class WitcherServer
 
         for (PlayerSession victim : victims)
         {
-            dbg("Removing %s (%s) after ban\n", victim.username, victim.endpoint);
+            dbg("Removing %s (%s) after ban\n", victim.username, victim.remoteIp);
             kickPlayer(socket, victim, kickText);
         }
     }
@@ -5122,7 +5980,7 @@ public class WitcherServer
 
         for (PlayerSession session : players.values())
         {
-            String sessionIp = normalizeIp(session.endpoint.address.getHostAddress());
+            String sessionIp = normalizeIp(session.remoteIp);
             if (!ipArg.isEmpty() && sessionIp.equals(ipArg))
             {
                 return session;
@@ -5139,7 +5997,24 @@ public class WitcherServer
             return;
         }
 
-        socket.close();
+        UdpBatcher batcher = udpBatcher;
+        if (batcher != null)
+        {
+            batcher.close();
+            udpBatcher = null;
+        }
+
+        if (socket != null)
+        {
+            socket.close();
+        }
+
+        TcpTransport transport = tcpTransport;
+        if (transport != null)
+        {
+            transport.close();
+            tcpTransport = null;
+        }
 
         HttpServer server = statusServer;
         if (server != null)
@@ -5151,7 +6026,12 @@ public class WitcherServer
 
     private static void sendText(DatagramSocket socket, ClientEndpoint client, String text) throws Exception
     {
-        byte[] data = text.getBytes(StandardCharsets.UTF_8);
+        if (socket == null || client == null)
+        {
+            return;
+        }
+
+        byte[] data = BinaryPacketCodec.encodeText(text);
         DatagramPacket packet = new DatagramPacket(data, data.length, client.address, client.port);
         socket.send(packet);
     }
@@ -5169,6 +6049,21 @@ public class WitcherServer
                 e.printStackTrace();
             }
         }
+    }
+
+    private static void safeReply(
+            DatagramSocket socket,
+            ClientEndpoint client,
+            TcpTransport.Connection tcp,
+            String text)
+    {
+        if (tcp != null && tcp.isOpen())
+        {
+            tcp.sendReliable(text);
+            return;
+        }
+
+        safeSend(socket, client, text);
     }
 
     private static boolean isIpBanned(String ip)
@@ -5417,9 +6312,50 @@ public class WitcherServer
         return Paths.get(".").toAbsolutePath().normalize();
     }
 
-    private static String normalizeIp(String ip)
+    static String normalizeIp(String ip)
     {
-        return stripPort(ip == null ? "" : ip.trim());
+        String value = stripPort(ip == null ? "" : ip.trim());
+        if (value.isEmpty())
+        {
+            return "";
+        }
+
+        int zone = value.indexOf('%');
+        if (zone >= 0)
+        {
+            value = value.substring(0, zone);
+        }
+
+        try
+        {
+            java.net.InetAddress address = java.net.InetAddress.getByName(value);
+            if (address.isLoopbackAddress())
+            {
+                return "loopback";
+            }
+            return address.getHostAddress().toLowerCase(Locale.ROOT);
+        }
+        catch (Exception ignored)
+        {
+            return value.toLowerCase(Locale.ROOT);
+        }
+    }
+
+    private static String describeSessionAddress(PlayerSession session)
+    {
+        if (session == null)
+        {
+            return "unknown";
+        }
+        if (session.endpoint != null)
+        {
+            return session.endpoint.toString();
+        }
+        if (session.tcpConnection != null)
+        {
+            return session.tcpConnection.remoteAddress();
+        }
+        return session.remoteIp == null || session.remoteIp.isEmpty() ? "unknown" : session.remoteIp;
     }
 
     private static String stripPort(String value)
@@ -5745,9 +6681,18 @@ public class WitcherServer
         }
 
         playersById.remove(session.playerId, session);
-        NpcRegistry.orphanNpcsOwnedBy(session.playerId, System.nanoTime());
+        SpatialIndex.remove(session);
+        synchronized (NPC_WORLD_LOCK)
+        {
+            NpcRegistry.orphanNpcsOwnedBy(session.playerId, System.nanoTime());
+        }
 
-        String ip = normalizeIp(session.endpoint.address.getHostAddress());
+        String ip = normalizeIp(session.remoteIp);
+        TcpTransport.Connection tcp = session.tcpConnection;
+        if (tcp != null)
+        {
+            tcp.close();
+        }
         reservedUsernames.put(usernameKey, new UsernameReservation(
                 session.username,
                 ip,

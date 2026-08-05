@@ -14,7 +14,6 @@ namespace w3mp {
 		Update3 = 4,
 		Update4 = 5,
 		Pose = 6,
-		NpcOwn = 7,
 		NpcNew = 8,
 		NpcMove = 9,
 		NpcEnd = 10,
@@ -23,7 +22,8 @@ namespace w3mp {
 		PartyState = 13,
 		PartyInvite = 14,
 		SceneStart = 15,
-		QuestItem = 16
+		QuestItem = 16,
+		PlayerPosition = 17
 	};
 
 	enum class ClientStatus

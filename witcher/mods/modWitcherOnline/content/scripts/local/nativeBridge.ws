@@ -20,6 +20,7 @@ import function WO_IsPlayerPaused(playerId : int) : bool;
 import function WO_SetPaused(paused : bool);
 import function WO_ResetDeltas();
 import function WO_PartyJoin(target : string);
+import function WO_TeleportRequest(target : string);
 import function WO_PartyLeave();
 import function WO_PartyRespond(target : string, approved : bool);
 import function WO_PartyCoopMode(enabled : bool);
@@ -53,6 +54,7 @@ import function WO_EntityProbe(target : CEntity) : string;
 import function WO_EntityTemplatePath(target : CEntity) : string;
 import function WO_NpcBeginOwned();
 import function WO_NpcPushOwned(guid : int, area : int, localCount : int, typeCode : string, appearance : string,
+    identityKey : string, identityFlags : int,
     x : float, y : float, z : float, heading : float,
     hpPermille : int, flags : int, targetPlayerId : int, terminalState : int, terminalAttackerId : int) : bool;
 import function WO_NpcEndOwned();
@@ -74,9 +76,10 @@ import function WO_NpcTerminalAttacker(index : int) : int;
 import function WO_NpcTerminalAck(canonicalId : int, revision : int);
 import function WO_NpcType(index : int) : string;
 import function WO_NpcAppearance(index : int) : name;
-import function WO_NpcBind(index : int, localGuid : int);
-import function WO_NpcBindId(canonicalId : int, localGuid : int);
+import function WO_NpcBind(index : int, localGuid : int, kind : int);
+import function WO_NpcBindId(canonicalId : int, localGuid : int, kind : int);
 import function WO_NpcForget(canonicalId : int);
+import function WO_NpcDecline(canonicalId : int);
 import function WO_NpcTake(canonicalId : int, localGuid : int);
 import function WO_NpcUnspawnable(canonicalId : int);
 import function WO_NpcSuspend(suspended : bool);
@@ -269,6 +272,10 @@ function WO_PumpInbound(maxMessages : int)
                 WO_ApplyQuestItem();
                 break;
 
+            case 17:
+                WO_ApplyPlayerPosition();
+                break;
+
 
 
             default:
@@ -337,6 +344,18 @@ function WO_ApplySceneStart()
         WO_Float(10), WO_Float(11), WO_Float(12),
         WO_Float(13), WO_Int(14), WO_Int(15),
         WO_Int(16), WO_Str(17), WO_Int(18));
+}
+
+function WO_ApplyPlayerPosition()
+{
+    if(WO_FieldCount() < 6)
+    {
+        return;
+    }
+
+    theGame.r_getMultiplayerClient().onTeleportResult(
+        WO_Int(0), WO_Str(1), WO_Int(2),
+        WO_Float(3), WO_Float(4), WO_Float(5));
 }
 
 function WO_ApplyParty()

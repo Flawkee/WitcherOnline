@@ -6,10 +6,13 @@
 #include "InlineHook.h"
 #include "SignatureScanner.h"
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <deque>
+#include <list>
 #include <map>
 #include <mutex>
+#include <unordered_map>
 #include <vector>
 
 extern void ResetInboundDeltaCaches();
@@ -322,7 +325,7 @@ namespace w3mp {
 
 	static const size_t kFunctionSize = 0xC0;
 	static const size_t kFunctionAlignment = 0x10;
-	static const size_t kMaxQueueDepth = 1024;
+	static const size_t kMaxQueueDepth = 4096;
 
 	static InlineHook g_registerHook;
 	static std::atomic<bool> g_registrationDone{ false };
@@ -331,7 +334,11 @@ namespace w3mp {
 
 	static std::mutex g_queueMutex;
 	static std::deque<std::string> g_outbound;
-	static std::deque<InboundMessage> g_inbound;
+	static std::array<std::string, 4> g_outboundRealtime;
+	static std::array<bool, 4> g_outboundRealtimePending{};
+	static size_t g_outboundRealtimeCursor = 0;
+	static std::list<InboundMessage> g_inbound;
+	static std::unordered_map<unsigned long long, std::list<InboundMessage>::iterator> g_inboundReplaceable;
 	static InboundMessage g_current;
 
 	static std::mutex g_stateMutex;
@@ -347,6 +354,54 @@ namespace w3mp {
 	static std::atomic<unsigned long long> g_sendCount{ 0 };
 	static std::atomic<unsigned long long> g_recvCount{ 0 };
 	static std::atomic<unsigned long long> g_dropCount{ 0 };
+	static std::atomic<unsigned long long> g_inboundDrops{ 0 };
+	static std::atomic<unsigned long long> g_outboundDrops{ 0 };
+	static std::atomic<unsigned long long> g_inboundHighWater{ 0 };
+	static std::atomic<unsigned long long> g_outboundHighWater{ 0 };
+	static std::atomic<unsigned long long> g_outboundCoalesced{ 0 };
+	static std::atomic<unsigned long long> g_inboundCoalesced{ 0 };
+
+	static bool IsReplaceableInbound(InboundOpcode opcode)
+	{
+		return opcode == InboundOpcode::Move
+			|| opcode == InboundOpcode::Update1
+			|| opcode == InboundOpcode::Update2
+			|| opcode == InboundOpcode::Update3
+			|| opcode == InboundOpcode::Update4
+			|| opcode == InboundOpcode::Pose
+			|| opcode == InboundOpcode::Visibility;
+	}
+
+	static unsigned long long InboundKey(const InboundMessage& message)
+	{
+		return (static_cast<unsigned long long>(static_cast<unsigned int>(message.playerId)) << 8)
+			| static_cast<unsigned int>(message.opcode);
+	}
+
+	static int OutboundRealtimeSlot(const std::string& payload)
+	{
+		if (payload.size() < 3 || payload[0] != 'w' || payload[1] != 'o')
+			return -1;
+		if (static_cast<unsigned char>(payload[2]) <= ' ')
+			return 0;
+		const char kind = payload[2];
+		if (kind < '2' || kind > '4')
+			return -1;
+		if (payload.size() > 3 && static_cast<unsigned char>(payload[3]) > ' ')
+			return -1;
+		return kind - '1';
+	}
+
+	static size_t OutboundDepthLocked()
+	{
+		size_t depth = g_outbound.size();
+		for (bool pending : g_outboundRealtimePending)
+		{
+			if (pending)
+				depth++;
+		}
+		return depth;
+	}
 
 	static void AdvanceFrame(void* frame)
 	{
@@ -548,25 +603,62 @@ namespace w3mp {
 	{
 		std::lock_guard<std::mutex> lock(g_queueMutex);
 
-		if (g_outbound.empty())
-			return false;
+		if (!g_outbound.empty())
+		{
+			payload = std::move(g_outbound.front());
+			g_outbound.pop_front();
+			return true;
+		}
 
-		payload = std::move(g_outbound.front());
-		g_outbound.pop_front();
-		return true;
+		for (size_t checked = 0; checked < g_outboundRealtimePending.size(); ++checked)
+		{
+			const size_t slot = (g_outboundRealtimeCursor + checked) % g_outboundRealtimePending.size();
+			if (!g_outboundRealtimePending[slot])
+				continue;
+			payload = std::move(g_outboundRealtime[slot]);
+			g_outboundRealtime[slot].clear();
+			g_outboundRealtimePending[slot] = false;
+			g_outboundRealtimeCursor = (slot + 1) % g_outboundRealtimePending.size();
+			return true;
+		}
+
+		return false;
 	}
 
 	void ScriptBinding::PushInbound(InboundMessage&& message)
 	{
 		std::lock_guard<std::mutex> lock(g_queueMutex);
+		const bool replaceable = IsReplaceableInbound(message.opcode);
+		const unsigned long long key = replaceable ? InboundKey(message) : 0;
+
+		if (replaceable)
+		{
+			auto found = g_inboundReplaceable.find(key);
+			if (found != g_inboundReplaceable.end())
+			{
+				*(found->second) = std::move(message);
+				g_inboundCoalesced.fetch_add(1);
+				return;
+			}
+		}
 
 		if (g_inbound.size() >= kMaxQueueDepth)
 		{
+			if (IsReplaceableInbound(g_inbound.front().opcode))
+				g_inboundReplaceable.erase(InboundKey(g_inbound.front()));
 			g_inbound.pop_front();
 			g_dropCount.fetch_add(1);
+			g_inboundDrops.fetch_add(1);
 		}
 
 		g_inbound.push_back(std::move(message));
+		if (replaceable)
+		{
+			auto inserted = g_inbound.end();
+			--inserted;
+			g_inboundReplaceable[key] = inserted;
+		}
+		g_inboundHighWater.store(std::max<unsigned long long>(g_inboundHighWater.load(), g_inbound.size()));
 	}
 
 	size_t ScriptBinding::InboundDepth()
@@ -649,11 +741,26 @@ namespace w3mp {
 		const unsigned long long offered = applied + suppressed;
 
 		unsigned long long saved = suppressed * 78 + downgraded * 67;
+		size_t inboundDepth = 0;
+		size_t outboundDepth = 0;
+
+		{
+			std::lock_guard<std::mutex> lock(g_queueMutex);
+			inboundDepth = g_inbound.size();
+			outboundDepth = OutboundDepthLocked();
+		}
 
 		return "transport sent=" + std::to_string(g_sendCount.load())
 			+ " recv=" + std::to_string(applied)
 			+ " dropped=" + std::to_string(g_dropCount.load())
-			+ " queued=" + std::to_string(InboundDepth())
+			+ " inQueued=" + std::to_string(inboundDepth)
+			+ " inHigh=" + std::to_string(g_inboundHighWater.load())
+			+ " inDrop=" + std::to_string(g_inboundDrops.load())
+			+ " outQueued=" + std::to_string(outboundDepth)
+			+ " outHigh=" + std::to_string(g_outboundHighWater.load())
+			+ " outDrop=" + std::to_string(g_outboundDrops.load())
+			+ " outCoal=" + std::to_string(g_outboundCoalesced.load())
+			+ " inCoal=" + std::to_string(g_inboundCoalesced.load())
 			+ " | delta offered=" + std::to_string(offered)
 			+ " suppressed=" + std::to_string(suppressed)
 			+ " downgraded=" + std::to_string(downgraded)
@@ -715,13 +822,26 @@ namespace w3mp {
 			{
 				std::lock_guard<std::mutex> lock(g_queueMutex);
 
-				if (g_outbound.size() >= kMaxQueueDepth)
+				const int slot = OutboundRealtimeSlot(payload);
+				if (slot >= 0)
 				{
-					g_outbound.pop_front();
-					g_dropCount.fetch_add(1);
+					if (g_outboundRealtimePending[slot])
+						g_outboundCoalesced.fetch_add(1);
+					g_outboundRealtime[slot] = std::move(payload);
+					g_outboundRealtimePending[slot] = true;
+				}
+				else
+				{
+					if (g_outbound.size() >= kMaxQueueDepth)
+					{
+						g_outbound.pop_front();
+						g_dropCount.fetch_add(1);
+						g_outboundDrops.fetch_add(1);
+					}
+					g_outbound.push_back(std::move(payload));
 				}
 
-				g_outbound.push_back(std::move(payload));
+				g_outboundHighWater.store(std::max<unsigned long long>(g_outboundHighWater.load(), OutboundDepthLocked()));
 				queued = true;
 				g_sendCount.fetch_add(1);
 			}
@@ -745,6 +865,8 @@ namespace w3mp {
 			if (!g_inbound.empty())
 			{
 				g_current = std::move(g_inbound.front());
+				if (IsReplaceableInbound(g_current.opcode))
+					g_inboundReplaceable.erase(InboundKey(g_current));
 				g_inbound.pop_front();
 				count = static_cast<int>(g_current.fields.size());
 				g_recvCount.fetch_add(1);
@@ -1998,6 +2120,10 @@ namespace w3mp {
 		RedString appearanceText{};
 		ReadStringParameter(frame, appearanceText);
 
+		RedString identityText{};
+		ReadStringParameter(frame, identityText);
+		const int identityFlags = ReadIntParameter(frame);
+
 		const float x = ReadFloatParameter(frame);
 		const float y = ReadFloatParameter(frame);
 		const float z = ReadFloatParameter(frame);
@@ -2016,6 +2142,8 @@ namespace w3mp {
 			localCount,
 			NarrowPayload(typeText),
 			NarrowPayload(appearanceText),
+			NarrowPayload(identityText),
+			identityFlags,
 			x, y, z, heading,
 			hpPermille,
 			flags,
@@ -2154,9 +2282,21 @@ namespace w3mp {
 	{
 		const int index = ReadIntParameter(frame);
 		const int localGuid = ReadIntParameter(frame);
+		const int kind = ReadIntParameter(frame);
 		AdvanceFrame(frame);
 
-		NpcNet::Bind(index, localGuid);
+		NpcNet::Bind(index, localGuid, kind);
+	}
+
+	static void WO_TeleportRequest(void* context, void* frame, void* result)
+	{
+		RedString text;
+		const int size = ReadStringParameter(frame, text);
+
+		AdvanceFrame(frame);
+
+		if (size > 0)
+			SendPartyRequest("TPREQ", NarrowPayload(text));
 	}
 
 	static void WO_NpcTerminalState(void* context, void* frame, void* result)
@@ -2196,9 +2336,10 @@ namespace w3mp {
 	{
 		const int canonicalId = ReadIntParameter(frame);
 		const int localGuid = ReadIntParameter(frame);
+		const int kind = ReadIntParameter(frame);
 		AdvanceFrame(frame);
 
-		NpcNet::BindCanonical(canonicalId, localGuid);
+		NpcNet::BindCanonical(canonicalId, localGuid, kind);
 	}
 
 	static void WO_NpcForget(void* context, void* frame, void* result)
@@ -2207,6 +2348,14 @@ namespace w3mp {
 		AdvanceFrame(frame);
 
 		NpcNet::Forget(canonicalId);
+	}
+
+	static void WO_NpcDecline(void* context, void* frame, void* result)
+	{
+		const int canonicalId = ReadIntParameter(frame);
+		AdvanceFrame(frame);
+
+		NpcNet::Decline(canonicalId);
 	}
 
 	static void WO_NpcTake(void* context, void* frame, void* result)
@@ -2627,6 +2776,7 @@ namespace w3mp {
 		RegisterOne(L"WO_ResetDeltas", reinterpret_cast<void*>(&WO_ResetDeltas), "WO_ResetDeltas");
 		RegisterOne(L"WO_NpcSyncMode", reinterpret_cast<void*>(&WO_NpcSyncMode), "WO_NpcSyncMode");
 		RegisterOne(L"WO_PartyJoin", reinterpret_cast<void*>(&WO_PartyJoin), "WO_PartyJoin");
+		RegisterOne(L"WO_TeleportRequest", reinterpret_cast<void*>(&WO_TeleportRequest), "WO_TeleportRequest");
 		RegisterOne(L"WO_PartyLeave", reinterpret_cast<void*>(&WO_PartyLeave), "WO_PartyLeave");
 		RegisterOne(L"WO_PartyRespond", reinterpret_cast<void*>(&WO_PartyRespond), "WO_PartyRespond");
 		RegisterOne(L"WO_PartyCoopMode", reinterpret_cast<void*>(&WO_PartyCoopMode), "WO_PartyCoopMode");
@@ -2683,6 +2833,7 @@ namespace w3mp {
 		RegisterOne(L"WO_NpcBind", reinterpret_cast<void*>(&WO_NpcBind), "WO_NpcBind");
 		RegisterOne(L"WO_NpcBindId", reinterpret_cast<void*>(&WO_NpcBindId), "WO_NpcBindId");
 		RegisterOne(L"WO_NpcForget", reinterpret_cast<void*>(&WO_NpcForget), "WO_NpcForget");
+		RegisterOne(L"WO_NpcDecline", reinterpret_cast<void*>(&WO_NpcDecline), "WO_NpcDecline");
 		RegisterOne(L"WO_NpcTake", reinterpret_cast<void*>(&WO_NpcTake), "WO_NpcTake");
 		RegisterOne(L"WO_NpcUnspawnable", reinterpret_cast<void*>(&WO_NpcUnspawnable), "WO_NpcUnspawnable");
 		RegisterOne(L"WO_NpcSuspend", reinterpret_cast<void*>(&WO_NpcSuspend), "WO_NpcSuspend");

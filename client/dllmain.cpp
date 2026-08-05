@@ -3,6 +3,7 @@
 #include "Diagnostics.h"
 #include "ScriptBinding.h"
 #include "NpcNet.h"
+#include "PacketCodec.h"
 #include "SaveTransfer.h"
 #include <windows.h>
 #include <thread>
@@ -10,6 +11,10 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include <deque>
+#include <array>
+#include <algorithm>
+#include <cctype>
 #include <regex>
 #include <filesystem>
 #include <fstream>
@@ -24,6 +29,7 @@ using namespace w3mp;
 
 static std::thread g_sender;
 static std::thread g_receiver;
+static std::thread g_tcpReceiver;
 
 static std::string username = "Player";
 static std::atomic<int> g_localPlayerId{ 0 };
@@ -36,6 +42,19 @@ asio::io_context io;
 asio::ip::udp::resolver resolver(io);
 asio::ip::udp::socket theSocket(io);
 asio::ip::udp::endpoint serverEndpoint;
+asio::ip::tcp::resolver tcpResolver(io);
+asio::ip::tcp::socket tcpSocket(io);
+
+static std::mutex g_tcpSendMutex;
+static std::mutex g_transportMutex;
+static std::atomic<bool> g_udpAvailable{ false };
+static std::atomic<bool> g_tcpAvailable{ false };
+static std::atomic<bool> g_tcpConnecting{ false };
+static std::atomic<unsigned long long> g_lastUdpPongMs{ 0 };
+static std::atomic<unsigned long long> g_transportOpenedMs{ 0 };
+static std::mutex g_reliableBacklogMutex;
+static std::deque<std::pair<std::string, std::string>> g_reliableBacklog;
+static constexpr size_t kReliableBacklogLimit = 4096;
 
 static std::atomic<bool> g_shutdown{ false };
 static std::atomic<bool> g_run{ false };
@@ -332,28 +351,148 @@ static bool RemoveMovementPrefix(ParsedHalves& halves, std::vector<std::string>&
 }
 
 static void RequestReconnect(const char* reason);
+static void HandleServerPacket(const std::string& msg);
 
 static std::atomic<unsigned long long> g_bytesSent{ 0 };
 static std::atomic<unsigned long long> g_packetsSent{ 0 };
 static std::atomic<unsigned long long> g_bytesRecv{ 0 };
 static std::atomic<unsigned long long> g_packetsRecv{ 0 };
+static std::atomic<unsigned long long> g_udpPacketsSent{ 0 };
+static std::atomic<unsigned long long> g_tcpPacketsSent{ 0 };
+static std::atomic<unsigned long long> g_udpPacketsRecv{ 0 };
+static std::atomic<unsigned long long> g_tcpPacketsRecv{ 0 };
 static std::atomic<unsigned long long> g_outboundNanos{ 0 };
 static std::atomic<unsigned long long> g_outboundCalls{ 0 };
 
-static void SendUdpPacket(const std::string& packet, const char* label)
+static bool IsRealtimePacket(const std::string& opcode)
 {
-	g_bytesSent.fetch_add(packet.size());
-	g_packetsSent.fetch_add(1);
+	return RouteForPacket(opcode) == PacketRoute::Realtime;
+}
+
+static bool TransportReady()
+{
+    return g_udpAvailable.load() && g_tcpAvailable.load();
+}
+
+static void QueueReliablePacket(const std::string& packet, const std::string& opcode)
+{
+    std::lock_guard<std::mutex> lock(g_reliableBacklogMutex);
+    if (g_reliableBacklog.size() >= kReliableBacklogLimit)
+    {
+        Diagnostics::Log("reliable backlog full; reconnect required");
+        RequestReconnect("reliable backlog full");
+        return;
+    }
+    g_reliableBacklog.push_back({ packet, opcode });
+}
+
+static bool SendRawUdp(const std::string& packet)
+{
+	try
+	{
+		if (!theSocket.is_open())
+			return false;
+
+		std::vector<std::uint8_t> encoded;
+		if (!EncodePacketText(packet, encoded))
+			return false;
+		theSocket.send(asio::buffer(encoded));
+		g_bytesSent.fetch_add(encoded.size());
+		g_packetsSent.fetch_add(1);
+		g_udpPacketsSent.fetch_add(1);
+		return true;
+	}
+	catch (...)
+	{
+		g_udpAvailable.store(false);
+		return false;
+	}
+}
+
+static bool SendTcpFrame(const std::string& packet)
+{
+	std::lock_guard<std::mutex> lock(g_tcpSendMutex);
 
 	try
 	{
-		theSocket.send(asio::buffer(packet));
+		if (!tcpSocket.is_open())
+			return false;
+
+		std::vector<std::uint8_t> encoded;
+		if (!EncodePacketText(packet, encoded))
+			return false;
+		const uint32_t length = static_cast<uint32_t>(encoded.size());
+		unsigned char header[4] = {
+			static_cast<unsigned char>((length >> 24) & 0xFF),
+			static_cast<unsigned char>((length >> 16) & 0xFF),
+			static_cast<unsigned char>((length >> 8) & 0xFF),
+			static_cast<unsigned char>(length & 0xFF)
+		};
+
+		std::array<asio::const_buffer, 2> buffers = {
+			asio::buffer(header, sizeof(header)),
+			asio::buffer(encoded)
+		};
+		asio::write(tcpSocket, buffers);
+		g_bytesSent.fetch_add(encoded.size() + sizeof(header));
+		g_packetsSent.fetch_add(1);
+		g_tcpPacketsSent.fetch_add(1);
+		return true;
 	}
-	catch (const std::exception& e)
+	catch (...)
 	{
-		Diagnostics::Log(std::string("send error ") + label + ": " + e.what());
-		RequestReconnect("send failure");
+		g_tcpAvailable.store(false);
+		try
+		{
+			if (tcpSocket.is_open())
+				tcpSocket.close();
+		}
+		catch (...)
+		{
+		}
+		return false;
 	}
+}
+
+static void SendPacket(const std::string& packet, const char* label)
+{
+    const std::string opcode = label == nullptr ? std::string() : std::string(label);
+    const bool realtime = IsRealtimePacket(opcode);
+
+    if (realtime)
+    {
+        if (g_udpAvailable.load())
+            SendRawUdp(packet);
+        return;
+    }
+
+    if (!g_tcpAvailable.load() || !SendTcpFrame(packet))
+        QueueReliablePacket(packet, opcode);
+}
+
+static void FlushReliableBacklog()
+{
+    if (!TransportReady())
+        return;
+
+    for (int sent = 0; sent < 128; ++sent)
+    {
+        std::pair<std::string, std::string> pending;
+        {
+            std::lock_guard<std::mutex> lock(g_reliableBacklogMutex);
+            if (g_reliableBacklog.empty())
+                return;
+            pending = std::move(g_reliableBacklog.front());
+            g_reliableBacklog.pop_front();
+        }
+
+        if (!SendTcpFrame(pending.first))
+        {
+            std::lock_guard<std::mutex> lock(g_reliableBacklogMutex);
+            g_reliableBacklog.push_front(std::move(pending));
+            return;
+        }
+    }
 }
 
 static std::string BuildLocalPacketId()
@@ -390,7 +529,7 @@ static void SendMovementPacket(const std::string& packetId, const std::vector<st
 	fields.reserve(8);
 	fields.push_back(std::to_string(movementSequence));
 	fields.insert(fields.end(), movement.begin(), movement.begin() + 7);
-	SendUdpPacket(BuildPacket("MOVE", packetId, fields), "MOVE");
+	SendPacket(BuildPacket("MOVE", packetId, fields), "MOVE");
 }
 
 static void SendUpdate1(const std::string& payload)
@@ -416,9 +555,9 @@ static void SendUpdate1(const std::string& payload)
 	second.insert(second.begin(), std::to_string(updateSequence));
 
 	if (!halves.first.empty())
-		SendUdpPacket(BuildPacket("UPDATE1A", packetId, first), "UPDATE1A");
+		SendPacket(BuildPacket("UPDATE1A", packetId, first), "UPDATE1A");
 	if (!halves.second.empty())
-		SendUdpPacket(BuildPacket("UPDATE1B", packetId, second), "UPDATE1B");
+		SendPacket(BuildPacket("UPDATE1B", packetId, second), "UPDATE1B");
 }
 
 static void SendUpdate2(const std::string& payload)
@@ -442,9 +581,9 @@ static void SendUpdate2(const std::string& payload)
 	second.insert(second.begin(), std::to_string(updateSequence));
 
 	if (!halves.first.empty())
-		SendUdpPacket(BuildPacket("UPDATE2A", packetId, first), "UPDATE2A");
+		SendPacket(BuildPacket("UPDATE2A", packetId, first), "UPDATE2A");
 	if (!halves.second.empty())
-		SendUdpPacket(BuildPacket("UPDATE2B", packetId, second), "UPDATE2B");
+		SendPacket(BuildPacket("UPDATE2B", packetId, second), "UPDATE2B");
 }
 
 static void SendCombined(const std::string& payload, const char* opcode, int& sequence)
@@ -468,27 +607,7 @@ static void SendCombined(const std::string& payload, const char* opcode, int& se
 	fields.insert(fields.end(), halves.second.begin(), halves.second.end());
 
 	if (fields.size() > 1)
-		SendUdpPacket(BuildPacket(opcode, packetId, fields), opcode);
-}
-
-static void SendNpcPayload(const std::string& payload, const char* opcode)
-{
-	std::vector<std::string> fields;
-	fields.reserve(64);
-
-	size_t pos = 0;
-	std::string_view token;
-
-	if (!NextToken(payload, pos, token))
-		return;
-
-	while (NextToken(payload, pos, token))
-		fields.emplace_back(token);
-
-	if (fields.empty())
-		return;
-
-	SendUdpPacket(BuildPacket(opcode, BuildLocalPacketId(), fields), opcode);
+		SendPacket(BuildPacket(opcode, packetId, fields), opcode);
 }
 
 static void ProcessOutbound(const std::string& payload)
@@ -512,8 +631,6 @@ static void ProcessOutbound(const std::string& payload)
 		SendCombined(payload, "UPDATE3", g_update3Sequence);
 	else if (tag == "wo4")
 		SendCombined(payload, "UPDATE4", g_update4Sequence);
-	else if (tag == "won1")
-		SendNpcPayload(payload, "NPCCELL");
 }
 
 struct RemotePlayerChunks
@@ -583,7 +700,7 @@ void SendPartyRequest(const char* opcode, const std::string& argument)
 	else
 		fields.push_back("-");
 
-	SendUdpPacket(BuildPacket(opcode, BuildLocalPacketId(), fields), opcode);
+	SendPacket(BuildPacket(opcode, BuildLocalPacketId(), fields), opcode);
 }
 
 static fs::path CharSlotPath(const std::string& slot)
@@ -769,7 +886,7 @@ std::string ResolveSaveDirectory()
 
 void SendSaveChunk(const char* opcode, const std::vector<std::string>& fields)
 {
-	SendUdpPacket(BuildPacket(opcode, BuildLocalPacketId(), fields), opcode);
+	SendPacket(BuildPacket(opcode, BuildLocalPacketId(), fields), opcode);
 }
 
 void SendPartyRequest2(const char* opcode, const std::string& first, const std::string& second)
@@ -779,7 +896,7 @@ void SendPartyRequest2(const char* opcode, const std::string& first, const std::
 	fields.push_back(first.empty() ? "-" : first);
 	fields.push_back(second.empty() ? "-" : second);
 
-	SendUdpPacket(BuildPacket(opcode, BuildLocalPacketId(), fields), opcode);
+	SendPacket(BuildPacket(opcode, BuildLocalPacketId(), fields), opcode);
 }
 
 void ResetInboundDeltaCaches()
@@ -899,6 +1016,10 @@ static std::atomic<bool> g_sessionFatal{ false };
 
 static void CloseOnlineSession()
 {
+	std::lock_guard<std::mutex> lock(g_transportMutex);
+	g_udpAvailable.store(false);
+	g_tcpAvailable.store(false);
+
 	try
 	{
 		if (theSocket.is_open())
@@ -907,30 +1028,124 @@ static void CloseOnlineSession()
 	catch (...)
 	{
 	}
-}
 
-static bool OpenSocket()
-{
 	try
 	{
-		CloseOnlineSession();
+		if (tcpSocket.is_open())
+			tcpSocket.close();
+	}
+	catch (...)
+	{
+	}
+}
 
+static bool OpenUdpPath()
+{
+    if (theSocket.is_open())
+		return theSocket.is_open();
+
+	try
+	{
 		theSocket.open(asio::ip::udp::v4());
 		theSocket.bind(asio::ip::udp::endpoint(asio::ip::udp::v4(), 0));
 		serverEndpoint = *resolver.resolve(asio::ip::udp::v4(), ip, port).begin();
 		theSocket.connect(serverEndpoint);
-
-		g_localPlayerId.store(0);
-		ScriptBinding::SetLocalId(0);
-		ScriptBinding::SetConnected(true);
+		if (!SendRawUdp("HELLO\t2\t" + EscapeField(username) + "\tUDP"))
+			throw std::runtime_error("UDP handshake send failed");
 		return true;
 	}
 	catch (const std::exception& e)
 	{
-		Diagnostics::Log(std::string("socket open failed: ") + e.what());
-		ScriptBinding::SetConnected(false);
+		Diagnostics::Log(std::string("UDP open failed: ") + e.what());
+		try
+		{
+			if (theSocket.is_open())
+				theSocket.close();
+		}
+		catch (...)
+		{
+		}
 		return false;
 	}
+}
+
+static bool OpenTcpPath()
+{
+    if (tcpSocket.is_open() || g_tcpConnecting.exchange(true))
+		return tcpSocket.is_open();
+
+	try
+	{
+		auto endpoints = tcpResolver.resolve(ip, port);
+		const auto endpoint = *endpoints.begin();
+		tcpSocket.open(endpoint.endpoint().protocol());
+		tcpSocket.non_blocking(true);
+
+		asio::error_code connectError;
+		tcpSocket.connect(endpoint.endpoint(), connectError);
+
+		if (connectError == asio::error::would_block || connectError == asio::error::in_progress)
+		{
+			fd_set writable;
+			fd_set failed;
+			FD_ZERO(&writable);
+			FD_ZERO(&failed);
+			FD_SET(tcpSocket.native_handle(), &writable);
+			FD_SET(tcpSocket.native_handle(), &failed);
+			timeval timeout{};
+			timeout.tv_sec = 1;
+			timeout.tv_usec = 0;
+
+			const int ready = select(0, nullptr, &writable, &failed, &timeout);
+			if (ready <= 0 || FD_ISSET(tcpSocket.native_handle(), &failed))
+				throw std::runtime_error("connection timeout");
+
+			int socketError = 0;
+			int socketErrorLength = sizeof(socketError);
+			if (getsockopt(tcpSocket.native_handle(), SOL_SOCKET, SO_ERROR,
+				reinterpret_cast<char*>(&socketError), &socketErrorLength) != 0 || socketError != 0)
+				throw std::runtime_error("connection refused");
+		}
+		else if (connectError)
+		{
+			throw asio::system_error(connectError);
+		}
+
+		tcpSocket.non_blocking(false);
+		tcpSocket.set_option(asio::ip::tcp::no_delay(true));
+		tcpSocket.set_option(asio::socket_base::keep_alive(true));
+		if (!SendTcpFrame("HELLO\t2\t" + EscapeField(username) + "\tTCP"))
+			throw std::runtime_error("TCP handshake send failed");
+		g_tcpConnecting.store(false);
+		return true;
+	}
+	catch (const std::exception& e)
+	{
+		Diagnostics::Log(std::string("TCP open failed: ") + e.what());
+		try
+		{
+			if (tcpSocket.is_open())
+				tcpSocket.close();
+		}
+		catch (...)
+		{
+		}
+		g_tcpConnecting.store(false);
+		return false;
+	}
+}
+
+static bool OpenSocket()
+{
+	CloseOnlineSession();
+	bool opened = OpenUdpPath();
+	opened = OpenTcpPath() || opened;
+
+	g_localPlayerId.store(0);
+	ScriptBinding::SetLocalId(0);
+	ScriptBinding::SetConnected(false);
+    g_transportOpenedMs.store(GetTickCount64());
+    return opened;
 }
 
 static void RequestReconnect(const char* reason)
@@ -950,6 +1165,43 @@ static void HandleServerPacket(const std::string& msg)
 	auto parts = SplitTabs(msg);
 	if (parts.empty())
 		return;
+
+    if (parts[0] == "HELLOACK" && parts.size() >= 3 && parts[1] == "2")
+    {
+		if (parts.size() >= 4)
+		{
+			int assignedId = 0;
+			if (ParsePositiveInt(parts[3], assignedId))
+			{
+				g_localPlayerId.store(assignedId);
+				ScriptBinding::SetLocalId(assignedId);
+			}
+		}
+
+		if (parts[2] == "UDP")
+		{
+			g_udpAvailable.store(true);
+			g_lastUdpPongMs.store(GetTickCount64());
+		}
+        else if (parts[2] == "TCP")
+        {
+            g_tcpAvailable.store(true);
+            SendRawUdp("HELLO\t2\t" + EscapeField(username) + "\tUDP");
+        }
+
+        ScriptBinding::SetConnected(TransportReady());
+		Diagnostics::Log("transport ready UDP=" + std::string(g_udpAvailable.load() ? "yes" : "no")
+			+ " TCP=" + std::string(g_tcpAvailable.load() ? "yes" : "no"));
+		return;
+	}
+
+	if (parts[0] == "PONG" && parts.size() >= 3 && parts[1] == "2" && parts[2] == "UDP")
+	{
+		const bool restored = !g_udpAvailable.exchange(true);
+		g_lastUdpPongMs.store(GetTickCount64());
+        ScriptBinding::SetConnected(TransportReady());
+		return;
+	}
 
 	if (parts[0] == "ERROR")
 	{
@@ -982,12 +1234,10 @@ static void HandleServerPacket(const std::string& msg)
 
 	const std::string& opcode = parts[0];
 
-	const bool isNetOpcode = opcode == "NPCNEW" || opcode == "NPCMOV" || opcode == "NPCEND"
+	const bool isNetOpcode = opcode == "NPCNEW" || opcode == "NPCMOV" || opcode == "NPCFAST" || opcode == "NPCEND"
 		|| opcode == "NPCDEAD" || opcode == "NPCHITF" || opcode == "NPCACKF" || opcode == "TSYNCR" || opcode == "NPCKILL"
 		|| opcode == "NPCGIVE" || opcode == "NPCDROP" || opcode == "NPCGONE" || opcode == "PSTATEF"
-		|| opcode == "NPCSCALE";
-
-	const bool isNpcOpcode = opcode == "NPCOWN";
+		|| opcode == "NPCSCALE" || opcode == "NPCREG";
 
 	const bool isSaveOpcode = opcode == "SAVEBEG" || opcode == "SAVECHK" || opcode == "SAVEEND"
 		|| opcode == "SAVENACK" || opcode == "SAVEACK" || opcode == "SAVENEED";
@@ -1003,13 +1253,13 @@ static void HandleServerPacket(const std::string& msg)
 		return;
 	}
 
-	if (!isNpcOpcode
-		&& !isSaveOpcode
+	if (!isSaveOpcode
 		&& opcode != "PVIS"
 		&& opcode != "PARTY"
 		&& opcode != "PINVITE"
 		&& opcode != "SCENE"
 		&& opcode != "QITEM"
+		&& opcode != "TPPOS"
 		&& opcode != "MOVE" && opcode != "UPDATE1A" && opcode != "UPDATE1B" && opcode != "UPDATE2A" && opcode != "UPDATE2B" && opcode != "UPDATE3" && opcode != "UPDATE4")
 		return;
 
@@ -1032,12 +1282,6 @@ static void HandleServerPacket(const std::string& msg)
 
 	std::vector<std::string> fields(parts.begin() + 3, parts.end());
 	const unsigned long long nowMs = GetTickCount64();
-
-	if (isNpcOpcode)
-	{
-		QueueInbound(InboundOpcode::NpcOwn, playerId, 0, playerUsername, std::move(fields));
-		return;
-	}
 
 	if (opcode == "PVIS")
 	{
@@ -1066,6 +1310,12 @@ static void HandleServerPacket(const std::string& msg)
 	if (opcode == "QITEM")
 	{
 		QueueInbound(InboundOpcode::QuestItem, playerId, 0, playerUsername, std::move(fields));
+		return;
+	}
+
+	if (opcode == "TPPOS")
+	{
+		QueueInbound(InboundOpcode::PlayerPosition, playerId, 0, playerUsername, std::move(fields));
 		return;
 	}
 
@@ -1228,7 +1478,7 @@ static void ReportPauseState()
 	std::vector<std::string> fields;
 	fields.push_back(paused ? "1" : "0");
 
-	SendUdpPacket(BuildPacket("PSTATE", BuildLocalPacketId(), fields), "PSTATE");
+	SendPacket(BuildPacket("PSTATE", BuildLocalPacketId(), fields), "PSTATE");
 	Diagnostics::Log(paused ? "script tick stalled -> reported paused" : "script tick resumed -> reported active");
 }
 
@@ -1236,6 +1486,7 @@ static void SenderThread()
 {
 	std::string payload;
 	unsigned long long nextReconnectMs = 0;
+	unsigned long long nextTransportProbeMs = 0;
 
 	while (g_run.load())
 	{
@@ -1258,22 +1509,68 @@ static void SenderThread()
 			}
 		}
 
-		bool worked = false;
-
-		while (g_run.load() && ScriptBinding::PopOutbound(payload))
+		const unsigned long long transportNow = GetTickCount64();
+		if (transportNow >= nextTransportProbeMs && !g_sessionFatal.load())
 		{
-			ProcessOutbound(payload);
-			worked = true;
-		}
+			nextTransportProbeMs = transportNow + 2000;
 
-		NpcNet::Tick();
-		ReportPauseState();
-		Diagnostics::FlushSummary(false);
+            if (!theSocket.is_open())
+                OpenUdpPath();
+
+            if (theSocket.is_open())
+            {
+                SendRawUdp("PING\t2\t" + EscapeField(username) + "\tUDP");
+                const unsigned long long lastPong = g_lastUdpPongMs.load();
+                if (lastPong != 0 && transportNow - lastPong > 6500)
+                {
+                    g_udpAvailable.store(false);
+                }
+            }
+
+            if (!tcpSocket.is_open())
+                OpenTcpPath();
+
+            ScriptBinding::SetConnected(TransportReady());
+        }
+
+        bool worked = false;
+
+        if (TransportReady())
+        {
+            FlushReliableBacklog();
+
+            while (g_run.load() && ScriptBinding::PopOutbound(payload))
+            {
+                ProcessOutbound(payload);
+                worked = true;
+            }
+
+            NpcNet::Tick();
+            ReportPauseState();
+        }
+
+        Diagnostics::FlushSummary(false);
 		ScriptBinding::ReportIdle();
 
 		if (!worked)
 			Sleep(2);
 	}
+}
+
+static bool HandleUdpDatagram(const std::string& datagram)
+{
+	std::vector<std::string> packets;
+	if (!DecodeDatagram(
+		reinterpret_cast<const std::uint8_t*>(datagram.data()),
+		datagram.size(),
+		packets))
+		return false;
+
+	for (const auto& packet : packets)
+	{
+		HandleServerPacket(packet);
+	}
+	return true;
 }
 
 static void ReceiverThread()
@@ -1290,16 +1587,86 @@ static void ReceiverThread()
 
 			g_bytesRecv.fetch_add(len);
 			g_packetsRecv.fetch_add(1);
+			g_udpPacketsRecv.fetch_add(1);
 
 			std::string msg(data.data(), len);
+			if (!HandleUdpDatagram(msg))
+				Diagnostics::Log("invalid binary UDP datagram dropped");
+		}
+		catch (const std::exception& e)
+		{
+			if (g_run.load() && !g_sessionFatal.load())
+			{
+				if (g_udpAvailable.exchange(false))
+				{
+					Diagnostics::Log(std::string("UDP receive failed: ") + e.what());
+                }
+
+				try
+				{
+					if (theSocket.is_open())
+						theSocket.close();
+				}
+				catch (...)
+				{
+				}
+
+                ScriptBinding::SetConnected(false);
+			}
+			Sleep(200);
+		}
+	}
+}
+
+static void TcpReceiverThread()
+{
+	while (g_run.load())
+	{
+		try
+		{
+			if (g_tcpConnecting.load() || !tcpSocket.is_open())
+			{
+				Sleep(200);
+				continue;
+			}
+
+			unsigned char header[4]{};
+			asio::read(tcpSocket, asio::buffer(header, sizeof(header)));
+			const uint32_t length = (static_cast<uint32_t>(header[0]) << 24)
+				| (static_cast<uint32_t>(header[1]) << 16)
+				| (static_cast<uint32_t>(header[2]) << 8)
+				| static_cast<uint32_t>(header[3]);
+
+			if (length == 0 || length > (1u << 20))
+				throw std::runtime_error("invalid TCP frame length");
+
+			std::vector<std::uint8_t> frame(length);
+			asio::read(tcpSocket, asio::buffer(frame));
+			g_bytesRecv.fetch_add(length + sizeof(header));
+			g_packetsRecv.fetch_add(1);
+			g_tcpPacketsRecv.fetch_add(1);
+			std::string msg;
+			if (!DecodePacket(frame.data(), frame.size(), msg))
+				throw std::runtime_error("invalid binary TCP packet");
 			HandleServerPacket(msg);
 		}
 		catch (const std::exception& e)
 		{
 			if (g_run.load() && !g_sessionFatal.load())
 			{
-				Diagnostics::Log(std::string("receive error: ") + e.what());
-				RequestReconnect("receive failure");
+				if (g_tcpAvailable.exchange(false))
+					Diagnostics::Log(std::string("TCP receive failed: ") + e.what());
+
+				try
+				{
+					if (tcpSocket.is_open())
+						tcpSocket.close();
+				}
+				catch (...)
+				{
+				}
+
+                ScriptBinding::SetConnected(false);
 			}
 			Sleep(200);
 		}
@@ -1318,11 +1685,12 @@ void connectServer()
 	NpcNet::Reset();
 	NpcNet::SetSender([](const char* opcode, const std::vector<std::string>& fields)
 		{
-			SendUdpPacket(BuildPacket(opcode, BuildLocalPacketId(), fields), opcode);
+			SendPacket(BuildPacket(opcode, BuildLocalPacketId(), fields), opcode);
 		});
 
 	g_sender = std::thread(SenderThread);
-	g_receiver = std::thread(ReceiverThread);
+    g_receiver = std::thread(ReceiverThread);
+    g_tcpReceiver = std::thread(TcpReceiverThread);
 }
 
 void initScript()
@@ -1349,13 +1717,14 @@ void initScript()
 			ip = xml.child("ServerIP").text().as_string();
 			port = xml.child("Port").text().as_string();
 
-			if (username.length() < 2 || username == "none")
-				username = "Player";
+            if (username.length() < 2 || username == "none")
+                username = "Player";
 		}
 	}
 
-	Diagnostics::Init((baseDir / "WitcherOnline" / "witcheronline.log").string());
-	Diagnostics::Log("client starting user=" + username + " server=" + ip + ":" + port);
+    Diagnostics::Init((baseDir / "WitcherOnline" / "witcheronline.log").string());
+    Diagnostics::Log("client starting user=" + username + " server=" + ip + ":" + port
+        + " transport=TCP+UDP required");
 
 	ScriptBinding::SetUsername(username);
 	ScriptBinding::Resolve();
@@ -1413,6 +1782,10 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
 				+ " recvBytes=" + std::to_string(g_bytesRecv.load())
 				+ " recvPackets=" + std::to_string(packetsIn)
 				+ " avgIn=" + std::to_string(packetsIn ? g_bytesRecv.load() / packetsIn : 0)
+				+ " udpOut=" + std::to_string(g_udpPacketsSent.load())
+				+ " tcpOut=" + std::to_string(g_tcpPacketsSent.load())
+				+ " udpIn=" + std::to_string(g_udpPacketsRecv.load())
+				+ " tcpIn=" + std::to_string(g_tcpPacketsRecv.load())
 				+ " | outboundParse calls=" + std::to_string(calls)
 				+ " totalUs=" + std::to_string(g_outboundNanos.load() / 1000)
 				+ " avgUs=" + std::to_string(calls ? (g_outboundNanos.load() / 1000) / calls : 0);
@@ -1427,6 +1800,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
 
 		if (g_receiver.joinable())
 			g_receiver.join();
+
+		if (g_tcpReceiver.joinable())
+			g_tcpReceiver.join();
 
 		break;
 	}

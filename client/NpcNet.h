@@ -13,7 +13,8 @@ namespace w3mp {
 		Despawn = 2,
 		Kill = 3,
 		Promote = 4,
-		ReleaseLocal = 5
+		ReleaseLocal = 5,
+		YieldLocal = 6
 	};
 
 	struct ReplicaCommand
@@ -71,6 +72,8 @@ namespace w3mp {
 			int localCount,
 			const std::string& typeCode,
 			const std::string& appearance,
+			const std::string& identityKey,
+			int identityFlags,
 			float x,
 			float y,
 			float z,
@@ -84,9 +87,10 @@ namespace w3mp {
 
 		static int Pull();
 		static const ReplicaCommand* Command(int index);
-		static void Bind(int index, int localGuid);
-		static void BindCanonical(int canonicalId, int localGuid);
+		static void Bind(int index, int localGuid, int kind);
+		static void BindCanonical(int canonicalId, int localGuid, int kind);
 		static void Forget(int canonicalId);
+		static void Decline(int canonicalId);
 		static void Take(int canonicalId, int localGuid);
 		static void MarkUnspawnable(int canonicalId);
 		static void SetSuspended(bool suspended);

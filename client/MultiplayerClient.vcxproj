@@ -83,7 +83,10 @@
     <TargetName>WitcherOnlineClient</TargetName>
     <OutDir>$(GameDir)bin\x64\</OutDir>
   </PropertyGroup>
-  <Target Name="DeployToDx12" AfterTargets="Build" Condition="'$(Platform)'=='x64'">
+  <PropertyGroup Condition="'$(Platform)'=='x64' and '$(SkipGameDeploy)'=='true'">
+    <OutDir>$(MSBuildProjectDirectory)\build\validation\</OutDir>
+  </PropertyGroup>
+  <Target Name="DeployToDx12" AfterTargets="Build" Condition="'$(Platform)'=='x64' and '$(SkipGameDeploy)'!='true'">
     <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(GameDir)bin\x64_dx12\" ContinueOnError="false" />
     <Message Importance="high" Text="Deployed $(TargetFileName) to bin\x64 and bin\x64_dx12" />
   </Target>
@@ -167,6 +170,7 @@
     <ClInclude Include="GameModule.h" />
     <ClInclude Include="InlineHook.h" />
     <ClInclude Include="NpcNet.h" />
+    <ClInclude Include="PacketCodec.h" />
     <ClInclude Include="SaveTransfer.h" />
     <ClInclude Include="pch.h" />
     <ClInclude Include="ScriptBinding.h" />
@@ -177,6 +181,7 @@
     <ClCompile Include="dllmain.cpp" />
     <ClCompile Include="GameModule.cpp" />
     <ClCompile Include="NpcNet.cpp" />
+    <ClCompile Include="PacketCodec.cpp" />
     <ClCompile Include="SaveTransfer.cpp" />
     <ClCompile Include="InlineHook.cpp" />
     <ClCompile Include="pch.cpp">

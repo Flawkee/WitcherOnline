@@ -1211,6 +1211,13 @@ statemachine class r_MultiplayerClient
         sceneMoveNoticeShown = false;
         sceneJoinRetryPrompted = false;
 
+        WO_Note("[scene_sync] received path=" + scenePath
+            + " from=" + who
+            + " busy=" + isBusyForSceneJoin()
+            + " actor=" + actorX + "," + actorY + "," + actorZ
+            + " scene=" + sceneX + "," + sceneY + "," + sceneZ
+            + " entry=" + entryX + "," + entryY + "," + entryZ);
+
         scenePendingUntil = theGame.GetEngineTimeAsSeconds() + SCENE_CALL_LIFETIME;
 
         updateScenePending();
@@ -1247,6 +1254,7 @@ statemachine class r_MultiplayerClient
             {
                 sceneWaitNoticeShown = true;
                 theGame.GetGuiManager().ShowNotification(GetLocStringById(2111114312));
+                WO_Note("[scene_sync] queued path=" + sceneJoinPath + " while local client is busy");
             }
 
             return;
@@ -1335,6 +1343,9 @@ statemachine class r_MultiplayerClient
             {
                 sceneMoveNoticeShown = true;
                 theGame.GetGuiManager().ShowNotification(GetLocStringById(2111114313));
+                WO_Note("[scene_sync] executing path=" + sceneJoinPath
+                    + " entry=" + sceneJoinEntryPos.X + "," + sceneJoinEntryPos.Y + "," + sceneJoinEntryPos.Z
+                    + " actor=" + sceneJoinActorPos.X + "," + sceneJoinActorPos.Y + "," + sceneJoinActorPos.Z);
             }
 
             stopRiding();
@@ -2883,6 +2894,38 @@ statemachine class r_MultiplayerClient
         mpghosts_playSound('gui_global_panel_open');
     }
 
+    public function onTeleportResult(status : int, user : string, area : int, x : float, y : float, z : float)
+    {
+        var destination : Vector;
+
+        if(status == 0)
+        {
+            notice(StrReplace(GetLocStringById(2111114281), "%s", user));
+            return;
+        }
+
+        if(status != 1)
+        {
+            notice(StrReplace(GetLocStringById(2111114321), "%s", user));
+            return;
+        }
+
+        destination = Vector(x, y, z);
+        theGame.GetGuiManager().ShowNotification(GetLocStringById(2111114210) + " " + user);
+
+        if(area == theGame.GetCommonMapManager().GetCurrentArea())
+        {
+            thePlayer.Teleport(destination);
+        }
+        else
+        {
+            theGame.ScheduleWorldChangeToPosition(
+                theGame.GetCommonMapManager().GetWorldPathFromAreaType(area),
+                destination,
+                thePlayer.GetWorldRotation());
+        }
+    }
+
     public function leaveParty()
     {
         if(!inParty)
@@ -3291,6 +3334,10 @@ statemachine class r_MultiplayerClient
             else if(reason == "same")
             {
                 notice(StrReplace(GetLocStringById(2111114284), "%s", who));
+            }
+            else if(reason == "far")
+            {
+                notice(StrReplace(GetLocStringById(2111114320), "%s", who));
             }
 
             return;
@@ -6030,7 +6077,7 @@ statemachine class r_MultiplayerClient
             setInGame(true);
         }
 
-        WO_PumpInbound(128);
+        WO_PumpInbound(64);
         WO_PumpStatus();
         setReceived();
 
@@ -9305,26 +9352,7 @@ exec function chat(msg : string)
 
 function mpghosts_teleport(user :string)
 {
-    var players : array<r_RemotePlayer>;
-    var i : int;
-    players = theGame.r_getMultiplayerClient().getGlobalPlayers();
-
-    for(i = 0; i < players.Size(); i+=1)
-    {
-        if(players[i].username == user)
-        {
-            theGame.GetGuiManager().ShowNotification(GetLocStringById(2111114210) + " " + user);
-            if(players[i].area == theGame.GetCommonMapManager().GetCurrentArea())
-            {
-                thePlayer.Teleport(players[i].pos);
-            }
-            else
-            {
-                theGame.ScheduleWorldChangeToPosition( theGame.GetCommonMapManager().GetWorldPathFromAreaType(players[i].area), players[i].pos, thePlayer.GetWorldRotation() );
-            }
-            return;
-        }
-    }
+    WO_TeleportRequest(user);
 }
 
 function mpghosts_getPlayer(user : string) : r_RemotePlayer
@@ -9803,17 +9831,7 @@ exec function emotes()
 
 exec function join(val : string)
 {
-    var remotePlayer : r_RemotePlayer;
-    remotePlayer = mpghosts_getPlayer(val);
-
-    if(remotePlayer)
-    {
-        theGame.r_getMultiplayerClient().joinParty(remotePlayer.username);
-    }
-    else
-    {
-        GetWitcherPlayer().DisplayHudMessage(GetLocStringById(2111114232));
-    }
+    theGame.r_getMultiplayerClient().joinParty(val);
 }
 
 exec function leave()
