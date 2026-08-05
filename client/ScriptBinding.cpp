@@ -2372,6 +2372,98 @@ namespace w3mp {
 		NpcNet::AckTerminal(canonicalId, revision);
 	}
 
+	static void WO_NpcBehaviorSend(void* context, void* frame, void* result)
+	{
+		const int guid = ReadIntParameter(frame);
+		const int kind = ReadIntParameter(frame);
+		const int sourceSequence = ReadIntParameter(frame);
+		RedString eventText{};
+		ReadStringParameter(frame, eventText);
+		const int int0 = ReadIntParameter(frame);
+		const int int1 = ReadIntParameter(frame);
+		const float x = ReadFloatParameter(frame);
+		const float y = ReadFloatParameter(frame);
+		const float z = ReadFloatParameter(frame);
+		const float heading = ReadFloatParameter(frame);
+		AdvanceFrame(frame);
+
+		const bool sent = NpcNet::ReportBehavior(
+			guid, kind, sourceSequence, NarrowPayload(eventText),
+			int0, int1, x, y, z, heading);
+		if (result)
+			*static_cast<bool*>(result) = sent;
+	}
+
+	static void WO_NpcBehaviorCount(void* context, void* frame, void* result)
+	{
+		AdvanceFrame(frame);
+		if (result)
+			*static_cast<int*>(result) = NpcNet::PullBehaviors();
+	}
+
+	static void WO_NpcBehaviorInt(void* context, void* frame, void* result)
+	{
+		const int index = ReadIntParameter(frame);
+		const int field = ReadIntParameter(frame);
+		AdvanceFrame(frame);
+		const NpcBehaviorEvent* event = NpcNet::Behavior(index);
+		int value = 0;
+		if (event)
+		{
+			switch (field)
+			{
+			case 0: value = event->canonicalId; break;
+			case 1: value = event->lifecycleRevision; break;
+			case 2: value = event->authorityRevision; break;
+			case 3: value = event->sequence; break;
+			case 4: value = event->kind; break;
+			case 5: value = event->sourceSequence; break;
+			case 6: value = event->int0; break;
+			case 7: value = event->int1; break;
+			default: break;
+			}
+		}
+		if (result)
+			*static_cast<int*>(result) = value;
+	}
+
+	static void WO_NpcBehaviorFloat(void* context, void* frame, void* result)
+	{
+		const int index = ReadIntParameter(frame);
+		const int field = ReadIntParameter(frame);
+		AdvanceFrame(frame);
+		const NpcBehaviorEvent* event = NpcNet::Behavior(index);
+		float value = 0.0f;
+		if (event)
+		{
+			switch (field)
+			{
+			case 0: value = event->x; break;
+			case 1: value = event->y; break;
+			case 2: value = event->z; break;
+			case 3: value = event->heading; break;
+			default: break;
+			}
+		}
+		if (result)
+			*static_cast<float*>(result) = value;
+	}
+
+	static void WO_NpcBehaviorName(void* context, void* frame, void* result)
+	{
+		const int index = ReadIntParameter(frame);
+		AdvanceFrame(frame);
+		const NpcBehaviorEvent* event = NpcNet::Behavior(index);
+		WriteStringResult(result, event ? event->eventName : std::string());
+	}
+
+	static void WO_NpcBehaviorAck(void* context, void* frame, void* result)
+	{
+		const int index = ReadIntParameter(frame);
+		AdvanceFrame(frame);
+		NpcNet::AckBehavior(index);
+	}
+
 	static void WO_NpcBindId(void* context, void* frame, void* result)
 	{
 		const int canonicalId = ReadIntParameter(frame);
@@ -2871,6 +2963,12 @@ namespace w3mp {
 		RegisterOne(L"WO_NpcTerminalRevision", reinterpret_cast<void*>(&WO_NpcTerminalRevision), "WO_NpcTerminalRevision");
 		RegisterOne(L"WO_NpcTerminalAttacker", reinterpret_cast<void*>(&WO_NpcTerminalAttacker), "WO_NpcTerminalAttacker");
 		RegisterOne(L"WO_NpcTerminalAck", reinterpret_cast<void*>(&WO_NpcTerminalAck), "WO_NpcTerminalAck");
+		RegisterOne(L"WO_NpcBehaviorSend", reinterpret_cast<void*>(&WO_NpcBehaviorSend), "WO_NpcBehaviorSend");
+		RegisterOne(L"WO_NpcBehaviorCount", reinterpret_cast<void*>(&WO_NpcBehaviorCount), "WO_NpcBehaviorCount");
+		RegisterOne(L"WO_NpcBehaviorInt", reinterpret_cast<void*>(&WO_NpcBehaviorInt), "WO_NpcBehaviorInt");
+		RegisterOne(L"WO_NpcBehaviorFloat", reinterpret_cast<void*>(&WO_NpcBehaviorFloat), "WO_NpcBehaviorFloat");
+		RegisterOne(L"WO_NpcBehaviorName", reinterpret_cast<void*>(&WO_NpcBehaviorName), "WO_NpcBehaviorName");
+		RegisterOne(L"WO_NpcBehaviorAck", reinterpret_cast<void*>(&WO_NpcBehaviorAck), "WO_NpcBehaviorAck");
 		RegisterOne(L"WO_NpcType", reinterpret_cast<void*>(&WO_NpcType), "WO_NpcType");
 		RegisterOne(L"WO_NpcAppearance", reinterpret_cast<void*>(&WO_NpcAppearance), "WO_NpcAppearance");
 		RegisterOne(L"WO_NpcBind", reinterpret_cast<void*>(&WO_NpcBind), "WO_NpcBind");

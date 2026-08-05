@@ -1122,7 +1122,7 @@ public class WitcherServer
 
         if ("NPCADD".equals(opcode))
         {
-            final int stride = 16;
+            final int stride = 17;
 
             Long snapshotMs = parseLongOrNull(fields.get(0));
             Integer count = fields.size() > 1 ? parseIntegerOrNull(fields.get(1)) : null;
@@ -1167,10 +1167,12 @@ public class WitcherServer
                 Integer terminalAttacker = parseIntegerOrNull(fields.get(base + 13));
                 String identityKey = sanitizeToken(fields.get(base + 14));
                 Integer identityFlags = parseIntegerOrNull(fields.get(base + 15));
+                Integer replacementGuid = parseIntegerOrNull(fields.get(base + 16));
 
                 if (area == null || x == null || y == null || z == null || heading == null
                         || hp == null || flags == null || target == null || localCount == null
-                        || terminalState == null || terminalAttacker == null || identityFlags == null)
+                        || terminalState == null || terminalAttacker == null || identityFlags == null
+                        || replacementGuid == null)
                 {
                     continue;
                 }
@@ -1183,10 +1185,31 @@ public class WitcherServer
                 NpcRegistry.Npc admitted = null;
                 NpcRegistry.Npc forcedBinding = null;
 
+                if (!rejectedQuestType && replacementGuid != 0)
+                {
+                    admitted = NpcRegistry.remapPersistent(
+                            session.playerId,
+                            replacementGuid,
+                            guid,
+                            typeCode,
+                            identityKey,
+                            identityFlags,
+                            now);
+
+                    if (admitted != null)
+                    {
+                        dbg("NPC %s REMAPPED | owner=%s guid=%d -> %d\n",
+                                NpcRegistry.describeNpc(admitted),
+                                describePlayerId(session.playerId),
+                                replacementGuid,
+                                guid);
+                    }
+                }
+
                 NpcRegistry.Binding existingBinding = NpcRegistry.bindingByGuid(session.playerId, guid);
                 boolean exactBindingMatches = NpcRegistry.bindingIdentityMatches(
                         existingBinding, typeCode, sanitizeToken(fields.get(base + 3)), identityKey);
-                if (exactBindingMatches)
+                if (admitted == null && exactBindingMatches)
                 {
                     NpcRegistry.Npc bound = NpcRegistry.get(existingBinding.canonicalId);
                     if (bound != null && (!bound.alive
@@ -1200,7 +1223,7 @@ public class WitcherServer
                     }
                 }
 
-                if (forcedBinding == null && !exactBindingMatches && !rejectedQuestType)
+                if (admitted == null && forcedBinding == null && !exactBindingMatches && !rejectedQuestType)
                 {
                     forcedBinding = NpcRegistry.findIdentityBindable(
                             session.playerId,
@@ -1211,7 +1234,7 @@ public class WitcherServer
                             identityFlags);
                 }
 
-                if (forcedBinding == null && !exactBindingMatches && !rejectedQuestType)
+                if (admitted == null && forcedBinding == null && !exactBindingMatches && !rejectedQuestType)
                 {
                     forcedBinding = NpcRegistry.findBindable(
                             session.playerId,
@@ -1225,16 +1248,16 @@ public class WitcherServer
                             claimedBindings);
                 }
 
-                if (forcedBinding != null)
+                if (admitted == null && forcedBinding != null)
                 {
                     admitted = null;
                 }
-                else if (rejectedQuestType)
+                else if (admitted == null && rejectedQuestType)
                 {
                     dbg("QFOE invalid type rejected from %s guid=%d\n",
                             describePlayerId(session.playerId), guid);
                 }
-                else
+                else if (admitted == null)
                 {
                     admitted = NpcRegistry.upsert(
                             session.playerId,
@@ -1709,6 +1732,7 @@ public class WitcherServer
                 else
                 {
                     int replayed = NpcRegistry.requestDeathReplayForKnown(session, now);
+                    NpcRegistry.requestBehaviorReplayForKnown(session);
 
                     if (replayed > 0)
                     {
@@ -2064,6 +2088,85 @@ public class WitcherServer
             return;
         }
 
+        if ("NPCEVT".equals(opcode))
+        {
+            if (fields.size() < 13)
+            {
+                malformedPackets.incrementAndGet();
+                return;
+            }
+
+            Integer clientEventId = parseIntegerOrNull(fields.get(0));
+            Integer canonicalId = parseIntegerOrNull(fields.get(1));
+            Integer localGuid = parseIntegerOrNull(fields.get(2));
+            Integer authorityRevision = parseIntegerOrNull(fields.get(3));
+            Integer kind = parseIntegerOrNull(fields.get(4));
+            Integer sourceSequence = parseIntegerOrNull(fields.get(5));
+            String eventName = sanitizeToken(fields.get(6));
+            Integer int0 = parseIntegerOrNull(fields.get(7));
+            Integer int1 = parseIntegerOrNull(fields.get(8));
+            Double x = parseDoubleOrNull(fields.get(9));
+            Double y = parseDoubleOrNull(fields.get(10));
+            Double z = parseDoubleOrNull(fields.get(11));
+            Double heading = parseDoubleOrNull(fields.get(12));
+
+            if (clientEventId == null || canonicalId == null || localGuid == null
+                    || authorityRevision == null || kind == null || sourceSequence == null
+                    || "-".equals(eventName) || int0 == null || int1 == null
+                    || x == null || y == null || z == null || heading == null)
+            {
+                malformedPackets.incrementAndGet();
+                return;
+            }
+
+            NpcRegistry.recordBehavior(
+                    session.playerId,
+                    clientEventId,
+                    canonicalId,
+                    localGuid,
+                    authorityRevision,
+                    kind,
+                    sourceSequence,
+                    eventName,
+                    int0,
+                    int1,
+                    x,
+                    y,
+                    z,
+                    heading,
+                    activeSessions(),
+                    now);
+            return;
+        }
+
+        if ("NPCEACK".equals(opcode))
+        {
+            Integer count = parseIntegerOrNull(fields.get(0));
+            if (count == null || count < 0)
+            {
+                malformedPackets.incrementAndGet();
+                return;
+            }
+
+            for (int i = 0; i < count; i++)
+            {
+                int base = 1 + i * 3;
+                if (base + 3 > fields.size())
+                {
+                    break;
+                }
+                Integer canonicalId = parseIntegerOrNull(fields.get(base));
+                Integer lifecycleRevision = parseIntegerOrNull(fields.get(base + 1));
+                Integer sequence = parseIntegerOrNull(fields.get(base + 2));
+                if (canonicalId != null && lifecycleRevision != null && sequence != null)
+                {
+                    NpcRegistry.acknowledgeBehavior(
+                            session.playerId, canonicalId, lifecycleRevision, sequence);
+                }
+            }
+            return;
+        }
+
         if (unroutedOpcodes.add(opcode))
         {
             dbg("WARNING unhandled opcode %s accepted but no handler claimed it (check isUpdateOpcode vs handleNpcMessage)\n",
@@ -2298,6 +2401,7 @@ public class WitcherServer
                     }
                     relayPauseStates(socket, sessions);
                     relayDeaths(socket, sessions, now);
+                    relayBehaviorEvents(sessions, now);
                     if (tickCounter % PLAYER_VIS_TICK_DIVIDER == 0)
                     {
                         relayVisibility(socket, sessions, now);
@@ -2546,6 +2650,49 @@ public class WitcherServer
         Integer id = playerParty.get(usernameKey);
 
         return (id == null) ? null : parties.get(id);
+    }
+
+    private static void relayBehaviorEvents(List<PlayerSession> sessions, long now)
+    {
+        Map<Integer, PlayerSession> byId = new HashMap<>();
+        for (PlayerSession session : sessions)
+        {
+            byId.put(session.playerId, session);
+        }
+
+        for (NpcRegistry.BehaviorEvent event : NpcRegistry.pendingBehaviorEvents(now))
+        {
+            NpcRegistry.Npc npc = NpcRegistry.get(event.canonicalId);
+            for (Integer playerId : new ArrayList<>(event.pending))
+            {
+                PlayerSession session = byId.get(playerId);
+                if (session == null || session.paused
+                        || npc == null || !session.knownNpcs.contains(npc.boxedId)
+                        || !NpcRegistry.sharesSyncGroup(session, npc)
+                        || !NpcRegistry.behaviorReadyForSend(event, playerId, now))
+                {
+                    continue;
+                }
+
+                List<String> fields = new ArrayList<>();
+                fields.add("1");
+                fields.add(Integer.toString(event.canonicalId));
+                fields.add(Integer.toString(event.lifecycleRevision));
+                fields.add(Integer.toString(event.authorityRevision));
+                fields.add(Integer.toString(event.sequence));
+                fields.add(Integer.toString(event.kind));
+                fields.add(Integer.toString(event.sourceSequence));
+                fields.add(event.eventName);
+                fields.add(Integer.toString(event.int0));
+                fields.add(Integer.toString(event.int1));
+                fields.add(Double.toString(event.x));
+                fields.add(Double.toString(event.y));
+                fields.add(Double.toString(event.z));
+                fields.add(Double.toString(event.heading));
+                queueOutbound(session, "NPCEVTF", fields);
+                NpcRegistry.markBehaviorSent(event, playerId, now);
+            }
+        }
     }
 
     static int scaleMilliFor(int playerCount, int partyId)
@@ -3884,6 +4031,7 @@ public class WitcherServer
                                 ? NpcRegistry.BINDING_NATIVE
                                 : NpcRegistry.BINDING_SYNTHETIC,
                         nowNanos);
+                NpcRegistry.addDurableBehaviorRecipient(npc, session.playerId);
                 if (!npc.alive && NpcRegistry.isQuestFoe(npc))
                 {
                     NpcRegistry.requestDeathReplay(npc, session.playerId, nowNanos);
@@ -5647,10 +5795,11 @@ public class WitcherServer
         if (line.equals("npc") || line.equals("npcstats"))
         {
             dbg("---- NPC sync ----\n");
-            dbg("npcs=%d admitted=%d rejectedDuplicate=%d\n",
+            dbg("npcs=%d admitted=%d rejectedDuplicate=%d behaviorPending=%d\n",
                     NpcRegistry.npcCount(),
                     NpcRegistry.admittedCount(),
-                    NpcRegistry.rejectedDuplicateCount());
+                    NpcRegistry.rejectedDuplicateCount(),
+                    NpcRegistry.pendingBehaviorCount());
 
             for (PlayerSession session : players.values())
             {
@@ -6813,6 +6962,7 @@ public class WitcherServer
         synchronized (NPC_WORLD_LOCK)
         {
             NpcRegistry.orphanNpcsOwnedBy(session.playerId, System.nanoTime());
+            NpcRegistry.forgetBehaviorRecipient(session.playerId);
         }
 
         String ip = normalizeIp(session.remoteIp);

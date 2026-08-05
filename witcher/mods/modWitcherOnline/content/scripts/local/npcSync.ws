@@ -9,6 +9,7 @@ class r_TrackedNpc
     public var lastTargetId : int;
     public var offerLocalCount : int;
     public var actionSeq  : int;
+    public var behaviorSeq : int;
     public var actionCode : int;
     public var actionType : int;
     public var actionDir  : int;
@@ -41,6 +42,7 @@ class r_TrackedNpc
     default lastTargetId = 0;
     default offerLocalCount = 1;
     default actionSeq = 0;
+    default behaviorSeq = 0;
     default actionCode = 0;
     default actionType = 0;
     default actionDir = 0;
@@ -469,6 +471,7 @@ class r_NpcSync
     {
         var index : int;
         var code : int;
+        var kind : int;
 
         if(!actor || !enabled || suspended)
         {
@@ -483,11 +486,28 @@ class r_NpcSync
         }
 
         code = getActions().codeFor(eventName);
+        kind = getActions().kindFor(eventName);
 
         tracked[index].actionSeq = (tracked[index].actionSeq + 1) & 63;
         tracked[index].actionCode = code;
         tracked[index].actionType = (int)actor.GetBehaviorVariable('AttackType');
         tracked[index].actionDir = (int)actor.GetBehaviorVariable('targetDirection');
+
+        if(kind != 1)
+        {
+            tracked[index].behaviorSeq += 1;
+            WO_NpcBehaviorSend(
+                tracked[index].npcId,
+                kind,
+                tracked[index].behaviorSeq,
+                NameToString(eventName),
+                tracked[index].actionType,
+                tracked[index].actionDir,
+                0.0,
+                0.0,
+                0.0,
+                actor.GetHeading());
+        }
 
         statActionSent += 1;
 
@@ -541,7 +561,17 @@ class r_NpcSync
         attackType = (flags / 512) & 63;
         dir = (flags / 32768) & 7;
 
+        if(code == 8191)
+        {
+            return;
+        }
+
         eventName = getActions().nameFor(code);
+
+        if(getActions().kindFor(eventName) != 1)
+        {
+            return;
+        }
 
         record.pendingActionAt = theGame.GetEngineTimeAsSeconds();
         record.pendingType = attackType;
@@ -820,6 +850,7 @@ class r_NpcSync
 
         applyDrops(now);
         applyKillOrders();
+        applyBehaviorEvents(now);
 
         if(now >= nextDriveTickAt)
         {
@@ -842,6 +873,87 @@ class r_NpcSync
             writeDebug(now);
         }
 
+    }
+
+    private function behaviorBlocked(blocked : array<int>, canonicalId : int) : bool
+    {
+        var i : int;
+
+        for(i = 0; i < blocked.Size(); i += 1)
+        {
+            if(blocked[i] == canonicalId)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function applyBehaviorEvents(now : float)
+    {
+        var applied : array<int>;
+        var blocked : array<int>;
+        var count : int;
+        var canonicalId : int;
+        var index : int;
+        var i : int;
+        var eventName : name;
+        var accepted : bool;
+
+        count = WO_NpcBehaviorCount();
+
+        for(i = 0; i < count; i += 1)
+        {
+            canonicalId = WO_NpcBehaviorInt(i, 0);
+
+            if(behaviorBlocked(blocked, canonicalId))
+            {
+                continue;
+            }
+
+            index = findReplica(canonicalId);
+
+            if(index < 0 || !replicas[index].actor)
+            {
+                blocked.PushBack(canonicalId);
+                continue;
+            }
+
+            eventName = WO_ToName(WO_NpcBehaviorName(i));
+            accepted = false;
+
+            replicas[index].pendingActionAt = now;
+            replicas[index].pendingType = WO_NpcBehaviorInt(i, 6);
+            replicas[index].pendingDir = WO_NpcBehaviorInt(i, 7);
+            accepted = replicas[index].actor.RaiseForceEvent(eventName);
+
+            if(!accepted)
+            {
+                accepted = replicas[index].actor.RaiseEvent(eventName);
+            }
+
+            if(accepted)
+            {
+                replicas[index].lastActionAt = now;
+                replicas[index].pendingActionAt = -1.0;
+                statActionApplied += 1;
+                statActionForced += 1;
+            }
+            if(accepted)
+            {
+                applied.PushBack(i);
+            }
+            else
+            {
+                blocked.PushBack(canonicalId);
+            }
+        }
+
+        for(i = applied.Size() - 1; i >= 0; i -= 1)
+        {
+            WO_NpcBehaviorAck(applied[i]);
+        }
     }
 
     private function updateSuspension(now : float) : bool

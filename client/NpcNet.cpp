@@ -42,6 +42,8 @@ namespace w3mp {
 		constexpr float kHeadingDeadband = 2.0f;
 		constexpr int kTimeSyncIntervalMs = 1000;
 		constexpr int kMaxPendingHits = 64;
+		constexpr int kIdentityRemapWindowMs = 60000;
+		constexpr int kPersistentConflictDelayMs = 1200;
 
 		struct TransformSample
 		{
@@ -67,6 +69,9 @@ namespace w3mp {
 			std::string appearance;
 			std::string identityKey;
 			int identityFlags = 0;
+			int replacementGuid = 0;
+			bool persistentConflict = false;
+			long long persistentConflictSinceMs = 0;
 			int canonicalId = 0;
 			int authorityRevision = 0;
 			int fastSequence = 0;
@@ -102,6 +107,13 @@ namespace w3mp {
 			int reliableTarget = -1;
 			int reliableTerminalState = -1;
 			int reliableTerminalAttacker = -1;
+		};
+
+		struct RetiredIdentity
+		{
+			int guid = 0;
+			std::string typeCode;
+			long long retiredAtMs = 0;
 		};
 
 		struct Replica
@@ -158,12 +170,15 @@ namespace w3mp {
 		PacketSender g_sender;
 
 		std::unordered_map<int, OwnedEntity> g_owned;
+		std::unordered_multimap<std::string, RetiredIdentity> g_retiredIdentities;
 		std::vector<int> g_ownedRemoved;
 		std::unordered_map<int, Replica> g_replicas;
 
 		std::vector<ReplicaCommand> g_commands;
 		std::vector<InboundHit> g_hits;
 		std::vector<HitAck> g_acks;
+		std::vector<NpcBehaviorEvent> g_behaviorEvents;
+		std::unordered_map<int, std::pair<int, int>> g_behaviorApplied;
 		std::vector<PendingHit> g_pending;
 		std::vector<std::string> g_ackQueue;
 		std::vector<DropOrder> g_dropOrders;
@@ -197,6 +212,110 @@ namespace w3mp {
 		using Outbox = std::vector<std::pair<const char*, std::vector<std::string>>>;
 
 		int g_nextEventId = 1;
+		int g_nextBehaviorEventId = 1;
+
+		void RetireIdentity(const OwnedEntity& entity, long long now)
+		{
+			if (entity.guid == 0 || (entity.identityFlags & 1) == 0
+				|| entity.identityKey.empty() || entity.identityKey == "-")
+			{
+				return;
+			}
+
+			auto range = g_retiredIdentities.equal_range(entity.identityKey);
+			for (auto it = range.first; it != range.second;)
+			{
+				if (it->second.guid == entity.guid)
+					it = g_retiredIdentities.erase(it);
+				else
+					++it;
+			}
+			g_retiredIdentities.emplace(
+				entity.identityKey,
+				RetiredIdentity{ entity.guid, entity.typeCode, now });
+		}
+
+		void PruneRetiredIdentities(long long now)
+		{
+			for (auto it = g_retiredIdentities.begin(); it != g_retiredIdentities.end();)
+			{
+				if (now - it->second.retiredAtMs > kIdentityRemapWindowMs)
+					it = g_retiredIdentities.erase(it);
+				else
+					++it;
+			}
+		}
+
+		void ResolvePersistentReplacements(long long now)
+		{
+			std::vector<std::pair<int, int>> replacements;
+
+			for (auto& nextPair : g_owned)
+			{
+				OwnedEntity& next = nextPair.second;
+				if (next.registered || next.registrationPending || next.replacementGuid != 0
+					|| (next.identityFlags & 1) == 0 || next.identityKey.empty()
+					|| next.identityKey == "-")
+				{
+					next.persistentConflict = false;
+					next.persistentConflictSinceMs = 0;
+					continue;
+				}
+
+				OwnedEntity* previous = nullptr;
+				int matches = 0;
+				for (auto& oldPair : g_owned)
+				{
+					OwnedEntity& old = oldPair.second;
+					if (old.guid == next.guid || !old.registered
+						|| old.typeCode != next.typeCode || old.identityKey != next.identityKey)
+					{
+						continue;
+					}
+					previous = &old;
+					matches++;
+				}
+
+				if (matches != 1 || previous == nullptr)
+				{
+					if (matches > 0)
+					{
+						if (next.persistentConflictSinceMs == 0)
+							next.persistentConflictSinceMs = now;
+						next.persistentConflict = now - next.persistentConflictSinceMs < kPersistentConflictDelayMs;
+					}
+					else
+					{
+						next.persistentConflict = false;
+						next.persistentConflictSinceMs = 0;
+					}
+					continue;
+				}
+
+				if (previous->seenThisFrame)
+				{
+					next.persistentConflict = true;
+					next.persistentConflictSinceMs = 0;
+					continue;
+				}
+
+				replacements.push_back({ next.guid, previous->guid });
+			}
+
+			for (const auto& replacement : replacements)
+			{
+				auto next = g_owned.find(replacement.first);
+				auto previous = g_owned.find(replacement.second);
+				if (next == g_owned.end() || previous == g_owned.end())
+					continue;
+				next->second.replacementGuid = previous->second.guid;
+				next->second.persistentConflict = false;
+				next->second.persistentConflictSinceMs = 0;
+				g_ownedRemoved.push_back(previous->second.guid);
+				RetireIdentity(previous->second, now);
+				g_owned.erase(previous);
+			}
+		}
 
 		unsigned long long g_statSnapshotsSent = 0;
 		unsigned long long g_statAdds = 0;
@@ -218,6 +337,9 @@ namespace w3mp {
 		unsigned long long g_statAcksIn = 0;
 		unsigned long long g_statExtrapolated = 0;
 		unsigned long long g_statStarved = 0;
+		unsigned long long g_statBehaviorSent = 0;
+		unsigned long long g_statBehaviorReceived = 0;
+		unsigned long long g_statBehaviorApplied = 0;
 
 		long long NowMs()
 		{
@@ -301,6 +423,48 @@ namespace w3mp {
 		{
 			if (g_sender && fields.size() > 1)
 				g_sender(opcode, fields);
+		}
+
+		void AcknowledgeBehavior(const NpcBehaviorEvent& event)
+		{
+			Send("NPCEACK", {
+				"1",
+				std::to_string(event.canonicalId),
+				std::to_string(event.lifecycleRevision),
+				std::to_string(event.sequence) });
+		}
+
+		bool IsDurableBehavior(int kind)
+		{
+			return kind == 3 || kind == 5 || kind == 6 || kind == 7;
+		}
+
+		void DropTransientBehaviors()
+		{
+			for (auto it = g_behaviorEvents.begin(); it != g_behaviorEvents.end();)
+			{
+				if (IsDurableBehavior(it->kind))
+				{
+					++it;
+					continue;
+				}
+				AcknowledgeBehavior(*it);
+				it = g_behaviorEvents.erase(it);
+			}
+		}
+
+		void DropBehaviorsForCanonical(int canonicalId)
+		{
+			for (auto it = g_behaviorEvents.begin(); it != g_behaviorEvents.end();)
+			{
+				if (it->canonicalId != canonicalId)
+				{
+					++it;
+					continue;
+				}
+				AcknowledgeBehavior(*it);
+				it = g_behaviorEvents.erase(it);
+			}
 		}
 
 		float ShortestAngle(float from, float to)
@@ -426,7 +590,7 @@ namespace w3mp {
 			size_t updBytes = 0;
 			size_t fastBytes = 0;
 
-			addFields.reserve(kAddPerPacket * 16 + 2);
+			addFields.reserve(kAddPerPacket * 17 + 2);
 			updFields.reserve(kUpdPerPacket * 11 + 2);
 			fastFields.reserve(kUpdPerPacket * 10 + 2);
 
@@ -468,6 +632,9 @@ namespace w3mp {
 
 				if (!entity.registered)
 				{
+					if (entity.persistentConflict)
+						continue;
+
 					if (entity.registrationPending
 						&& (now - entity.registrationSentMs) < kRegistrationRetryMs)
 						continue;
@@ -496,6 +663,7 @@ namespace w3mp {
 					addFields.push_back(std::to_string(entity.terminalAttackerId));
 					addFields.push_back(entity.identityKey.empty() ? "-" : entity.identityKey);
 					addFields.push_back(std::to_string(entity.identityFlags));
+					addFields.push_back(std::to_string(entity.replacementGuid));
 
 					entity.registrationPending = true;
 					entity.registrationSentMs = now;
@@ -975,11 +1143,14 @@ namespace w3mp {
 		std::lock_guard<std::mutex> lock(g_mutex);
 
 		g_owned.clear();
+		g_retiredIdentities.clear();
 		g_ownedRemoved.clear();
 		g_replicas.clear();
 		g_commands.clear();
 		g_hits.clear();
 		g_acks.clear();
+		g_behaviorEvents.clear();
+		g_behaviorApplied.clear();
 		g_killOrders.clear();
 		g_dropOrders.clear();
 		g_terminalAcks.clear();
@@ -1048,6 +1219,20 @@ namespace w3mp {
 		if (opcode == "NPCNEW")
 		{
 			HandleSnapshot(fields, true);
+			for (auto it = g_behaviorEvents.begin(); it != g_behaviorEvents.end();)
+			{
+				auto replica = g_replicas.find(it->canonicalId);
+				if (replica != g_replicas.end()
+					&& it->lifecycleRevision < replica->second.lifecycleRevision)
+				{
+					AcknowledgeBehavior(*it);
+					it = g_behaviorEvents.erase(it);
+				}
+				else
+				{
+					++it;
+				}
+			}
 			return;
 		}
 
@@ -1119,6 +1304,7 @@ namespace w3mp {
 
 				const int canonicalId = ParseInt(fields, base);
 				g_terminalAcks.erase(canonicalId);
+				DropBehaviorsForCanonical(canonicalId);
 				auto it = g_replicas.find(canonicalId);
 
 				if (it != g_replicas.end())
@@ -1347,6 +1533,89 @@ namespace w3mp {
 			return;
 		}
 
+		if (opcode == "NPCEVTF")
+		{
+			const int count = ParseInt(fields, 0);
+			const size_t stride = 13;
+
+			for (int i = 0; i < count; ++i)
+			{
+				const size_t base = 1 + static_cast<size_t>(i) * stride;
+				if (base + stride > fields.size())
+					break;
+
+				NpcBehaviorEvent event;
+				event.canonicalId = ParseInt(fields, base);
+				event.lifecycleRevision = ParseInt(fields, base + 1);
+				event.authorityRevision = ParseInt(fields, base + 2);
+				event.sequence = ParseInt(fields, base + 3);
+				event.kind = ParseInt(fields, base + 4);
+				event.sourceSequence = ParseInt(fields, base + 5);
+				event.eventName = Field(fields, base + 6);
+				event.int0 = ParseInt(fields, base + 7);
+				event.int1 = ParseInt(fields, base + 8);
+				event.x = ParseFloat(fields, base + 9);
+				event.y = ParseFloat(fields, base + 10);
+				event.z = ParseFloat(fields, base + 11);
+				event.heading = ParseFloat(fields, base + 12);
+
+				if (event.canonicalId <= 0 || event.lifecycleRevision <= 0
+					|| event.sequence <= 0 || event.kind <= 0 || event.kind > 8
+					|| event.eventName.empty() || event.eventName == "-")
+				{
+					continue;
+				}
+
+				if (g_suspended && !IsDurableBehavior(event.kind))
+				{
+					AcknowledgeBehavior(event);
+					continue;
+				}
+
+				auto applied = g_behaviorApplied.find(event.canonicalId);
+				if (applied != g_behaviorApplied.end()
+					&& applied->second.first == event.lifecycleRevision
+					&& event.sequence <= applied->second.second)
+				{
+					Send("NPCEACK", {
+						"1",
+						std::to_string(event.canonicalId),
+						std::to_string(event.lifecycleRevision),
+						std::to_string(event.sequence) });
+					continue;
+				}
+
+				bool duplicate = false;
+				for (const NpcBehaviorEvent& queued : g_behaviorEvents)
+				{
+					if (queued.canonicalId == event.canonicalId
+						&& queued.lifecycleRevision == event.lifecycleRevision
+						&& queued.sequence == event.sequence)
+					{
+						duplicate = true;
+						break;
+					}
+				}
+
+				if (!duplicate)
+				{
+					g_behaviorEvents.push_back(std::move(event));
+					g_statBehaviorReceived++;
+				}
+			}
+
+			std::sort(g_behaviorEvents.begin(), g_behaviorEvents.end(),
+				[](const NpcBehaviorEvent& a, const NpcBehaviorEvent& b)
+				{
+					if (a.canonicalId != b.canonicalId)
+						return a.canonicalId < b.canonicalId;
+					if (a.lifecycleRevision != b.lifecycleRevision)
+						return a.lifecycleRevision < b.lifecycleRevision;
+					return a.sequence < b.sequence;
+				});
+			return;
+		}
+
 		if (opcode == "NPCSCALE")
 		{
 			const int setId = ParseInt(fields, 0);
@@ -1556,6 +1825,27 @@ namespace w3mp {
 			entity.appearance = appearance;
 			entity.identityKey = identityKey;
 			entity.identityFlags = identityFlags;
+
+			if ((identityFlags & 1) != 0 && !identityKey.empty() && identityKey != "-")
+			{
+				auto range = g_retiredIdentities.equal_range(identityKey);
+				auto retired = range.second;
+				int matches = 0;
+				for (auto candidate = range.first; candidate != range.second; ++candidate)
+				{
+					if (candidate->second.typeCode == typeCode
+						&& g_batchNowMs - candidate->second.retiredAtMs <= kIdentityRemapWindowMs)
+					{
+						retired = candidate;
+						matches++;
+					}
+				}
+				if (matches == 1)
+				{
+					entity.replacementGuid = retired->second.guid;
+					g_retiredIdentities.erase(retired);
+				}
+			}
 		}
 		else if (entity.appearance != appearance || entity.typeCode != typeCode)
 		{
@@ -1598,11 +1888,13 @@ namespace w3mp {
 
 		if (suspended)
 		{
+			DropTransientBehaviors();
 			std::vector<std::string> freeFields;
 			int freeCount = 0;
 
 			for (auto& pair : g_owned)
 			{
+				RetireIdentity(pair.second, NowMs());
 				g_scales.erase(pair.first);
 
 				if (!pair.second.registered && !pair.second.registrationPending)
@@ -1648,6 +1940,8 @@ namespace w3mp {
 			std::lock_guard<std::mutex> lock(g_mutex);
 
 			const long long now = NowMs();
+			PruneRetiredIdentities(now);
+			ResolvePersistentReplacements(now);
 
 			if (g_suspended)
 			{
@@ -1664,7 +1958,10 @@ namespace w3mp {
 				}
 
 				if (it->second.registered)
+				{
 					g_ownedRemoved.push_back(it->first);
+					RetireIdentity(it->second, now);
+				}
 
 				g_scales.erase(it->first);
 				it = g_owned.erase(it);
@@ -2123,6 +2420,7 @@ namespace w3mp {
 	void NpcNet::Forget(int canonicalId)
 	{
 		std::lock_guard<std::mutex> lock(g_mutex);
+		DropBehaviorsForCanonical(canonicalId);
 		g_replicas.erase(canonicalId);
 	}
 
@@ -2154,6 +2452,82 @@ namespace w3mp {
 		Send("NPCTERM", { "1", std::to_string(canonicalId), std::to_string(revision) });
 	}
 
+	bool NpcNet::ReportBehavior(
+		int guid,
+		int kind,
+		int sourceSequence,
+		const std::string& eventName,
+		int int0,
+		int int1,
+		float x,
+		float y,
+		float z,
+		float heading)
+	{
+		std::lock_guard<std::mutex> lock(g_mutex);
+
+		auto owned = g_owned.find(guid);
+		if (owned == g_owned.end() || !owned->second.registered
+			|| owned->second.canonicalId <= 0 || owned->second.authorityRevision <= 0
+			|| kind <= 0 || kind > 8 || eventName.empty() || eventName == "-")
+		{
+			return false;
+		}
+
+		const int clientEventId = g_nextBehaviorEventId++;
+		Send("NPCEVT", {
+			std::to_string(clientEventId),
+			std::to_string(owned->second.canonicalId),
+			std::to_string(guid),
+			std::to_string(owned->second.authorityRevision),
+			std::to_string(kind),
+			std::to_string(sourceSequence),
+			eventName,
+			std::to_string(int0),
+			std::to_string(int1),
+			FormatFloat(x),
+			FormatFloat(y),
+			FormatFloat(z),
+			FormatFloat(heading) });
+		g_statBehaviorSent++;
+		return true;
+	}
+
+	int NpcNet::PullBehaviors()
+	{
+		std::lock_guard<std::mutex> lock(g_mutex);
+		return static_cast<int>(g_behaviorEvents.size());
+	}
+
+	const NpcBehaviorEvent* NpcNet::Behavior(int index)
+	{
+		static thread_local NpcBehaviorEvent event;
+		std::lock_guard<std::mutex> lock(g_mutex);
+		if (index < 0 || index >= static_cast<int>(g_behaviorEvents.size()))
+			return nullptr;
+		event = g_behaviorEvents[index];
+		return &event;
+	}
+
+	void NpcNet::AckBehavior(int index)
+	{
+		std::lock_guard<std::mutex> lock(g_mutex);
+		if (index < 0 || index >= static_cast<int>(g_behaviorEvents.size()))
+			return;
+
+		const NpcBehaviorEvent event = g_behaviorEvents[index];
+		auto& applied = g_behaviorApplied[event.canonicalId];
+		if (applied.first != event.lifecycleRevision || event.sequence > applied.second)
+		{
+			applied.first = event.lifecycleRevision;
+			applied.second = event.sequence;
+		}
+
+		AcknowledgeBehavior(event);
+		g_behaviorEvents.erase(g_behaviorEvents.begin() + index);
+		g_statBehaviorApplied++;
+	}
+
 	void NpcNet::Take(int canonicalId, int localGuid)
 	{
 		std::lock_guard<std::mutex> lock(g_mutex);
@@ -2161,6 +2535,7 @@ namespace w3mp {
 		if (canonicalId <= 0 || localGuid == 0)
 			return;
 
+		DropBehaviorsForCanonical(canonicalId);
 		g_replicas.erase(canonicalId);
 
 		auto scale = g_scales.find(canonicalId);
@@ -2343,6 +2718,10 @@ namespace w3mp {
 			+ " acksIn=" + std::to_string(g_statAcksIn)
 			+ " extrapolated=" + std::to_string(g_statExtrapolated)
 			+ " starved=" + std::to_string(g_statStarved)
+			+ " behaviorSent=" + std::to_string(g_statBehaviorSent)
+			+ " behaviorIn=" + std::to_string(g_statBehaviorReceived)
+			+ " behaviorApplied=" + std::to_string(g_statBehaviorApplied)
+			+ " behaviorPending=" + std::to_string(g_behaviorEvents.size())
 			+ " pending=" + std::to_string(g_pending.size())
 			+ " latencyMs=" + std::to_string(g_latencyMs)
 			+ " clock=" + (g_clockReady ? "ready" : "cold");

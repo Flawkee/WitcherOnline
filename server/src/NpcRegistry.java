@@ -40,6 +40,10 @@ public final class NpcRegistry
     public static final long UNACKED_DAMAGE_GRACE_NANOS = 1_200_000_000L;
     public static final long QUEST_KILL_ORDER_RETRY_NANOS = 200_000_000L;
     public static final long HANDOVER_IDLE_EVAL_NANOS = 250_000_000L;
+    public static final long BEHAVIOR_EVENT_RETRY_NANOS = 500_000_000L;
+    public static final long BEHAVIOR_EVENT_TRANSIENT_NANOS = 30_000_000_000L;
+    public static final long BEHAVIOR_EVENT_SPAWN_NANOS = 60_000_000_000L;
+    public static final long BEHAVIOR_EVENT_DURABLE_NANOS = 600_000_000_000L;
 
     public static final int MAX_NPCS_PER_OWNER = 250;
     public static final double RESERVATION_RADIUS = 30.0;
@@ -91,6 +95,7 @@ public final class NpcRegistry
         public volatile int authorityRevision = 1;
         public volatile int lifecycleRevision = 1;
         public volatile int lifecycle = LIFECYCLE_ACTIVE;
+        public volatile int behaviorSequence;
         public volatile boolean alive = true;
         public volatile boolean deathBroadcast;
         public final java.util.Map<Integer, Integer> deathSends = new java.util.concurrent.ConcurrentHashMap<>();
@@ -115,6 +120,7 @@ public final class NpcRegistry
         public volatile long lastMigrationNanos;
         public volatile long nextHandoverEvalNanos;
         public final java.util.Map<Integer, Long> declinedUntil = new java.util.concurrent.ConcurrentHashMap<>();
+        public final java.util.Map<Integer, Integer> behaviorClientIds = new java.util.concurrent.ConcurrentHashMap<>();
         public volatile boolean killOrderPending;
         public volatile long lastKillOrderSendNanos;
         public volatile int killOrderSends;
@@ -209,11 +215,88 @@ public final class NpcRegistry
         }
     }
 
+    public static final class BehaviorEvent
+    {
+        public final long key;
+        public final int sourcePlayerId;
+        public final int canonicalId;
+        public final int lifecycleRevision;
+        public final int authorityRevision;
+        public final int sequence;
+        public final int kind;
+        public final int sourceSequence;
+        public final String eventName;
+        public final int int0;
+        public final int int1;
+        public final double x;
+        public final double y;
+        public final double z;
+        public final double heading;
+        public final long expiresNanos;
+        public final java.util.Set<Integer> pending = java.util.concurrent.ConcurrentHashMap.newKeySet();
+        public final java.util.Set<Integer> acknowledged = java.util.concurrent.ConcurrentHashMap.newKeySet();
+        public final java.util.Map<Integer, Long> lastSentNanos = new java.util.concurrent.ConcurrentHashMap<>();
+
+        BehaviorEvent(
+                int sourcePlayerId,
+                int canonicalId,
+                int lifecycleRevision,
+                int authorityRevision,
+                int sequence,
+                int kind,
+                int sourceSequence,
+                String eventName,
+                int int0,
+                int int1,
+                double x,
+                double y,
+                double z,
+                double heading,
+                long now)
+        {
+            this.key = (((long) canonicalId) << 32) | (sequence & 0xFFFFFFFFL);
+            this.sourcePlayerId = sourcePlayerId;
+            this.canonicalId = canonicalId;
+            this.lifecycleRevision = lifecycleRevision;
+            this.authorityRevision = authorityRevision;
+            this.sequence = sequence;
+            this.kind = kind;
+            this.sourceSequence = sourceSequence;
+            this.eventName = eventName;
+            this.int0 = int0;
+            this.int1 = int1;
+            this.x = x;
+            this.y = y;
+            this.z = z;
+            this.heading = heading;
+            this.expiresNanos = now + behaviorRetentionNanos(kind);
+        }
+    }
+
+    private static long behaviorRetentionNanos(int kind)
+    {
+        if (kind == 3 || kind == 5 || kind == 6 || kind == 7)
+        {
+            return BEHAVIOR_EVENT_DURABLE_NANOS;
+        }
+        if (kind == 4)
+        {
+            return BEHAVIOR_EVENT_SPAWN_NANOS;
+        }
+        return BEHAVIOR_EVENT_TRANSIENT_NANOS;
+    }
+
+    private static boolean isDurableBehavior(int kind)
+    {
+        return kind == 3 || kind == 5 || kind == 6 || kind == 7;
+    }
+
     private static final Map<Integer, Npc> npcs = new ConcurrentHashMap<>();
     private static final Map<SpatialIndex.CellKey, java.util.Set<Npc>> byCell = new ConcurrentHashMap<>();
     private static final Map<Long, Integer> ownerGuidToCanonical = new ConcurrentHashMap<>();
     private static final Map<Long, Binding> bindingByGuid = new ConcurrentHashMap<>();
     private static final Map<Long, Binding> bindingByCanonicalPlayer = new ConcurrentHashMap<>();
+    private static final Map<Long, BehaviorEvent> behaviorEvents = new ConcurrentHashMap<>();
     private static final java.util.Queue<int[]> pendingDrops = new java.util.concurrent.ConcurrentLinkedQueue<>();
     private static final java.util.concurrent.atomic.AtomicInteger killOrdersPending =
             new java.util.concurrent.atomic.AtomicInteger();
@@ -305,6 +388,7 @@ public final class NpcRegistry
         npcs.remove(npc.npcId);
         areaRemove(npc, npc.area);
         removeBindingsForCanonical(npc.npcId);
+        removeBehaviorEventsForCanonical(npc.npcId);
 
         if (npc.killOrderPending)
         {
@@ -391,6 +475,69 @@ public final class NpcRegistry
         ownerGuidToCanonical.put(ownerKey(playerId, localGuid), npc.npcId);
         bindObservation(playerId, localGuid, npc.npcId, BINDING_NATIVE, true, now);
         captureSyncGroup(npc, playerId);
+        return npc;
+    }
+
+    public static Npc remapPersistent(
+            int playerId,
+            int oldLocalGuid,
+            int newLocalGuid,
+            String typeCode,
+            String identityKey,
+            int identityFlags,
+            long now)
+    {
+        if (playerId <= 0 || oldLocalGuid == 0 || newLocalGuid == 0
+                || oldLocalGuid == newLocalGuid
+                || (identityFlags & IDENTITY_PERSISTENT) == 0
+                || identityKey == null || identityKey.isEmpty() || "-".equals(identityKey))
+        {
+            return null;
+        }
+
+        Binding oldBinding = bindingByGuid(playerId, oldLocalGuid);
+        Npc npc = oldBinding == null ? null : npcs.get(oldBinding.canonicalId);
+        if (npc == null || !npc.alive || npc.lifecycle == LIFECYCLE_TERMINAL
+                || !npc.typeCode.equals(typeCode) || !npc.identityKey.equals(identityKey)
+                || oldBinding.kind != BINDING_NATIVE)
+        {
+            return null;
+        }
+
+        boolean activeOwner = npc.ownerPlayerId == playerId && npc.ownerLocalGuid == oldLocalGuid;
+        boolean releasedOwner = npc.ownerPlayerId == 0
+                && npc.releasedByPlayerId == playerId
+                && npc.releasedLocalGuid == oldLocalGuid;
+        if (!activeOwner && !releasedOwner)
+        {
+            return null;
+        }
+
+        Binding newBinding = bindingByGuid(playerId, newLocalGuid);
+        if (newBinding != null && newBinding.canonicalId != npc.npcId)
+        {
+            return null;
+        }
+
+        ownerGuidToCanonical.remove(ownerKey(playerId, oldLocalGuid));
+        npc.ownerPlayerId = playerId;
+        npc.ownerLocalGuid = newLocalGuid;
+        npc.releasedByPlayerId = 0;
+        npc.releasedLocalGuid = 0;
+        npc.releasedAtNanos = 0L;
+        npc.lifecycle = LIFECYCLE_ACTIVE;
+        npc.handoverTarget = 0;
+        npc.handoverSentNanos = 0L;
+        npc.handoverAttempts = 0;
+        npc.handoverBlockedUntil = 0L;
+        npc.lastUpdateNanos = now;
+        npc.lastSnapshotMs = 0L;
+        npc.lastFastSnapshotMs = 0L;
+        npc.lastFastSequence = 0;
+        npc.authorityRevision += 1;
+        captureSyncGroup(npc, playerId);
+        ownerGuidToCanonical.put(ownerKey(playerId, newLocalGuid), npc.npcId);
+        bindObservation(playerId, newLocalGuid, npc.npcId, BINDING_NATIVE, true, now);
         return npc;
     }
 
@@ -541,6 +688,225 @@ public final class NpcRegistry
             if (binding.localGuid != 0)
             {
                 bindingByGuid.remove(ownerKey(binding.playerId, binding.localGuid), binding);
+            }
+        }
+    }
+
+    private static void removeBehaviorEventsForCanonical(int canonicalId)
+    {
+        for (BehaviorEvent event : new ArrayList<>(behaviorEvents.values()))
+        {
+            if (event.canonicalId == canonicalId)
+            {
+                behaviorEvents.remove(event.key, event);
+            }
+        }
+    }
+
+    public static BehaviorEvent recordBehavior(
+            int playerId,
+            int clientEventId,
+            int canonicalId,
+            int localGuid,
+            int authorityRevision,
+            int kind,
+            int sourceSequence,
+            String eventName,
+            int int0,
+            int int1,
+            double x,
+            double y,
+            double z,
+            double heading,
+            List<PlayerSession> sessions,
+            long now)
+    {
+        Npc npc = npcs.get(canonicalId);
+        if (npc == null || !npc.alive || npc.lifecycle != LIFECYCLE_ACTIVE
+                || npc.ownerPlayerId != playerId || npc.ownerLocalGuid != localGuid
+                || npc.authorityRevision != authorityRevision
+                || clientEventId <= 0 || kind <= 0 || kind > 8
+                || eventName == null || eventName.isEmpty() || "-".equals(eventName))
+        {
+            return null;
+        }
+
+        Integer previousClientId = npc.behaviorClientIds.get(playerId);
+        if (previousClientId != null && clientEventId <= previousClientId)
+        {
+            return null;
+        }
+        npc.behaviorClientIds.put(playerId, clientEventId);
+
+        int sequence = ++npc.behaviorSequence;
+        if (sequence <= 0)
+        {
+            npc.behaviorSequence = 1;
+            sequence = 1;
+        }
+
+        BehaviorEvent event = new BehaviorEvent(
+                playerId,
+                npc.npcId,
+                npc.lifecycleRevision,
+                npc.authorityRevision,
+                sequence,
+                kind,
+                sourceSequence,
+                eventName,
+                int0,
+                int1,
+                x,
+                y,
+                z,
+                heading,
+                now);
+
+        for (PlayerSession session : sessions)
+        {
+            if (session.playerId == playerId
+                    || !session.knownNpcs.contains(npc.boxedId)
+                    || !sharesSyncGroup(session, npc))
+            {
+                continue;
+            }
+            event.pending.add(session.playerId);
+        }
+
+        if (!event.pending.isEmpty() || isDurableBehavior(kind))
+        {
+            behaviorEvents.put(event.key, event);
+        }
+        return event;
+    }
+
+    public static List<BehaviorEvent> pendingBehaviorEvents(long now)
+    {
+        List<BehaviorEvent> pending = new ArrayList<>();
+        for (BehaviorEvent event : new ArrayList<>(behaviorEvents.values()))
+        {
+            if (now >= event.expiresNanos)
+            {
+                behaviorEvents.remove(event.key, event);
+                continue;
+            }
+            if (!event.pending.isEmpty())
+            {
+                pending.add(event);
+            }
+        }
+        pending.sort((a, b) ->
+        {
+            int canonical = Integer.compare(a.canonicalId, b.canonicalId);
+            if (canonical != 0)
+            {
+                return canonical;
+            }
+            int lifecycle = Integer.compare(a.lifecycleRevision, b.lifecycleRevision);
+            return lifecycle != 0 ? lifecycle : Integer.compare(a.sequence, b.sequence);
+        });
+        return pending;
+    }
+
+    public static int pendingBehaviorCount()
+    {
+        return behaviorEvents.size();
+    }
+
+    public static int addDurableBehaviorRecipient(Npc npc, int playerId)
+    {
+        if (npc == null || playerId <= 0)
+        {
+            return 0;
+        }
+        int added = 0;
+        for (BehaviorEvent event : behaviorEvents.values())
+        {
+            if (event.canonicalId != npc.npcId
+                    || event.lifecycleRevision != npc.lifecycleRevision
+                    || event.sourcePlayerId == playerId
+                    || !isDurableBehavior(event.kind)
+                    || event.acknowledged.contains(playerId))
+            {
+                continue;
+            }
+            if (event.pending.add(playerId))
+            {
+                event.lastSentNanos.remove(playerId);
+                added++;
+            }
+        }
+        return added;
+    }
+
+    public static boolean behaviorReadyForSend(BehaviorEvent event, int playerId, long now)
+    {
+        if (event == null || !event.pending.contains(playerId))
+        {
+            return false;
+        }
+        Long last = event.lastSentNanos.get(playerId);
+        return last == null || now - last >= BEHAVIOR_EVENT_RETRY_NANOS;
+    }
+
+    public static void markBehaviorSent(BehaviorEvent event, int playerId, long now)
+    {
+        if (event != null && event.pending.contains(playerId))
+        {
+            event.lastSentNanos.put(playerId, now);
+        }
+    }
+
+    public static boolean acknowledgeBehavior(
+            int playerId,
+            int canonicalId,
+            int lifecycleRevision,
+            int sequence)
+    {
+        long key = (((long) canonicalId) << 32) | (sequence & 0xFFFFFFFFL);
+        BehaviorEvent event = behaviorEvents.get(key);
+        if (event == null || event.lifecycleRevision != lifecycleRevision
+                || !event.pending.remove(playerId))
+        {
+            return false;
+        }
+        event.acknowledged.add(playerId);
+        event.lastSentNanos.remove(playerId);
+        if (event.pending.isEmpty() && !isDurableBehavior(event.kind))
+        {
+            behaviorEvents.remove(key, event);
+        }
+        return true;
+    }
+
+    public static int requestBehaviorReplayForKnown(PlayerSession session)
+    {
+        if (session == null)
+        {
+            return 0;
+        }
+        int count = 0;
+        for (BehaviorEvent event : behaviorEvents.values())
+        {
+            if (event.pending.contains(session.playerId))
+            {
+                event.lastSentNanos.remove(session.playerId);
+                count++;
+            }
+        }
+        return count;
+    }
+
+    public static void forgetBehaviorRecipient(int playerId)
+    {
+        for (BehaviorEvent event : new ArrayList<>(behaviorEvents.values()))
+        {
+            event.pending.remove(playerId);
+            event.acknowledged.remove(playerId);
+            event.lastSentNanos.remove(playerId);
+            if (event.pending.isEmpty() && !isDurableBehavior(event.kind))
+            {
+                behaviorEvents.remove(event.key, event);
             }
         }
     }

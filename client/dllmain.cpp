@@ -1266,7 +1266,7 @@ static void HandleServerPacket(const std::string& msg)
 	const bool isNetOpcode = opcode == "NPCNEW" || opcode == "NPCMOV" || opcode == "NPCFAST" || opcode == "NPCEND"
 		|| opcode == "NPCDEAD" || opcode == "NPCHITF" || opcode == "NPCACKF" || opcode == "TSYNCR" || opcode == "NPCKILL"
 		|| opcode == "NPCGIVE" || opcode == "NPCDROP" || opcode == "NPCGONE" || opcode == "PSTATEF"
-		|| opcode == "NPCSCALE" || opcode == "NPCREG";
+		|| opcode == "NPCSCALE" || opcode == "NPCREG" || opcode == "NPCEVTF";
 
 	const bool isSaveOpcode = opcode == "SAVEBEG" || opcode == "SAVECHK" || opcode == "SAVEEND"
 		|| opcode == "SAVENACK" || opcode == "SAVEACK" || opcode == "SAVENEED";

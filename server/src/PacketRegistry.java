@@ -99,6 +99,9 @@ public final class PacketRegistry
         register(81, "NPCREG", Route.RELIABLE, false, true);
         register(82, "NPCBIND", Route.RELIABLE, true, false);
         register(83, "NPCFAST", Route.REALTIME, true, true);
+        register(84, "NPCEVT", Route.RELIABLE, true, false);
+        register(85, "NPCEVTF", Route.RELIABLE, false, true);
+        register(86, "NPCEACK", Route.RELIABLE, true, false);
 
         register(90, "TSYNC", Route.REALTIME, true, false);
         register(91, "TSYNCR", Route.REALTIME, false, true);

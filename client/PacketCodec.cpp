@@ -23,7 +23,7 @@ namespace w3mp
 		constexpr std::uint8_t kFloat32 = 3;
 		constexpr std::uint8_t kString16 = 4;
 
-		constexpr std::array<PacketSpec, 61> kPackets = {{
+		constexpr std::array<PacketSpec, 64> kPackets = {{
 			{1, "HELLO", PacketRoute::Control, true, false},
 			{2, "HELLOACK", PacketRoute::Control, false, true},
 			{3, "PING", PacketRoute::Realtime, true, false},
@@ -83,6 +83,9 @@ namespace w3mp
 			{81, "NPCREG", PacketRoute::Reliable, false, true},
 			{82, "NPCBIND", PacketRoute::Reliable, true, false},
 			{83, "NPCFAST", PacketRoute::Realtime, true, true},
+			{84, "NPCEVT", PacketRoute::Reliable, true, false},
+			{85, "NPCEVTF", PacketRoute::Reliable, false, true},
+			{86, "NPCEACK", PacketRoute::Reliable, true, false},
 			{90, "TSYNC", PacketRoute::Realtime, true, false},
 			{91, "TSYNCR", PacketRoute::Realtime, false, true}
 		}};

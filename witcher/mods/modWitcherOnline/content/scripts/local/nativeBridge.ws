@@ -74,6 +74,13 @@ import function WO_NpcTerminalState(index : int) : int;
 import function WO_NpcTerminalRevision(index : int) : int;
 import function WO_NpcTerminalAttacker(index : int) : int;
 import function WO_NpcTerminalAck(canonicalId : int, revision : int);
+import function WO_NpcBehaviorSend(guid : int, kind : int, sourceSequence : int, eventName : string,
+    int0 : int, int1 : int, x : float, y : float, z : float, heading : float) : bool;
+import function WO_NpcBehaviorCount() : int;
+import function WO_NpcBehaviorInt(index : int, field : int) : int;
+import function WO_NpcBehaviorFloat(index : int, field : int) : float;
+import function WO_NpcBehaviorName(index : int) : string;
+import function WO_NpcBehaviorAck(index : int);
 import function WO_NpcType(index : int) : string;
 import function WO_NpcAppearance(index : int) : name;
 import function WO_NpcBind(index : int, localGuid : int, kind : int);

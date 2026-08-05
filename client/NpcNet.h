@@ -54,6 +54,23 @@ namespace w3mp {
 		bool accepted = false;
 	};
 
+	struct NpcBehaviorEvent
+	{
+		int canonicalId = 0;
+		int lifecycleRevision = 0;
+		int authorityRevision = 0;
+		int sequence = 0;
+		int kind = 0;
+		int sourceSequence = 0;
+		std::string eventName;
+		int int0 = 0;
+		int int1 = 0;
+		float x = 0.0f;
+		float y = 0.0f;
+		float z = 0.0f;
+		float heading = 0.0f;
+	};
+
 	using PacketSender = std::function<void(const char*, const std::vector<std::string>&)>;
 
 	class NpcNet
@@ -114,6 +131,20 @@ namespace w3mp {
 		static const HitAck* Ack(int index);
 		static void ClearAcks();
 		static void AckTerminal(int canonicalId, int revision);
+		static bool ReportBehavior(
+			int guid,
+			int kind,
+			int sourceSequence,
+			const std::string& eventName,
+			int int0,
+			int int1,
+			float x,
+			float y,
+			float z,
+			float heading);
+		static int PullBehaviors();
+		static const NpcBehaviorEvent* Behavior(int index);
+		static void AckBehavior(int index);
 
 		static void SetPlayerPaused(int playerId, bool paused);
 		static bool IsPlayerPaused(int playerId);

@@ -196,6 +196,49 @@ class r_NpcActions
         return names[code];
     }
 
+    public function kindFor(eventName : name) : int
+    {
+        if(eventName == 'Teleport' || eventName == 'Vanish' || eventName == 'Appear'
+            || eventName == 'Dive' || eventName == 'DiveEnd')
+        {
+            return 2;
+        }
+
+        if(eventName == 'OpenRift' || eventName == 'Open' || eventName == 'Close'
+            || eventName == 'OpenDoor')
+        {
+            return 3;
+        }
+
+        if(eventName == 'Spawn' || eventName == 'SpawnEntity' || eventName == 'Summon'
+            || eventName == 'SummonMeteorites' || eventName == 'IceSpikes'
+            || eventName == 'UseSpawner' || eventName == 'PhantomL' || eventName == 'PhantomR')
+        {
+            return 4;
+        }
+
+        if(eventName == 'BiesLure' || eventName == 'IgnoreSigns'
+            || eventName == 'IgnoreSignsEnd' || eventName == 'CriticalState'
+            || eventName == 'CriticalStateEnded')
+        {
+            return 5;
+        }
+
+        if(eventName == 'Ragdoll' || eventName == 'RecoverFromRagdoll'
+            || eventName == 'SwitchToRagdoll' || eventName == 'Unconscious'
+            || eventName == 'Agony')
+        {
+            return 6;
+        }
+
+        if(codeFor(eventName) == 8191)
+        {
+            return 8;
+        }
+
+        return 1;
+    }
+
     public function count() : int
     {
         ensure();
