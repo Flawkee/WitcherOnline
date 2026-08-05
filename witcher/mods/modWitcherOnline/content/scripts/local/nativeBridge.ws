@@ -107,6 +107,9 @@ import function WO_NpcReport() : string;
 import function WO_NpcLatency() : int;
 import function WO_NpcTune(interpDelayMs : int, snapshotHz : int);
 import function WO_NpcSyncMode(mode : int);
+import function WO_PartyScaleConfig(stepMilli : int, maxMilli : int);
+import function WO_PartyScaleAckStep() : int;
+import function WO_PartyScaleAckMax() : int;
 import function WO_NpcScale(npcId : int) : int;
 import function WO_NpcScaleGen() : int;
 

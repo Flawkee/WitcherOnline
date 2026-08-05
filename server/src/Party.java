@@ -7,6 +7,8 @@ public class Party
 
     public final int partyId;
     public final List<String> members = new ArrayList<>();
+    private int scaleStepMilli = 500;
+    private int scaleMaxMilli = 4000;
 
     public Party(int partyId)
     {
@@ -52,5 +54,32 @@ public class Party
     public synchronized List<String> snapshot()
     {
         return new ArrayList<>(members);
+    }
+
+    public synchronized boolean applyLeaderScaling(String usernameKey, int stepMilli, int maxMilli)
+    {
+        if (members.isEmpty() || !members.get(0).equals(usernameKey))
+        {
+            return false;
+        }
+
+        if (scaleStepMilli == stepMilli && scaleMaxMilli == maxMilli)
+        {
+            return false;
+        }
+
+        scaleStepMilli = stepMilli;
+        scaleMaxMilli = maxMilli;
+        return true;
+    }
+
+    public synchronized int scaleStepMilli()
+    {
+        return scaleStepMilli;
+    }
+
+    public synchronized int scaleMaxMilli()
+    {
+        return scaleMaxMilli;
     }
 }

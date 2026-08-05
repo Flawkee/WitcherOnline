@@ -36,24 +36,23 @@ public final class NpcScaling
 
     public static int scaleMilliFor(int playerCount)
     {
+        return scaleMilliFor(
+                playerCount,
+                (int) Math.round(healthPerExtraPlayer * SCALE_UNIT),
+                (int) Math.round(maxMultiplier * SCALE_UNIT));
+    }
+
+    public static int scaleMilliFor(int playerCount, int stepMilli, int maxMilli)
+    {
         if (!enabled || playerCount <= 1)
         {
             return SCALE_UNIT;
         }
 
-        double multiplier = 1.0 + (healthPerExtraPlayer * (playerCount - 1));
-
-        if (multiplier > maxMultiplier)
-        {
-            multiplier = maxMultiplier;
-        }
-
-        if (multiplier < 1.0)
-        {
-            multiplier = 1.0;
-        }
-
-        return (int) Math.round(multiplier * SCALE_UNIT);
+        long scale = SCALE_UNIT + (long) Math.max(0, stepMilli) * (playerCount - 1L);
+        scale = Math.min(scale, Math.max(SCALE_UNIT, maxMilli));
+        scale = Math.max(SCALE_UNIT, scale);
+        return (int) Math.min(Integer.MAX_VALUE, scale);
     }
 
     public static void setEnabled(boolean value)

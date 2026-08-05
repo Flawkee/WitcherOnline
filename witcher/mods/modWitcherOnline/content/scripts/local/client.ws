@@ -242,7 +242,11 @@ statemachine class r_MultiplayerClient
     private var sceneChoiceArrivalNotified : array<string>;
     private var coopOffered : bool;
     private var confirmPopupOpen : bool;
-    private var pendingInviteFrom : string;
+    private var pendingInvites : array<string>;
+    private var pendingCoopLeader : string;
+    private var activeConfirmKind : int;
+    private var activeConfirmSubject : string;
+    private var nextConfirmPopupAt : float;
 
     default coopMode = false;
     default coopPending = false;
@@ -270,9 +274,21 @@ statemachine class r_MultiplayerClient
     default sceneFailedUntil = -999.0;
     default coopOffered = false;
     default confirmPopupOpen = false;
+    default activeConfirmKind = 0;
+    default nextConfirmPopupAt = -999.0;
     private var partyId : int;
     private var nextWeatherSyncAt : float;
+    private var partyScaleStepMilli : int;
+    private var partyScaleMaxMilli : int;
+    private var partyScaleChangedAt : float;
+    private var partyScaleSentAt : float;
+    private var nextPartyScalePollAt : float;
     default nextWeatherSyncAt = -999;
+    default partyScaleStepMilli = -1;
+    default partyScaleMaxMilli = -1;
+    default partyScaleChangedAt = -999;
+    default partyScaleSentAt = -999;
+    default nextPartyScalePollAt = -999;
 
     private var entityClassifier : r_EntityClassifier;
 
@@ -1471,11 +1487,14 @@ statemachine class r_MultiplayerClient
 
         if(!sceneJoinRetryPrompted)
         {
-            sceneJoinStage = 0;
-            sceneJoinRetryPrompted = true;
+            if(confirmPopupOpen || theGame.GetGuiManager().IsAnyMenu())
+            {
+                return;
+            }
 
-            showConfirmPopup(3, sceneJoinWho, GetLocStringById(2111114304),
-                GetLocStringById(2111114314));
+            sceneJoinStage = 0;
+            sceneJoinRetryPrompted = showConfirmPopup(3, sceneJoinWho,
+                GetLocStringById(2111114304), GetLocStringById(2111114314));
             return;
         }
 
@@ -1880,7 +1899,9 @@ statemachine class r_MultiplayerClient
 
     public function leaveCoopForMainMenu()
     {
-        if(!coopMode && !coopPending && !coopLeader && !getCoopSave().isActive())
+        if(!coopMode && !coopPending && !coopLeader && !coopOffered
+            && pendingCoopLeader == "" && pendingInvites.Size() == 0
+            && !getCoopSave().isActive())
         {
             return;
         }
@@ -1894,10 +1915,17 @@ statemachine class r_MultiplayerClient
         coopPending = false;
         coopLeader = false;
         coopOffered = false;
+        pendingCoopLeader = "";
+        pendingInvites.Clear();
         partyDialogReady = false;
         dialogChoicesMeaningful = false;
         resetSceneJoin();
         coopRoster.Clear();
+
+        if(activeConfirmKind == 1 || activeConfirmKind == 2)
+        {
+            closeConfirmPopup();
+        }
 
         getCoopSave().abandonSession();
 
@@ -2894,6 +2922,79 @@ statemachine class r_MultiplayerClient
         mpghosts_playSound('gui_global_panel_open');
     }
 
+    public function updatePartyScaleConfig()
+    {
+        var now : float;
+        var stepValue : float;
+        var maxValue : float;
+        var stepMilli : int;
+        var maxMilli : int;
+
+        now = theGame.GetEngineTimeAsSeconds();
+
+        if(now < nextPartyScalePollAt)
+        {
+            return;
+        }
+
+        nextPartyScalePollAt = now + 0.25;
+        stepValue = StringToFloat(theGame.GetInGameConfigWrapper().GetVarValue(
+            'MPGhosts_Main', 'MPGhosts_PartyNpcScaleStep'), 0.5);
+        maxValue = StringToFloat(theGame.GetInGameConfigWrapper().GetVarValue(
+            'MPGhosts_Main', 'MPGhosts_PartyNpcScaleMax'), 4.0);
+
+        if(maxValue <= 0.0)
+        {
+            stepValue = 0.5;
+            maxValue = 4.0;
+            theGame.GetInGameConfigWrapper().SetVarValue(
+                'MPGhosts_Main', 'MPGhosts_PartyNpcScaleStep', "0.5");
+            theGame.GetInGameConfigWrapper().SetVarValue(
+                'MPGhosts_Main', 'MPGhosts_PartyNpcScaleMax', "4");
+        }
+
+        stepMilli = RoundF(stepValue * 2.0) * 500;
+        maxMilli = RoundF(maxValue) * 1000;
+
+        if(stepMilli < 0)
+        {
+            stepMilli = 0;
+        }
+        else if(stepMilli > 10000)
+        {
+            stepMilli = 10000;
+        }
+
+        if(maxMilli < 1000)
+        {
+            maxMilli = 1000;
+        }
+        else if(maxMilli > 80000)
+        {
+            maxMilli = 80000;
+        }
+
+        if(stepMilli != partyScaleStepMilli || maxMilli != partyScaleMaxMilli)
+        {
+            partyScaleStepMilli = stepMilli;
+            partyScaleMaxMilli = maxMilli;
+            partyScaleChangedAt = now;
+            partyScaleSentAt = -999;
+        }
+
+        if(!WO_Connected()
+            || (WO_PartyScaleAckStep() == partyScaleStepMilli
+                && WO_PartyScaleAckMax() == partyScaleMaxMilli)
+            || now - partyScaleChangedAt < 0.5
+            || now - partyScaleSentAt < 2.0)
+        {
+            return;
+        }
+
+        WO_PartyScaleConfig(partyScaleStepMilli, partyScaleMaxMilli);
+        partyScaleSentAt = now;
+    }
+
     public function onTeleportResult(status : int, user : string, area : int, x : float, y : float, z : float)
     {
         var destination : Vector;
@@ -2982,9 +3083,11 @@ statemachine class r_MultiplayerClient
                 resetSceneJoin();
                 coopRoster.Clear();
                 getCoopSave().endSession();
-                pendingInviteFrom = "";
+                pendingCoopLeader = "";
                 partyTargetMissingSince = -1;
                 partyTargetWasMissing = false;
+
+                closeConfirmationKind(2, "");
 
                 cancelPendingSyncedDialogChoice();
 
@@ -3000,6 +3103,10 @@ statemachine class r_MultiplayerClient
         {
             partyTargetMissingSince = -1;
             partyTargetWasMissing = false;
+            coopOffered = false;
+            pendingCoopLeader = "";
+
+            closeConfirmationKind(2, "");
 
             theGame.GetGuiManager().ShowNotification(GetLocStringById(2111114204) + " " + leaderName + GetLocStringById(2111114205));
         }
@@ -3007,7 +3114,6 @@ statemachine class r_MultiplayerClient
         partyId = newPartyId;
         inParty = true;
         joinedParty = leaderName;
-        pendingInviteFrom = "";
 
         if(leaderName != username)
         {
@@ -3097,9 +3203,14 @@ statemachine class r_MultiplayerClient
         return inParty && joinedParty == username;
     }
 
-    public function showConfirmPopup(kind : int, subject : string, title : string, body : string)
+    public function showConfirmPopup(kind : int, subject : string, title : string, body : string) : bool
     {
         var data : WitcherOnline_ConfirmPopup;
+
+        if(confirmPopupOpen)
+        {
+            return false;
+        }
 
         data = new WitcherOnline_ConfirmPopup in this;
         data.wo_kind = kind;
@@ -3110,8 +3221,12 @@ statemachine class r_MultiplayerClient
         data.BlurBackground = false;
 
         confirmPopupOpen = true;
+        activeConfirmKind = kind;
+        activeConfirmSubject = subject;
 
         theGame.RequestMenu('PopupMenu', data);
+
+        return true;
     }
 
     public function closeConfirmPopup()
@@ -3122,13 +3237,104 @@ statemachine class r_MultiplayerClient
         }
 
         confirmPopupOpen = false;
+        activeConfirmKind = 0;
+        activeConfirmSubject = "";
+        nextConfirmPopupAt = theGame.GetEngineTimeAsSeconds() + 0.2;
 
         theGame.CloseMenu('PopupMenu');
+    }
+
+    private function closeConfirmationKind(kind : int, subject : string)
+    {
+        if(!confirmPopupOpen || activeConfirmKind != kind)
+        {
+            return;
+        }
+
+        if(subject != "" && StrLower(activeConfirmSubject) != StrLower(subject))
+        {
+            return;
+        }
+
+        closeConfirmPopup();
+    }
+
+    public function onConfirmPopupClosed(kind : int, subject : string)
+    {
+        if(!confirmPopupOpen || activeConfirmKind != kind || activeConfirmSubject != subject)
+        {
+            return;
+        }
+
+        confirmPopupOpen = false;
+        activeConfirmKind = 0;
+        activeConfirmSubject = "";
+        nextConfirmPopupAt = theGame.GetEngineTimeAsSeconds() + 0.2;
+    }
+
+    private function addPendingInvite(requester : string)
+    {
+        var i : int;
+
+        if(requester == "")
+        {
+            return;
+        }
+
+        for(i = 0; i < pendingInvites.Size(); i += 1)
+        {
+            if(StrLower(pendingInvites[i]) == StrLower(requester))
+            {
+                return;
+            }
+        }
+
+        pendingInvites.PushBack(requester);
+    }
+
+    private function removePendingInvite(requester : string)
+    {
+        var i : int;
+
+        for(i = pendingInvites.Size() - 1; i >= 0; i -= 1)
+        {
+            if(StrLower(pendingInvites[i]) == StrLower(requester))
+            {
+                pendingInvites.Erase(i);
+            }
+        }
+    }
+
+    public function updateConfirmationQueue()
+    {
+        var body : string;
+
+        if(confirmPopupOpen || theGame.GetEngineTimeAsSeconds() < nextConfirmPopupAt
+            || theGame.GetGuiManager().IsAnyMenu())
+        {
+            return;
+        }
+
+        if(pendingInvites.Size() > 0)
+        {
+            body = StrReplace(GetLocStringById(2111114276), "%s", pendingInvites[0]);
+            showConfirmPopup(1, pendingInvites[0], GetLocStringById(2111114275), body);
+            return;
+        }
+
+        if(pendingCoopLeader != "")
+        {
+            body = StrReplace(GetLocStringById(2111114287), "%s", pendingCoopLeader);
+            showConfirmPopup(2, pendingCoopLeader, GetLocStringById(2111114286), body);
+        }
     }
 
     public function onConfirmPopupResult(kind : int, subject : string, approved : bool)
     {
         confirmPopupOpen = false;
+        activeConfirmKind = 0;
+        activeConfirmSubject = "";
+        nextConfirmPopupAt = theGame.GetEngineTimeAsSeconds() + 0.2;
 
         if(kind == 1)
         {
@@ -3138,6 +3344,7 @@ statemachine class r_MultiplayerClient
 
         if(kind == 2)
         {
+            pendingCoopLeader = "";
             setCoopMode(approved);
             return;
         }
@@ -3162,9 +3369,8 @@ statemachine class r_MultiplayerClient
 
     public function respondToInvite(requester : string, approved : bool)
     {
-        closeConfirmPopup();
-
-        pendingInviteFrom = "";
+        closeConfirmationKind(1, requester);
+        removePendingInvite(requester);
 
         WO_PartyRespond(requester, approved);
 
@@ -3181,7 +3387,8 @@ statemachine class r_MultiplayerClient
 
     public function setCoopMode(enabled : bool)
     {
-        closeConfirmPopup();
+        closeConfirmationKind(2, "");
+        pendingCoopLeader = "";
 
         if(!inParty)
         {
@@ -3262,14 +3469,10 @@ statemachine class r_MultiplayerClient
 
     public function onPartyInvite(kind : string, who : string, reason : string)
     {
-        var body : string;
-
         if(kind == "REQUEST")
         {
-            pendingInviteFrom = who;
-
-            body = StrReplace(GetLocStringById(2111114276), "%s", who);
-            showConfirmPopup(1, who, GetLocStringById(2111114275), body);
+            addPendingInvite(who);
+            updateConfirmationQueue();
             return;
         }
 
@@ -3311,9 +3514,16 @@ statemachine class r_MultiplayerClient
 
         if(kind == "EXPIREDIN")
         {
-            pendingInviteFrom = "";
-            closeConfirmPopup();
+            removePendingInvite(who);
+            closeConfirmationKind(1, who);
             notice(StrReplace(GetLocStringById(2111114280), "%s", who));
+            return;
+        }
+
+        if(kind == "RESOLVEDIN" || kind == "CANCELLEDIN")
+        {
+            removePendingInvite(who);
+            closeConfirmationKind(1, who);
             return;
         }
 
@@ -3351,17 +3561,18 @@ statemachine class r_MultiplayerClient
 
     public function offerCoopMode(leaderName : string)
     {
-        var body : string;
-
-        if(coopOffered || leaderName == "" || leaderName == username)
+        if(leaderName == "" || leaderName == username)
         {
             return;
         }
 
-        coopOffered = true;
+        if(!coopOffered)
+        {
+            coopOffered = true;
+            pendingCoopLeader = leaderName;
+        }
 
-        body = StrReplace(GetLocStringById(2111114287), "%s", leaderName);
-        showConfirmPopup(2, leaderName, GetLocStringById(2111114286), body);
+        updateConfirmationQueue();
     }
 
     public function isPartyLeaderName(playerName : string) : bool
@@ -9428,6 +9639,18 @@ class WitcherOnline_ConfirmPopup extends ConfirmationPopupData
         theGame.r_getMultiplayerClient().onConfirmPopupResult(wo_kind, wo_subject, false);
     }
 
+    public function forceClose() : void
+    {
+        theGame.r_getMultiplayerClient().onConfirmPopupClosed(wo_kind, wo_subject);
+        super.forceClose();
+    }
+
+    public function OnClosing() : void
+    {
+        theGame.r_getMultiplayerClient().onConfirmPopupClosed(wo_kind, wo_subject);
+        super.OnClosing();
+    }
+
     protected function GetAcceptText() : string
     {
         return "wo_btn_approve";
@@ -9673,6 +9896,8 @@ state WO_Tick in r_MultiplayerClient
                 continue;
             }
 
+            parent.updatePartyScaleConfig();
+
             if(theGame.GetInGameConfigWrapper().GetVarValue('MPGhosts_Main', 'MPGhosts_HideGhosts'))
             {
                 parent.destroyAll();
@@ -9702,6 +9927,7 @@ state WO_Tick in r_MultiplayerClient
             parent.checkRidingAttachment();
             parent.checkPlayerChange();
             parent.updateWorldSync();
+            parent.updateConfirmationQueue();
             parent.updateLeaderDialogReadyPopup();
             parent.updateLeaderDialogHighlight();
             parent.updateSceneWatch();

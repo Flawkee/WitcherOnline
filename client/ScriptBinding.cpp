@@ -18,6 +18,7 @@
 extern void ResetInboundDeltaCaches();
 extern void SendPartyRequest(const char* opcode, const std::string& argument);
 extern void SendPartyRequest2(const char* opcode, const std::string& first, const std::string& second);
+extern void SendPartyScaling(int stepMilli, int maxMilli);
 extern void SendSaveChunk(const char* opcode, const std::vector<std::string>& fields);
 #include "SaveTransfer.h"
 
@@ -346,6 +347,8 @@ namespace w3mp {
 	static std::string g_username;
 	static std::atomic<bool> g_connected{ false };
 	static std::atomic<int> g_status{ 0 };
+	static std::atomic<int> g_partyScaleAckStep{ -1 };
+	static std::atomic<int> g_partyScaleAckMax{ -1 };
 
 	static std::atomic<unsigned long long> g_pollCount{ 0 };
 	static std::atomic<unsigned long long> g_tickCount{ 0 };
@@ -682,6 +685,18 @@ namespace w3mp {
 	void ScriptBinding::SetConnected(bool connected)
 	{
 		g_connected.store(connected);
+
+		if (!connected)
+		{
+			g_partyScaleAckStep.store(-1);
+			g_partyScaleAckMax.store(-1);
+		}
+	}
+
+	void ScriptBinding::SetPartyScaleAck(int stepMilli, int maxMilli)
+	{
+		g_partyScaleAckStep.store(stepMilli);
+		g_partyScaleAckMax.store(maxMilli);
 	}
 
 	void ScriptBinding::SetStatus(ClientStatus status)
@@ -1521,6 +1536,31 @@ namespace w3mp {
 		AdvanceFrame(frame);
 
 		NpcNet::SetSyncMode(mode);
+	}
+
+	static void WO_PartyScaleConfig(void* context, void* frame, void* result)
+	{
+		const int stepMilli = ReadIntParameter(frame);
+		const int maxMilli = ReadIntParameter(frame);
+		AdvanceFrame(frame);
+
+		SendPartyScaling(stepMilli, maxMilli);
+	}
+
+	static void WO_PartyScaleAckStep(void* context, void* frame, void* result)
+	{
+		AdvanceFrame(frame);
+
+		if (result)
+			*static_cast<int*>(result) = g_partyScaleAckStep.load();
+	}
+
+	static void WO_PartyScaleAckMax(void* context, void* frame, void* result)
+	{
+		AdvanceFrame(frame);
+
+		if (result)
+			*static_cast<int*>(result) = g_partyScaleAckMax.load();
 	}
 
 	static void WO_PartyJoin(void* context, void* frame, void* result)
@@ -2775,6 +2815,9 @@ namespace w3mp {
 		RegisterOne(L"WO_SetPaused", reinterpret_cast<void*>(&WO_SetPaused), "WO_SetPaused");
 		RegisterOne(L"WO_ResetDeltas", reinterpret_cast<void*>(&WO_ResetDeltas), "WO_ResetDeltas");
 		RegisterOne(L"WO_NpcSyncMode", reinterpret_cast<void*>(&WO_NpcSyncMode), "WO_NpcSyncMode");
+		RegisterOne(L"WO_PartyScaleConfig", reinterpret_cast<void*>(&WO_PartyScaleConfig), "WO_PartyScaleConfig");
+		RegisterOne(L"WO_PartyScaleAckStep", reinterpret_cast<void*>(&WO_PartyScaleAckStep), "WO_PartyScaleAckStep");
+		RegisterOne(L"WO_PartyScaleAckMax", reinterpret_cast<void*>(&WO_PartyScaleAckMax), "WO_PartyScaleAckMax");
 		RegisterOne(L"WO_PartyJoin", reinterpret_cast<void*>(&WO_PartyJoin), "WO_PartyJoin");
 		RegisterOne(L"WO_TeleportRequest", reinterpret_cast<void*>(&WO_TeleportRequest), "WO_TeleportRequest");
 		RegisterOne(L"WO_PartyLeave", reinterpret_cast<void*>(&WO_PartyLeave), "WO_PartyLeave");

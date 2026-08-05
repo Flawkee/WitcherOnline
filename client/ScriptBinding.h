@@ -97,6 +97,7 @@ namespace w3mp {
 		static void SetLocalId(int id);
 		static void SetUsername(const std::string& name);
 		static void SetConnected(bool connected);
+		static void SetPartyScaleAck(int stepMilli, int maxMilli);
 		static void SetStatus(ClientStatus status);
 		static std::string TransportReport();
 		static void CountSuppressed();

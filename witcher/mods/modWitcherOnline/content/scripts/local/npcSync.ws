@@ -3522,6 +3522,11 @@ class r_NpcSync
 
         applyReplicaTarget(record, npc, WO_NpcTarget(commandIndex));
 
+        if(record.questTag == "" && npc.IsHuman())
+        {
+            applyReplicaHostility(record, npc, flags);
+        }
+
         applyReplicaAction(record, npc, flags);
         reconcileReplicaHealth(record, npc, hp, now);
 

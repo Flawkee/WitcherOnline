@@ -47,7 +47,7 @@ public class WitcherServer
     private static final java.util.concurrent.atomic.AtomicInteger nextPartyId =
             new java.util.concurrent.atomic.AtomicInteger(1);
     private static final long PARTY_RESEND_NANOS = 2_000_000_000L;
-    private static final long PARTY_REQUEST_TIMEOUT_NANOS = 120_000_000_000L;
+    private static final long PARTY_REQUEST_TIMEOUT_NANOS = 60_000_000_000L;
 
     private static final Map<String, PartyRequest> partyRequests = new ConcurrentHashMap<>();
 
@@ -128,6 +128,7 @@ public class WitcherServer
     private static final AtomicLong npcResends = new AtomicLong();
     private static final AtomicLong tickOverruns = new AtomicLong();
     private static final AtomicLong scaleEpoch = new AtomicLong();
+    private static final AtomicBoolean scalingDirty = new AtomicBoolean(true);
     private static final AtomicLong passiveHitDistanceOutliers = new AtomicLong();
     private static final AtomicLong malformedPackets = new AtomicLong();
     private static final AtomicLong unknownPackets = new AtomicLong();
@@ -2021,6 +2022,12 @@ public class WitcherServer
             return;
         }
 
+        if ("PSCALE".equals(opcode))
+        {
+            handlePartyScaling(session, fields);
+            return;
+        }
+
         if ("TPREQ".equals(opcode))
         {
             teleportRequest(session, fields.get(0));
@@ -2276,7 +2283,7 @@ public class WitcherServer
 
                     NpcRegistry.applyUnackedDamage(now);
                     NpcRegistry.pruneStale(ownerOnline, now);
-                    if (tickCounter % NPC_SCALE_TICK_DIVIDER == 0)
+                    if (scalingDirty.getAndSet(false) || tickCounter % NPC_SCALE_TICK_DIVIDER == 0)
                     {
                         if (NpcRegistry.recomputeScaling(sessions, NpcRegistry.HIT_RANGE_SQUARED))
                         {
@@ -2541,6 +2548,70 @@ public class WitcherServer
         return (id == null) ? null : parties.get(id);
     }
 
+    static int scaleMilliFor(int playerCount, int partyId)
+    {
+        Party party = partyId > 0 ? parties.get(partyId) : null;
+
+        if (party == null)
+        {
+            return NpcScaling.scaleMilliFor(playerCount);
+        }
+
+        return NpcScaling.scaleMilliFor(playerCount, party.scaleStepMilli(), party.scaleMaxMilli());
+    }
+
+    private static void handlePartyScaling(PlayerSession session, List<String> fields)
+    {
+        if (fields.size() < 2)
+        {
+            malformedPackets.incrementAndGet();
+            return;
+        }
+
+        Integer stepMilli = parseIntegerOrNull(fields.get(0));
+        Integer maxMilli = parseIntegerOrNull(fields.get(1));
+
+        if (stepMilli == null || maxMilli == null
+                || stepMilli < 0 || stepMilli > 10000 || stepMilli % 500 != 0
+                || maxMilli < 1000 || maxMilli > 80000 || maxMilli % 1000 != 0)
+        {
+            malformedPackets.incrementAndGet();
+            return;
+        }
+
+        session.partyScaleStepMilli = stepMilli;
+        session.partyScaleMaxMilli = maxMilli;
+
+        Party party = partyOf(normalizeUsernameKey(session.username));
+        if (party != null && party.applyLeaderScaling(
+                normalizeUsernameKey(session.username), stepMilli, maxMilli))
+        {
+            scalingDirty.set(true);
+        }
+
+        List<String> ackFields = new ArrayList<>();
+        ackFields.add(Integer.toString(stepMilli));
+        ackFields.add(Integer.toString(maxMilli));
+        queueOutbound(session, "PSCALEACK", ackFields);
+    }
+
+    private static void refreshPartyScaling(Party party)
+    {
+        if (party == null)
+        {
+            return;
+        }
+
+        String leaderKey = party.leader();
+        PlayerSession leader = leaderKey == null ? null : players.get(leaderKey);
+
+        if (leader != null && party.applyLeaderScaling(
+                leaderKey, leader.partyScaleStepMilli, leader.partyScaleMaxMilli))
+        {
+            scalingDirty.set(true);
+        }
+    }
+
     private static void sendPartyState(PlayerSession session, Party party)
     {
         List<String> fields = new ArrayList<>();
@@ -2611,6 +2682,7 @@ public class WitcherServer
         }
 
         parties.remove(party.partyId);
+        scalingDirty.set(true);
 
         int removedQuestFoes;
         synchronized (NPC_WORLD_LOCK)
@@ -2661,6 +2733,7 @@ public class WitcherServer
 
         if (!usernameKey.equals(previousLeader))
         {
+            scalingDirty.set(true);
             broadcastParty(party);
             refreshLeaderCoop(party);
             return;
@@ -2668,6 +2741,8 @@ public class WitcherServer
 
         dbg("PARTY #%d leader %s left, promoted %s\n", party.partyId, previousLeader, party.leader());
 
+        refreshPartyScaling(party);
+        scalingDirty.set(true);
         broadcastParty(party);
         refreshLeaderCoop(party);
     }
@@ -3351,6 +3426,9 @@ public class WitcherServer
 
         PlayerSession requester = players.get(requesterKey);
 
+        queuePartyNotice(actor, "RESOLVEDIN",
+                requester != null ? requester.username : requesterName, "");
+
         if (requester == null)
         {
             queuePartyNotice(actor, "RESPFAIL", requesterName, "offline");
@@ -3380,7 +3458,20 @@ public class WitcherServer
         {
             if (request.requesterKey.equals(usernameKey) || request.targetKey.equals(usernameKey))
             {
-                partyRequests.remove(partyRequestKey(request.requesterKey, request.targetKey));
+                if (!partyRequests.remove(partyRequestKey(request.requesterKey, request.targetKey), request))
+                {
+                    continue;
+                }
+
+                if (request.requesterKey.equals(usernameKey))
+                {
+                    PlayerSession target = players.get(request.targetKey);
+
+                    if (target != null)
+                    {
+                        queuePartyNotice(target, "CANCELLEDIN", usernameKey, "");
+                    }
+                }
             }
         }
     }
@@ -3699,6 +3790,7 @@ public class WitcherServer
         {
             targetParty = new Party(nextPartyId.getAndIncrement());
             targetParty.add(targetKey);
+            refreshPartyScaling(targetParty);
             parties.put(targetParty.partyId, targetParty);
             playerParty.put(targetKey, targetParty.partyId);
             target.partyId = targetParty.partyId;
@@ -3713,6 +3805,7 @@ public class WitcherServer
 
         playerParty.put(actorKey, targetParty.partyId);
         actor.partyId = targetParty.partyId;
+        scalingDirty.set(true);
 
         dbg("PARTY #%d %s joined (leader %s, size %d)\n",
                 targetParty.partyId, actorKey, targetParty.leader(), targetParty.size());
@@ -3732,6 +3825,17 @@ public class WitcherServer
         for (Party party : parties.values())
         {
             broadcastParty(party);
+        }
+
+        for (PartyRequest request : partyRequests.values())
+        {
+            PlayerSession requester = players.get(request.requesterKey);
+            PlayerSession target = players.get(request.targetKey);
+
+            if (requester != null && target != null && now < request.expiresAtNanos)
+            {
+                queuePartyNotice(target, "REQUEST", requester.username, "");
+            }
         }
     }
 
@@ -5447,12 +5551,18 @@ public class WitcherServer
                         ? "UDP+TCP"
                         : tcpActive ? "TCP" : udpActive ? "UDP" : "none";
 
-                dbg("name=\"%s\"  ip=%s  ready=%s  transportWorked=%s  transportActive=%s  location=%s  coords=%s  lastSeen=%ds ago\n",
+                Party party = partyOf(normalizeUsernameKey(session.username));
+                String partyScale = party == null
+                        ? "server"
+                        : String.format("x%.1f/x%.0f", party.scaleStepMilli() / 1000.0, party.scaleMaxMilli() / 1000.0);
+
+                dbg("name=\"%s\"  ip=%s  ready=%s  transportWorked=%s  transportActive=%s  partyScale=%s  location=%s  coords=%s  lastSeen=%ds ago\n",
                         session.username,
                         session.remoteIp,
                         session.transportReady() ? "yes" : "no",
                         worked,
                         active,
+                        partyScale,
                         locationRaw.isEmpty() ? "?" : region,
                         coordsStr,
                         secsSinceSeen);
@@ -5846,6 +5956,7 @@ public class WitcherServer
         if (arg.equals("on") || arg.equals("off"))
         {
             NpcScaling.setEnabled(arg.equals("on"));
+            scalingDirty.set(true);
             dbg("NPC health scaling is now %s.\n", arg.equals("on") ? "enabled" : "disabled");
             printScaling();
             return;
@@ -5854,6 +5965,7 @@ public class WitcherServer
         if (arg.equals("reload"))
         {
             NpcScaling.load();
+            scalingDirty.set(true);
             printScaling();
             return;
         }
@@ -5869,6 +5981,7 @@ public class WitcherServer
             }
 
             NpcScaling.setPerExtraPlayer(value);
+            scalingDirty.set(true);
             printScaling();
             return;
         }
@@ -5884,6 +5997,7 @@ public class WitcherServer
             }
 
             NpcScaling.setMaxMultiplier(value);
+            scalingDirty.set(true);
             printScaling();
             return;
         }
@@ -5910,6 +6024,20 @@ public class WitcherServer
         }
 
         dbg("curve: %s\n\n", curve.toString());
+
+        for (Party party : parties.values())
+        {
+            dbg("party #%d leader=%s step=x%.1f max=x%.0f\n",
+                    party.partyId,
+                    party.leader(),
+                    party.scaleStepMilli() / 1000.0,
+                    party.scaleMaxMilli() / 1000.0);
+        }
+
+        if (!parties.isEmpty())
+        {
+            dbgNotime("\n");
+        }
     }
 
     private static Double parseDouble(String text)

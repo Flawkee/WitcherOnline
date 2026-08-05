@@ -64,6 +64,8 @@ public final class PacketRegistry
         register(30, "PVIS", Route.REALTIME, false, true);
         register(31, "TPREQ", Route.RELIABLE, true, false);
         register(32, "TPPOS", Route.RELIABLE, false, true);
+        register(33, "PSCALE", Route.RELIABLE, true, false);
+        register(34, "PSCALEACK", Route.RELIABLE, false, true);
 
         register(40, "SAVEBEG", Route.BULK, true, true);
         register(41, "SAVECHK", Route.BULK, true, true);

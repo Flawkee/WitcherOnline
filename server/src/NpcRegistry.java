@@ -2043,6 +2043,9 @@ public final class NpcRegistry
             }
 
             int count = 0;
+            int scalePartyId = 0;
+            boolean scaleGroupSet = false;
+            boolean mixedScaleGroups = false;
 
             for (PlayerSession session : SpatialIndex.query(
                     npc.area, npc.x, npc.y, Math.sqrt(radiusSquared)))
@@ -2067,6 +2070,16 @@ public final class NpcRegistry
                 }
 
                 count++;
+
+                if (!scaleGroupSet)
+                {
+                    scalePartyId = session.partyId;
+                    scaleGroupSet = true;
+                }
+                else if (scalePartyId != session.partyId)
+                {
+                    mixedScaleGroups = true;
+                }
             }
 
             if (count < 1)
@@ -2074,7 +2087,7 @@ public final class NpcRegistry
                 count = 1;
             }
 
-            final int milli = NpcScaling.scaleMilliFor(count);
+            final int milli = WitcherServer.scaleMilliFor(count, mixedScaleGroups ? 0 : scalePartyId);
 
             if (npc.scaleMilli != milli)
             {

@@ -276,8 +276,8 @@
 2111114273||preset_value_npcsync_world|World
 2111114274||preset_value_npcsync_party|Party Only
 2111114275||wo_party_request_title|Party Invitation
-2111114276||wo_party_request_body|<b>%s</b> wants to form a party with you.<br>Nearby NPCs, monsters and animals will be synchronised between you.<br>This request expires in 2 minutes.
-2111114277||wo_party_request_sent|Party request sent to %s. Waiting for approval (2 minutes).
+2111114276||wo_party_request_body|<b>%s</b> wants to form a party with you.<br>Nearby NPCs, monsters and animals will be synchronised between you.<br>This request expires in 1 minute.
+2111114277||wo_party_request_sent|Party request sent to %s. Waiting for approval (1 minute).
 2111114278||wo_party_request_rejected|%s declined your party request.
 2111114279||wo_party_request_expired|Your party request to %s expired.
 2111114280||wo_party_request_expired_in|The party request from %s expired.
@@ -322,3 +322,5 @@
 2111114319||wo_hud_region_plural|regions
 2111114320||wo_party_request_failed_far|You must draw nearer to %s before inviting them to your party.
 2111114321||wo_teleport_location_unavailable|%s's whereabouts cannot be found just now.
+2111114322||option_MPGhosts_PartyNpcScaleStep|Party Enemy HP Step (Leader)
+2111114323||option_MPGhosts_PartyNpcScaleMax|Party Enemy HP Cap (Leader)

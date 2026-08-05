@@ -369,6 +369,25 @@ static bool IsRealtimePacket(const std::string& opcode)
 	return RouteForPacket(opcode) == PacketRoute::Realtime;
 }
 
+static bool ParseIntValue(const std::string& text, int& value)
+{
+	value = 0;
+
+	if (!IsIntegerLiteral(text))
+		return false;
+
+	try
+	{
+		value = std::stoi(text);
+		return true;
+	}
+	catch (...)
+	{
+		value = 0;
+		return false;
+	}
+}
+
 static bool TransportReady()
 {
     return g_udpAvailable.load() && g_tcpAvailable.load();
@@ -899,6 +918,16 @@ void SendPartyRequest2(const char* opcode, const std::string& first, const std::
 	SendPacket(BuildPacket(opcode, BuildLocalPacketId(), fields), opcode);
 }
 
+void SendPartyScaling(int stepMilli, int maxMilli)
+{
+	std::vector<std::string> fields;
+
+	fields.push_back(std::to_string(stepMilli));
+	fields.push_back(std::to_string(maxMilli));
+
+	SendPacket(BuildPacket("PSCALE", BuildLocalPacketId(), fields), "PSCALE");
+}
+
 void ResetInboundDeltaCaches()
 {
 	std::lock_guard<std::mutex> lock(g_deltaMutex);
@@ -1260,6 +1289,7 @@ static void HandleServerPacket(const std::string& msg)
 		&& opcode != "SCENE"
 		&& opcode != "QITEM"
 		&& opcode != "TPPOS"
+		&& opcode != "PSCALEACK"
 		&& opcode != "MOVE" && opcode != "UPDATE1A" && opcode != "UPDATE1B" && opcode != "UPDATE2A" && opcode != "UPDATE2B" && opcode != "UPDATE3" && opcode != "UPDATE4")
 		return;
 
@@ -1282,6 +1312,21 @@ static void HandleServerPacket(const std::string& msg)
 
 	std::vector<std::string> fields(parts.begin() + 3, parts.end());
 	const unsigned long long nowMs = GetTickCount64();
+
+	if (opcode == "PSCALEACK")
+	{
+		int stepMilli = 0;
+		int maxMilli = 0;
+
+		if (fields.size() >= 2
+			&& ParseIntValue(fields[0], stepMilli)
+			&& ParseIntValue(fields[1], maxMilli))
+		{
+			ScriptBinding::SetPartyScaleAck(stepMilli, maxMilli);
+		}
+
+		return;
+	}
 
 	if (opcode == "PVIS")
 	{
