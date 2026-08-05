@@ -21,7 +21,7 @@ namespace w3mp {
 		constexpr long long kMaxInterpDelayMs = 400;
 		constexpr int kDefaultSnapshotHz = 40;
 		constexpr int kMaxExtrapolationMs = 250;
-		constexpr int kReplicaSampleCap = 12;
+		constexpr int kReplicaSampleCap = 24;
 		constexpr int kAddPerPacket = 8;
 		constexpr int kUpdPerPacket = 20;
 		constexpr int kDelPerPacket = 40;
@@ -44,6 +44,7 @@ namespace w3mp {
 		constexpr int kMaxPendingHits = 64;
 		constexpr int kIdentityRemapWindowMs = 60000;
 		constexpr int kPersistentConflictDelayMs = 1200;
+		constexpr int kImmediateNpcFlagsMask = 7;
 
 		struct TransformSample
 		{
@@ -143,6 +144,9 @@ namespace w3mp {
 			long long wantedAtMs = 0;
 			long long lastPacketMs = 0;
 			long long avgIntervalMs = 0;
+			long long avgJitterMs = 0;
+			long long lastTransformArrivalMs = 0;
+			long long adaptiveDelayMs = 0;
 			long long despawnAfterMs = 0;
 		};
 
@@ -337,6 +341,9 @@ namespace w3mp {
 		unsigned long long g_statAcksIn = 0;
 		unsigned long long g_statExtrapolated = 0;
 		unsigned long long g_statStarved = 0;
+		unsigned long long g_statTransformSamples = 0;
+		unsigned long long g_statTransformReplaced = 0;
+		unsigned long long g_statMetadataOnly = 0;
 		unsigned long long g_statBehaviorSent = 0;
 		unsigned long long g_statBehaviorReceived = 0;
 		unsigned long long g_statBehaviorApplied = 0;
@@ -841,6 +848,8 @@ namespace w3mp {
 				command.z = oldest.z;
 				command.heading = oldest.heading;
 				command.speed = 0.0f;
+				command.flags = (newest.flags & kImmediateNpcFlagsMask)
+					| (oldest.flags & ~kImmediateNpcFlagsMask);
 
 				if (renderTime > newest.t + kMaxExtrapolationMs)
 					g_statStarved++;
@@ -901,6 +910,8 @@ namespace w3mp {
 				command.y = a.y + (b.y - a.y) * alpha;
 				command.z = a.z + (b.z - a.z) * alpha;
 				command.heading = a.heading + ShortestAngle(a.heading, b.heading) * alpha;
+				command.flags = (newest.flags & kImmediateNpcFlagsMask)
+					| (a.flags & ~kImmediateNpcFlagsMask);
 
 				if (span > 0)
 				{
@@ -925,11 +936,75 @@ namespace w3mp {
 			return true;
 		}
 
+		void ResetReplicaTiming(Replica& replica)
+		{
+			replica.samples.clear();
+			replica.avgIntervalMs = 0;
+			replica.avgJitterMs = 0;
+			replica.lastTransformArrivalMs = 0;
+			replica.adaptiveDelayMs = 0;
+		}
+
+		void AppendTransformSample(Replica& replica, TransformSample sample, long long arrivalMs)
+		{
+			long long snapshotInterval = 0;
+
+			if (!replica.samples.empty())
+			{
+				if (sample.t < replica.samples.back().t)
+					sample.t = replica.samples.back().t;
+
+				snapshotInterval = sample.t - replica.samples.back().t;
+
+				if (snapshotInterval > 0 && snapshotInterval < 2000)
+				{
+					replica.avgIntervalMs = (replica.avgIntervalMs > 0)
+						? ((replica.avgIntervalMs * 7 + snapshotInterval) / 8)
+						: snapshotInterval;
+				}
+
+				if (sample.t == replica.samples.back().t)
+				{
+					replica.samples.back() = sample;
+					replica.lastTransformArrivalMs = arrivalMs;
+					g_statTransformReplaced++;
+					return;
+				}
+			}
+
+			if (replica.lastTransformArrivalMs > 0)
+			{
+				const long long arrivalInterval = arrivalMs - replica.lastTransformArrivalMs;
+				const long long expectedInterval = snapshotInterval > 0
+					? snapshotInterval
+					: replica.avgIntervalMs;
+
+				if (arrivalInterval >= 0 && arrivalInterval < 2000 && expectedInterval > 0)
+				{
+					const long long intervalDelta = arrivalInterval >= expectedInterval
+						? arrivalInterval - expectedInterval
+						: expectedInterval - arrivalInterval;
+					const long long delta = (std::min)(250ll, intervalDelta);
+					replica.avgJitterMs = (replica.avgJitterMs > 0)
+						? ((replica.avgJitterMs * 7 + delta) / 8)
+						: delta;
+				}
+			}
+
+			replica.lastTransformArrivalMs = arrivalMs;
+			replica.samples.push_back(sample);
+			g_statTransformSamples++;
+
+			while (static_cast<int>(replica.samples.size()) > kReplicaSampleCap)
+				replica.samples.pop_front();
+		}
+
 		void HandleSnapshot(const std::vector<std::string>& fields, bool isSpawn)
 		{
 			const long long snapshotMs = ParseLong(fields, 0);
 			const int count = ParseInt(fields, 1);
 			const long long now = ServerNow();
+			const long long arrivalNow = NowMs();
 			size_t cursor = 2;
 
 			for (int i = 0; i < count; ++i)
@@ -1003,8 +1078,7 @@ namespace w3mp {
 
 					if (replica.authorityRevision != 0 && replica.authorityRevision != authorityRevision)
 					{
-						replica.samples.clear();
-						replica.avgIntervalMs = 0;
+						ResetReplicaTiming(replica);
 					}
 
 					replica.authorityRevision = authorityRevision;
@@ -1091,8 +1165,7 @@ namespace w3mp {
 
 						if (replica.authorityRevision != 0 && replica.authorityRevision != authorityRevision)
 						{
-							replica.samples.clear();
-							replica.avgIntervalMs = 0;
+							ResetReplicaTiming(replica);
 						}
 
 						replica.authorityRevision = authorityRevision;
@@ -1108,25 +1181,23 @@ namespace w3mp {
 				if (replica.authorityActive || replica.lastPacketMs == 0)
 					replica.lastPacketMs = now;
 
-				if (!replica.samples.empty() && sample.t < replica.samples.back().t)
-					sample.t = replica.samples.back().t;
-
-				if (!replica.samples.empty())
+				if (!isSpawn && (mask & 3) == 0)
 				{
-					const long long interval = sample.t - replica.samples.back().t;
-
-					if (interval > 0 && interval < 2000)
+					if (!replica.samples.empty())
 					{
-						replica.avgIntervalMs = (replica.avgIntervalMs > 0)
-							? ((replica.avgIntervalMs * 3 + interval) / 4)
-							: interval;
+						TransformSample& latest = replica.samples.back();
+						latest.hpPermille = sample.hpPermille;
+						latest.flags = sample.flags;
+						latest.targetPlayerId = sample.targetPlayerId;
+						latest.terminalState = sample.terminalState;
+						latest.terminalRevision = sample.terminalRevision;
+						latest.terminalAttackerId = sample.terminalAttackerId;
 					}
+					g_statMetadataOnly++;
+					continue;
 				}
 
-				replica.samples.push_back(sample);
-
-				while (static_cast<int>(replica.samples.size()) > kReplicaSampleCap)
-					replica.samples.pop_front();
+				AppendTransformSample(replica, sample, arrivalNow);
 			}
 		}
 
@@ -1241,6 +1312,7 @@ namespace w3mp {
 			const long long snapshotMs = ParseLong(fields, 0);
 			const int count = ParseInt(fields, 1);
 			const long long now = ServerNow();
+			const long long arrivalNow = NowMs();
 			const size_t stride = 11;
 			for (int i = 0; i < count; ++i)
 			{
@@ -1275,12 +1347,8 @@ namespace w3mp {
 				sample.terminalState = replica.terminalState;
 				sample.terminalRevision = replica.terminalRevision;
 				sample.terminalAttackerId = replica.terminalAttackerId;
-			if (!replica.samples.empty() && sample.t < replica.samples.back().t)
-				sample.t = replica.samples.back().t;
-			replica.samples.push_back(sample);
-			while (static_cast<int>(replica.samples.size()) > kReplicaSampleCap)
-				replica.samples.pop_front();
-			replica.lastPacketMs = now;
+				AppendTransformSample(replica, sample, arrivalNow);
+				replica.lastPacketMs = now;
 			}
 			return;
 		}
@@ -2129,7 +2197,10 @@ namespace w3mp {
 
 			if (replica.avgIntervalMs > 0)
 			{
-				const long long needed = replica.avgIntervalMs * 2 + 15;
+				const long long needed = static_cast<long long>(g_latencyMs)
+					+ replica.avgIntervalMs * 2
+					+ replica.avgJitterMs * 2
+					+ 15;
 
 				if (needed > delayMs)
 					delayMs = needed;
@@ -2137,6 +2208,17 @@ namespace w3mp {
 
 			if (delayMs > kMaxInterpDelayMs)
 				delayMs = kMaxInterpDelayMs;
+
+			if (replica.adaptiveDelayMs <= 0 || delayMs > replica.adaptiveDelayMs)
+			{
+				replica.adaptiveDelayMs = delayMs;
+			}
+			else if (delayMs < replica.adaptiveDelayMs)
+			{
+				replica.adaptiveDelayMs = (replica.adaptiveDelayMs * 31 + delayMs) / 32;
+			}
+
+			delayMs = replica.adaptiveDelayMs;
 
 			const long long renderTime = serverNow - delayMs;
 
@@ -2694,6 +2776,19 @@ namespace w3mp {
 	std::string NpcNet::Report()
 	{
 		std::lock_guard<std::mutex> lock(g_mutex);
+		long long delayTotal = 0;
+		long long jitterTotal = 0;
+		long long timingCount = 0;
+
+		for (const auto& entry : g_replicas)
+		{
+			const Replica& replica = entry.second;
+			if (replica.adaptiveDelayMs <= 0)
+				continue;
+			delayTotal += replica.adaptiveDelayMs;
+			jitterTotal += replica.avgJitterMs;
+			timingCount++;
+		}
 
 		return "owned=" + std::to_string(g_owned.size())
 			+ " replicas=" + std::to_string(g_replicas.size())
@@ -2718,6 +2813,11 @@ namespace w3mp {
 			+ " acksIn=" + std::to_string(g_statAcksIn)
 			+ " extrapolated=" + std::to_string(g_statExtrapolated)
 			+ " starved=" + std::to_string(g_statStarved)
+			+ " transformSamples=" + std::to_string(g_statTransformSamples)
+			+ " transformReplaced=" + std::to_string(g_statTransformReplaced)
+			+ " metadataOnly=" + std::to_string(g_statMetadataOnly)
+			+ " interpMs=" + std::to_string(timingCount > 0 ? delayTotal / timingCount : g_interpDelayMs)
+			+ " jitterMs=" + std::to_string(timingCount > 0 ? jitterTotal / timingCount : 0)
 			+ " behaviorSent=" + std::to_string(g_statBehaviorSent)
 			+ " behaviorIn=" + std::to_string(g_statBehaviorReceived)
 			+ " behaviorApplied=" + std::to_string(g_statBehaviorApplied)

@@ -239,6 +239,18 @@ class r_NpcActions
         return 1;
     }
 
+    public function usesMovement(eventName : name) : bool
+    {
+        return eventName == 'Attack'
+            || eventName == '3StateAttack'
+            || eventName == 'AttackStart'
+            || eventName == 'CombatAction'
+            || eventName == 'CombatActionFriendly'
+            || eventName == 'CounterAttack'
+            || eventName == 'Dodge'
+            || eventName == 'ShootTongue';
+    }
+
     public function count() : int
     {
         ensure();

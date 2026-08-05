@@ -75,6 +75,8 @@ class r_Replica
     public var synthetic     : bool;
     public var hasTicket     : bool;
     public var authorityReady : bool;
+    public var actionMotionGuard : bool;
+    public var actionGuarded : bool;
     public var questOriginalImmortality : int;
     public var questOriginalAttackable : bool;
     public var questOriginalHitAnim : bool;
@@ -91,6 +93,8 @@ class r_Replica
     default synthetic = false;
     default hasTicket = false;
     default authorityReady = false;
+    default actionMotionGuard = false;
+    default actionGuarded = false;
     default questOriginalImmortality = -1;
     default questOriginalAttackable = false;
     default questOriginalHitAnim = false;
@@ -186,6 +190,8 @@ class r_NpcSync
     private var statActionProbes : int;
     private var statActionSuppressed : int;
     private var statActionAllowed : int;
+    private var statActionGuarded : int;
+    private var statActionBlended : int;
 
     private var actionLogging : bool;
     private var actionForceMode : int;
@@ -273,8 +279,8 @@ class r_NpcSync
     default QUEST_HARD_SNAP = 45.0;
     default FREE_RADIUS = 2.0;
     default QUEST_FREE_RADIUS = 0.75;
-    default ACTION_FREE_RADIUS = 6.0;
-    default ACTION_FREE_WINDOW = 1.5;
+    default ACTION_FREE_RADIUS = 2.0;
+    default ACTION_FREE_WINDOW = 0.5;
     default ACTION_COMMAND_WINDOW = 1.2;
     default SLIDE_WINDOW = 0.03;
     default QUEST_SLIDE_WINDOW = 0.12;
@@ -556,6 +562,8 @@ class r_NpcSync
         }
 
         record.lastActionSeq = seq;
+        record.actionMotionGuard = false;
+        record.lastActionAt = 0.0;
 
         code = (flags / 262144) & 8191;
         attackType = (flags / 512) & 63;
@@ -572,6 +580,8 @@ class r_NpcSync
         {
             return;
         }
+
+        record.actionMotionGuard = getActions().usesMovement(eventName);
 
         record.pendingActionAt = theGame.GetEngineTimeAsSeconds();
         record.pendingType = attackType;
@@ -594,11 +604,11 @@ class r_NpcSync
             {
                 statActionForced += 1;
                 record.pendingActionAt = -1.0;
+                record.lastActionAt = theGame.GetEngineTimeAsSeconds();
             }
         }
 
         statActionApplied += 1;
-        record.lastActionAt = record.pendingActionAt;
 
         if(actionLogging || debugLogging)
         {
@@ -749,6 +759,8 @@ class r_NpcSync
             replicas[i].lastPredictAt = 0.0;
             replicas[i].lastActionAt = 0.0;
             replicas[i].pendingActionAt = -1.0;
+            replicas[i].actionMotionGuard = false;
+            replicas[i].actionGuarded = false;
         }
 
         for(i = 0; i < tracked.Size(); i += 1)
@@ -926,6 +938,8 @@ class r_NpcSync
             replicas[index].pendingActionAt = now;
             replicas[index].pendingType = WO_NpcBehaviorInt(i, 6);
             replicas[index].pendingDir = WO_NpcBehaviorInt(i, 7);
+            replicas[index].actionMotionGuard = false;
+            replicas[index].actionGuarded = false;
             accepted = replicas[index].actor.RaiseForceEvent(eventName);
 
             if(!accepted)
@@ -989,6 +1003,13 @@ class r_NpcSync
             }
 
             tracked.Clear();
+
+            for(i = 0; i < replicas.Size(); i += 1)
+            {
+                replicas[i].actionMotionGuard = false;
+                replicas[i].actionGuarded = false;
+            }
+
             statSuspends += 1;
 
             if(pathCache)
@@ -2091,6 +2112,8 @@ class r_NpcSync
         record.synthetic = false;
         record.hasTicket = false;
         record.authorityReady = false;
+        record.actionMotionGuard = false;
+        record.actionGuarded = false;
         record.questOriginalImmortality = -1;
         record.questOriginalAttackable = false;
         record.questOriginalHitAnim = false;
@@ -3079,6 +3102,8 @@ class r_NpcSync
         record.appliedTarget = -1;
         record.authorityReady = false;
         record.nextDriveAt = 0.0;
+        record.actionMotionGuard = false;
+        record.actionGuarded = false;
     }
 
     private function spawnReplica(commandIndex : int, canonicalId : int, now : float)
@@ -3321,6 +3346,8 @@ class r_NpcSync
         record.actor.RemoveTag('WOQuestBound');
         record.prepared = false;
         record.authorityReady = false;
+        record.actionMotionGuard = false;
+        record.actionGuarded = false;
     }
 
     private function applyQuestTerminalNative(record : r_Replica, now : float)
@@ -3611,6 +3638,12 @@ class r_NpcSync
             }
         }
 
+        if(record.terminalState != 0)
+        {
+            record.actionMotionGuard = false;
+            record.actionGuarded = false;
+        }
+
         npc = record.actor;
 
         if(!npc)
@@ -3673,6 +3706,8 @@ class r_NpcSync
             || distance > snapLimit)
         {
             cancelReplicaMovement(record);
+            record.actionMotionGuard = false;
+            record.actionGuarded = false;
 
             rot.Pitch = 0.0;
             rot.Yaw = heading;
@@ -3693,6 +3728,32 @@ class r_NpcSync
         }
 
         record.nextDriveAt = now + driveInterval;
+
+        if(record.actionMotionGuard
+            && (now - record.lastActionAt) >= 0.0
+            && (now - record.lastActionAt) < ACTION_FREE_WINDOW
+            && distance < ACTION_FREE_RADIUS)
+        {
+            cancelReplicaMovement(record);
+            if(!record.actionGuarded)
+            {
+                statActionGuarded += 1;
+            }
+            record.actionGuarded = true;
+            return;
+        }
+
+        if(record.actionGuarded)
+        {
+            record.actionGuarded = false;
+
+            if(slideWindow < 0.2)
+            {
+                slideWindow = 0.2;
+            }
+
+            statActionBlended += 1;
+        }
 
         if(distance < freeRadius)
         {
@@ -4019,6 +4080,8 @@ class r_NpcSync
             + " probes=" + statActionProbes
             + " allowed=" + statActionAllowed
             + " suppressed=" + statActionSuppressed
+            + " guarded=" + statActionGuarded
+            + " blended=" + statActionBlended
             + " forceMode=" + actionForceMode);
 
         dbg("npc_net", WO_NpcReport() + " latencyMs=" + WO_NpcLatency());

@@ -5135,7 +5135,7 @@ public class WitcherServer
                     && session.endpoint != null
                     && (now - session.lastUdpSeen) <= 6_000_000_000L;
             UdpBatcher batcher = udpBatcher;
-            String replaceKey = "NPCMOV".equals(opcode) ? null : realtimeKey;
+            String replaceKey = "NPCFAST".equals(opcode) ? null : realtimeKey;
             byte[] packetBytes;
             try
             {
