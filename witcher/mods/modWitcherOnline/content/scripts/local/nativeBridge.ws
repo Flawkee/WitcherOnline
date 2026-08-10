@@ -295,6 +295,10 @@ function WO_PumpInbound(maxMessages : int)
                 WO_ApplyPlayerVfxImpact();
                 break;
 
+            case 20:
+                WO_ApplyServerAnnouncement();
+                break;
+
 
 
             default:
@@ -400,6 +404,16 @@ function WO_ApplyPlayerVfxImpact()
     theGame.r_getMultiplayerClient().onRemotePlayerVfxImpact(
         WO_PlayerId(), WO_Int(0), WO_Int(1), WO_ToName(WO_Str(2)),
         WO_Float(3), WO_Float(4), WO_Float(5), WO_Int(6) != 0, WO_Int(7));
+}
+
+function WO_ApplyServerAnnouncement()
+{
+    if(WO_FieldCount() < 1)
+    {
+        return;
+    }
+
+    theGame.r_getMultiplayerClient().showServerAnnouncement(WO_Str(0));
 }
 
 function WO_ApplyParty()

@@ -25,7 +25,8 @@ namespace w3mp {
 		QuestItem = 16,
 		PlayerPosition = 17,
 		PlayerVfxSpawn = 18,
-		PlayerVfxImpact = 19
+		PlayerVfxImpact = 19,
+		ServerAnnouncement = 20
 	};
 
 	enum class ClientStatus

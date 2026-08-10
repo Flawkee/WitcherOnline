@@ -1284,6 +1284,17 @@ static void HandleServerPacket(const std::string& msg)
 
 	const std::string& opcode = parts[0];
 
+	if (opcode == "ANNOUNCE")
+	{
+		if (parts.size() != 4 || parts[1] != "0" || parts[2] != "Server" || parts[3].empty())
+			return;
+
+		std::vector<std::string> fields;
+		fields.push_back(parts[3]);
+		QueueInbound(InboundOpcode::ServerAnnouncement, 0, 0, "Server", std::move(fields));
+		return;
+	}
+
 	const bool isNetOpcode = opcode == "NPCNEW" || opcode == "NPCMOV" || opcode == "NPCFAST" || opcode == "NPCEND"
 		|| opcode == "NPCDEAD" || opcode == "NPCHITF" || opcode == "NPCACKF" || opcode == "TSYNCR" || opcode == "NPCKILL"
 		|| opcode == "NPCGIVE" || opcode == "NPCDROP" || opcode == "NPCGONE" || opcode == "PSTATEF"

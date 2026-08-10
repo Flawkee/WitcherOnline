@@ -5780,6 +5780,32 @@ public class WitcherServer
             return;
         }
 
+        if (line.equals("announce") || line.startsWith("announce "))
+        {
+            String message = trimCommandArg(line, "announce");
+
+            if (message.isEmpty() || message.length() > 256)
+            {
+                dbg("Usage: announce <message>  (1-256 characters)\n\n");
+                return;
+            }
+
+            List<PlayerSession> recipients = new ArrayList<>(players.values());
+            String packet = buildTypedPacket("ANNOUNCE", 0, "Server", List.of(message));
+            int sent = 0;
+
+            for (PlayerSession recipient : recipients)
+            {
+                if (sendToSession(recipient, packet, "ANNOUNCE", "ANNOUNCE"))
+                {
+                    sent++;
+                }
+            }
+
+            dbg("Announcement sent to %d/%d connected player(s).\n\n", sent, recipients.size());
+            return;
+        }
+
         if (line.equals("stats"))
         {
             long now = System.nanoTime();
@@ -6123,6 +6149,7 @@ public class WitcherServer
             dbg("whitelist on|off|<ip>     - toggle whitelist or add IP to whitelist\n");
             dbg("whitelist remove <ip>     - remove IP from whitelist\n");
             dbg("list                      - list connected players\n");
+            dbg("announce <message>        - display a server message to all connected players\n");
             dbg("stats                     - show broadcast/server health counters\n");
             dbg("transport                 - show per-path and per-opcode transport counters\n");
             dbg("npc                       - show NPC sync cells, authority and counters\n");

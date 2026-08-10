@@ -6715,6 +6715,14 @@ statemachine class r_MultiplayerClient
         }
     }
 
+    public function showServerAnnouncement(message : string)
+    {
+        if(message != "" && GetWitcherPlayer())
+        {
+            GetWitcherPlayer().DisplayHudMessage(message);
+        }
+    }
+
     public function updatePlayerData(serverPlayerId : int, idName : name, movementSequence : int, x : float, y : float, z : float, w : float, heading : float, speed : float,
                                             area : int, clientInGame : bool, heldItem : string, offhandItem : string, inCombat : bool, 
                                             isSwimming : bool, curState : name, lastJumpTime : float, lastJumpType : EJumpType, 
