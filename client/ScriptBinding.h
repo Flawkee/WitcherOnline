@@ -23,7 +23,9 @@ namespace w3mp {
 		PartyInvite = 14,
 		SceneStart = 15,
 		QuestItem = 16,
-		PlayerPosition = 17
+		PlayerPosition = 17,
+		PlayerVfxSpawn = 18,
+		PlayerVfxImpact = 19
 	};
 
 	enum class ClientStatus

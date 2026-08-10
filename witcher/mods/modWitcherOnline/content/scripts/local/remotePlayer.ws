@@ -92,6 +92,7 @@ statemachine class r_RemotePlayer
     private var signEndPrevTime : float;
     private var signEventPrevSeq : int;
     private var ghostSignEntity : W3SignEntity;
+    private var visualProjectiles : array<r_VisualProjectile>;
 
     default signEndPrevTime = -1.0;
     default signEventPrevSeq = -1;
@@ -335,6 +336,14 @@ statemachine class r_RemotePlayer
     public var morph : CActor;
 
     public var horseAppearance : string;
+    public var horseBlinders : string;
+    public var horseSaddle : string;
+    public var horseBags : string;
+    public var horseTrophy : string;
+    public var appliedHorseBlinders : string;
+    public var appliedHorseSaddle : string;
+    public var appliedHorseBags : string;
+    public var appliedHorseTrophy : string;
     public var prevEmote : int;
     public var prevPropEmote : bool;
 
@@ -1278,6 +1287,8 @@ statemachine class r_RemotePlayer
         var i : int;
         var ridingPlayer : r_RemotePlayer;
 
+        clearVisualProjectiles();
+
         ridingPlayer = theGame.r_getMultiplayerClient().getRidingPlayer();
 
         if(ghost)
@@ -1498,6 +1509,7 @@ statemachine class r_RemotePlayer
         updateGeraltAnims();
         updateHeldItems();
         updateEquippedItems();
+        updateVisualProjectiles();
         castGhostSign();
         endGhostSign();
         playEmotes();
@@ -1514,6 +1526,152 @@ statemachine class r_RemotePlayer
         updateOneliners();
         updateOnelinerHeights();
         prune();
+    }
+
+    public function receiveVisualProjectile(eventId : int, kind : int, itemName : name,
+        origin : Vector, target : Vector, duration : float)
+    {
+        var i : int;
+        var projectile : r_VisualProjectile;
+
+        if(!ghost || eventId <= 0 || itemName == '')
+        {
+            return;
+        }
+
+        for(i = 0; i < visualProjectiles.Size(); i += 1)
+        {
+            if(visualProjectiles[i].eventId == eventId)
+            {
+                return;
+            }
+        }
+
+        projectile.eventId = eventId;
+        projectile.kind = kind;
+        projectile.origin = origin;
+        projectile.target = target;
+        projectile.startedAt = theGame.GetEngineTimeAsSeconds();
+        projectile.duration = duration;
+        projectile.entity = wo_createVisualProjectile(ghost, itemName, origin);
+
+        if(!projectile.entity)
+        {
+            return;
+        }
+
+        wo_startVisualProjectile(projectile.entity);
+        visualProjectiles.PushBack(projectile);
+    }
+
+    public function receiveVisualImpact(eventId : int, kind : int, itemName : name, position : Vector, water : bool, phase : int)
+    {
+        var i : int;
+
+        for(i = 0; i < visualProjectiles.Size(); i += 1)
+        {
+            if(visualProjectiles[i].eventId == eventId)
+            {
+                finishVisualProjectile(i, position, water, phase);
+                return;
+            }
+        }
+
+        if(phase == 3)
+        {
+            return;
+        }
+
+        receiveVisualProjectile(eventId, kind, itemName, position, position, 0.08);
+
+        for(i = 0; i < visualProjectiles.Size(); i += 1)
+        {
+            if(visualProjectiles[i].eventId == eventId)
+            {
+                finishVisualProjectile(i, position, water, phase);
+                return;
+            }
+        }
+    }
+
+    private function updateVisualProjectiles()
+    {
+        var i : int;
+        var now : float;
+        var fraction : float;
+        var position : Vector;
+
+        now = theGame.GetEngineTimeAsSeconds();
+
+        for(i = visualProjectiles.Size() - 1; i >= 0; i -= 1)
+        {
+            if(!visualProjectiles[i].entity
+                || (visualProjectiles[i].kind == 2 && now - visualProjectiles[i].startedAt > 3.0)
+                || (visualProjectiles[i].kind == 1 && now - visualProjectiles[i].startedAt > 35.0))
+            {
+                destroyVisualProjectile(i);
+                continue;
+            }
+
+            fraction = (now - visualProjectiles[i].startedAt) / visualProjectiles[i].duration;
+
+            if(fraction < 0.0)
+            {
+                fraction = 0.0;
+            }
+            else if(fraction > 1.0)
+            {
+                fraction = 1.0;
+            }
+
+            position = visualProjectiles[i].origin
+                + ((visualProjectiles[i].target - visualProjectiles[i].origin) * fraction);
+            visualProjectiles[i].entity.Teleport(position);
+        }
+    }
+
+    private function finishVisualProjectile(index : int, position : Vector, water : bool, phase : int)
+    {
+        if(index < 0 || index >= visualProjectiles.Size())
+        {
+            return;
+        }
+
+        if(visualProjectiles[index].entity)
+        {
+            visualProjectiles[index].entity.Teleport(position);
+            wo_finishVisualProjectile(visualProjectiles[index].entity, visualProjectiles[index].kind, water, phase);
+        }
+
+        if(phase == 3 || visualProjectiles[index].kind == 2)
+        {
+            visualProjectiles.Erase(index);
+        }
+    }
+
+    private function destroyVisualProjectile(index : int)
+    {
+        if(index < 0 || index >= visualProjectiles.Size())
+        {
+            return;
+        }
+
+        if(visualProjectiles[index].entity)
+        {
+            visualProjectiles[index].entity.Destroy();
+        }
+
+        visualProjectiles.Erase(index);
+    }
+
+    private function clearVisualProjectiles()
+    {
+        var i : int;
+
+        for(i = visualProjectiles.Size() - 1; i >= 0; i -= 1)
+        {
+            destroyVisualProjectile(i);
+        }
     }
 
     private function castGhostSign()
@@ -6276,9 +6434,9 @@ state WO_UpdateCPC in r_RemotePlayer
 
         if(parent.horseAppearance == "0")
         {
-            if(((CActor)parent.horse).GetAppearance() != 'horse_draft_vehicle_02')
+            if(((CActor)parent.horse).GetAppearance() != 'player_horse')
             {
-                ((CActor)parent.horse).ApplyAppearance("horse_draft_vehicle_02");
+                ((CActor)parent.horse).ApplyAppearance("player_horse");
             }
         }
         else if(parent.horseAppearance == "1")
@@ -6325,6 +6483,112 @@ state WO_UpdateCPC in r_RemotePlayer
         }
     }
 
+    private function clearHorseEquipment(itemName : string)
+    {
+        var ids : array<SItemUniqueId>;
+        var i : int;
+
+        if(!parent.horse || itemName == "" || itemName == "none")
+        {
+            return;
+        }
+
+        ids = parent.horse.GetInventory().GetItemsByName(WO_ToName(itemName));
+
+        for(i = 0; i < ids.Size(); i += 1)
+        {
+            parent.horse.GetInventory().UnmountItem(ids[i], true);
+            parent.horse.GetInventory().DespawnItem(ids[i]);
+        }
+    }
+
+    private function revealHorseEquipment(itemId : SItemUniqueId)
+    {
+        var itemEntity : CItemEntity;
+        var components : array<CComponent>;
+        var drawable : CDrawableComponent;
+        var i : int;
+
+        if(!parent.horse)
+        {
+            return;
+        }
+
+        itemEntity = parent.horse.GetInventory().GetItemEntityUnsafe(itemId);
+
+        if(!itemEntity)
+        {
+            return;
+        }
+
+        components = itemEntity.GetComponentsByClassName('CDrawableComponent');
+
+        for(i = 0; i < components.Size(); i += 1)
+        {
+            drawable = (CDrawableComponent)components[i];
+
+            if(drawable)
+            {
+                drawable.SetVisible(true);
+            }
+        }
+    }
+
+    private function applyHorseEquipment(desired : string, applied : string) : string
+    {
+        var ids : array<SItemUniqueId>;
+
+        if(!parent.horse)
+        {
+            return applied;
+        }
+
+        if(desired == applied)
+        {
+            return applied;
+        }
+
+        clearHorseEquipment(applied);
+
+        if(desired == "" || desired == "none")
+        {
+            return "none";
+        }
+
+        ids = parent.horse.GetInventory().AddAnItem(WO_ToName(desired), 1, true, true);
+
+        if(ids.Size() == 0)
+        {
+            return "none";
+        }
+
+        parent.horse.GetInventory().MountItem(ids[0]);
+        revealHorseEquipment(ids[0]);
+        return desired;
+    }
+
+    function updateHorseEquipment()
+    {
+        if(!parent.horse)
+        {
+            return;
+        }
+
+        if(parent.horseAppearance != "0")
+        {
+            parent.appliedHorseBlinders = applyHorseEquipment("none", parent.appliedHorseBlinders);
+            parent.appliedHorseSaddle = applyHorseEquipment("none", parent.appliedHorseSaddle);
+            parent.appliedHorseBags = applyHorseEquipment("none", parent.appliedHorseBags);
+            parent.appliedHorseTrophy = applyHorseEquipment("none", parent.appliedHorseTrophy);
+            return;
+        }
+
+        parent.appliedHorseBlinders = applyHorseEquipment(parent.horseBlinders, parent.appliedHorseBlinders);
+        parent.appliedHorseSaddle = applyHorseEquipment(parent.horseSaddle, parent.appliedHorseSaddle);
+        parent.appliedHorseBags = applyHorseEquipment(parent.horseBags, parent.appliedHorseBags);
+        parent.appliedHorseTrophy = applyHorseEquipment(parent.horseTrophy, parent.appliedHorseTrophy);
+    }
+
     private var lastHorseMountRequestAt : float;
 
     latent function spawnHorse()
@@ -6342,7 +6606,14 @@ state WO_UpdateCPC in r_RemotePlayer
 
         if(!parent.horse)
         {
-            temp_2 = (CEntityTemplate)LoadResourceAsync("dlc\dlc_mpmod\data\entities\horse_vehicle.w2ent", true);
+            if(parent.horseAppearance == "0")
+            {
+                temp_2 = (CEntityTemplate)LoadResourceAsync("characters\npc_entities\animals\horse\player_horse.w2ent", true);
+            }
+            else
+            {
+                temp_2 = (CEntityTemplate)LoadResourceAsync("dlc\dlc_mpmod\data\entities\horse_vehicle.w2ent", true);
+            }
 
             if(!temp_2 || !parent.ghost)
             {
@@ -6363,8 +6634,13 @@ state WO_UpdateCPC in r_RemotePlayer
             parent.horse.EnableCollisions(false);
             parent.horse.EnableCharacterCollisions(false);
             parent.horse.SetGameplayVisibility(false);
+            parent.appliedHorseBlinders = "";
+            parent.appliedHorseSaddle = "";
+            parent.appliedHorseBags = "";
+            parent.appliedHorseTrophy = "";
 
             updateHorseAppearance();
+            updateHorseEquipment();
 
             adjustor = parent.ghost.GetMovingAgentComponent().GetMovementAdjustor();
 
@@ -6821,6 +7097,7 @@ state WO_UpdateCPC in r_RemotePlayer
 
                 moveHorse();
                 updateHorseAppearance();
+                updateHorseEquipment();
 
                 parent.lastMounted = true;
             }

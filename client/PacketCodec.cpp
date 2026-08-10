@@ -23,7 +23,7 @@ namespace w3mp
 		constexpr std::uint8_t kFloat32 = 3;
 		constexpr std::uint8_t kString16 = 4;
 
-		constexpr std::array<PacketSpec, 64> kPackets = {{
+		constexpr std::array<PacketSpec, 66> kPackets = {{
 			{1, "HELLO", PacketRoute::Control, true, false},
 			{2, "HELLOACK", PacketRoute::Control, false, true},
 			{3, "PING", PacketRoute::Realtime, true, false},
@@ -87,7 +87,9 @@ namespace w3mp
 			{85, "NPCEVTF", PacketRoute::Reliable, false, true},
 			{86, "NPCEACK", PacketRoute::Reliable, true, false},
 			{90, "TSYNC", PacketRoute::Realtime, true, false},
-			{91, "TSYNCR", PacketRoute::Realtime, false, true}
+			{91, "TSYNCR", PacketRoute::Realtime, false, true},
+			{92, "PVFXS", PacketRoute::Reliable, true, true},
+			{93, "PVFXI", PacketRoute::Reliable, true, true}
 		}};
 
 		void Write16(std::vector<std::uint8_t>& output, std::uint16_t value)

@@ -1026,6 +1026,12 @@ public class WitcherServer
 
         if (!isPlayerStateOpcode(opcode))
         {
+            if ("PVFXS".equals(opcode) || "PVFXI".equals(opcode))
+            {
+                handlePlayerVfx(socket, current, opcode, frozenFields);
+            }
+            else
+            {
             if (isNpcWorldOpcode(opcode))
             {
                 synchronized (NPC_WORLD_LOCK)
@@ -1036,6 +1042,7 @@ public class WitcherServer
             else
             {
                 handleNpcMessage(opcode, current, frozenFields, now);
+            }
             }
             return;
         }
@@ -2326,6 +2333,59 @@ public class WitcherServer
         }
 
         return trimmed;
+    }
+
+    private static void handlePlayerVfx(
+            DatagramSocket socket,
+            PlayerSession source,
+            String opcode,
+            List<String> fields)
+    {
+        boolean impact = "PVFXI".equals(opcode);
+        int requiredFields = "PVFXS".equals(opcode) ? 10 : 8;
+
+        if (fields.size() != requiredFields)
+        {
+            return;
+        }
+
+        Integer eventId = parseIntegerOrNull(fields.get(0));
+        Integer kind = parseIntegerOrNull(fields.get(1));
+        Integer phase = impact ? parseIntegerOrNull(fields.get(7)) : 0;
+
+        if (eventId == null || eventId <= 0 || kind == null || kind < 1 || kind > 2
+                || fields.get(2).isEmpty() || fields.get(2).length() > 128
+                || (impact && (phase == null || phase < 1 || phase > 3)))
+        {
+            return;
+        }
+
+        for (int index = 3; index < requiredFields - (impact ? 1 : 0); index++)
+        {
+            try
+            {
+                float value = Float.parseFloat(fields.get(index));
+                if (!Float.isFinite(value) || Math.abs(value) > 1000000.0f)
+                {
+                    return;
+                }
+            }
+            catch (NumberFormatException invalid)
+            {
+                return;
+            }
+        }
+
+        List<PlayerSession> recipients = nearbyRecipients(source);
+        recipients.remove(source);
+        dbg("PVFX %s event=%d kind=%d item=%s source=%s recipients=%d\n",
+                opcode,
+                eventId,
+                kind,
+                fields.get(2),
+                describePlayerId(source.playerId),
+                recipients.size());
+        sendChunk(socket, recipients, source, opcode, fields);
     }
 
     static String sanitizeNpcTypeToken(String value)

@@ -114,6 +114,7 @@ statemachine class r_MultiplayerClient
     private var signSkillLevel : int;
     private var signDuration : float;
     private var signCharges : int;
+    private var vfxSequence : int;
     private var lastActionTime : float;
     private var lastAction : EPlayerExplorationAction;
 
@@ -5660,6 +5661,18 @@ statemachine class r_MultiplayerClient
         return lastSignTime;
     }
 
+    public function nextVfxSequence() : int
+    {
+        vfxSequence += 1;
+
+        if(vfxSequence <= 0 || vfxSequence > 2000000000)
+        {
+            vfxSequence = 1;
+        }
+
+        return vfxSequence;
+    }
+
     public function setLastSignTime(val : float)
     {
         this.lastSignTime = val;
@@ -6674,6 +6687,34 @@ statemachine class r_MultiplayerClient
         }
     }
 
+    public function onRemotePlayerVfxSpawn(playerId : int, eventId : int, kind : int, itemName : name,
+        originX : float, originY : float, originZ : float,
+        targetX : float, targetY : float, targetZ : float, duration : float)
+    {
+        var player : r_RemotePlayer;
+
+        player = hm_getRemotePlayer(playersByServerId, playerId);
+
+        if(player)
+        {
+            player.receiveVisualProjectile(eventId, kind, itemName,
+                Vector(originX, originY, originZ), Vector(targetX, targetY, targetZ), duration);
+        }
+    }
+
+    public function onRemotePlayerVfxImpact(playerId : int, eventId : int, kind : int, itemName : name,
+        x : float, y : float, z : float, water : bool, phase : int)
+    {
+        var player : r_RemotePlayer;
+
+        player = hm_getRemotePlayer(playersByServerId, playerId);
+
+        if(player)
+        {
+            player.receiveVisualImpact(eventId, kind, itemName, Vector(x, y, z), water, phase);
+        }
+    }
+
     public function updatePlayerData(serverPlayerId : int, idName : name, movementSequence : int, x : float, y : float, z : float, w : float, heading : float, speed : float,
                                             area : int, clientInGame : bool, heldItem : string, offhandItem : string, inCombat : bool, 
                                             isSwimming : bool, curState : name, lastJumpTime : float, lastJumpType : EJumpType, 
@@ -6688,7 +6729,8 @@ statemachine class r_MultiplayerClient
                                             morphActive : bool, morphType : name, morphAppearance : name, morphRotation : float,
                                             signCastType : ESignType, signAlternate : bool, signEndTime : float,
                                             signEventCode : int, signEventSeq : int,
-                                            signSkillLevel : int, signDuration : float, signCharges : int)
+                                            signSkillLevel : int, signDuration : float, signCharges : int,
+                                            horseBlinders : string, horseSaddle : string, horseBags : string, horseTrophy : string)
     {
         var i : int;
         var p : r_RemotePlayer;
@@ -6963,6 +7005,10 @@ statemachine class r_MultiplayerClient
         p.outgoingTradePrice = outgoingTradePrice;
         p.outgoingTradeFlag = outgoingTradeFlag;
         p.horseAppearance = horseAppearance;
+        p.horseBlinders = horseBlinders;
+        p.horseSaddle = horseSaddle;
+        p.horseBags = horseBags;
+        p.horseTrophy = horseTrophy;
 
         p.morphActive = morphActive;
         p.morphType = morphType;
@@ -7929,6 +7975,56 @@ function wo_getMovementData() : string
     return list;
 }
 
+function wo_getHorseEquipment(slot : EEquipmentSlots) : string
+{
+    var witcher : W3PlayerWitcher;
+    var manager : W3HorseManager;
+    var inventory : CInventoryComponent;
+    var playerInventory : CInventoryComponent;
+    var itemId : SItemUniqueId;
+    var itemName : name;
+
+    witcher = GetWitcherPlayer();
+
+    if(!witcher)
+    {
+        return 'none';
+    }
+
+    manager = witcher.GetHorseManager();
+
+    if(!manager)
+    {
+        return 'none';
+    }
+
+    inventory = manager.GetInventoryComponent();
+    playerInventory = witcher.GetInventory();
+    itemId = manager.GetItemInSlot(slot);
+
+    if(inventory && inventory.IsIdValid(itemId))
+    {
+        itemName = inventory.GetItemName(itemId);
+
+        if(itemName != '')
+        {
+            return NameToString(itemName);
+        }
+    }
+
+    if(playerInventory && playerInventory.IsIdValid(itemId))
+    {
+        itemName = playerInventory.GetItemName(itemId);
+
+        if(itemName != '')
+        {
+            return NameToString(itemName);
+        }
+    }
+
+    return 'none';
+}
+
 function wo_get(playerId : int, username : string)
 {
     var list : string;
@@ -8453,6 +8549,22 @@ function wo_get(playerId : int, username : string)
 
     list += theGame.r_getMultiplayerClient().getSignCharges();
     list += " ";
+
+    list += "_s ";
+    list += wo_getHorseEquipment(EES_HorseBlinders);
+    list += " _e ";
+
+    list += "_s ";
+    list += wo_getHorseEquipment(EES_HorseSaddle);
+    list += " _e ";
+
+    list += "_s ";
+    list += wo_getHorseEquipment(EES_HorseBag);
+    list += " _e ";
+
+    list += "_s ";
+    list += wo_getHorseEquipment(EES_HorseTrophy);
+    list += " _e ";
 
     WO_Send("wo "+wo_getMovementData()+list);
 }

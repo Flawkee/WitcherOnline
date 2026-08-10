@@ -105,6 +105,8 @@ public final class PacketRegistry
 
         register(90, "TSYNC", Route.REALTIME, true, false);
         register(91, "TSYNCR", Route.REALTIME, false, true);
+        register(92, "PVFXS", Route.RELIABLE, true, true);
+        register(93, "PVFXI", Route.RELIABLE, true, true);
     }
 
     private PacketRegistry()

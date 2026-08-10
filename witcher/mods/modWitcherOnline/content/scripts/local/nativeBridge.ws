@@ -166,7 +166,8 @@ function WO_ApplyUpdate1()
         WO_Bool(62), WO_Int(63), WO_Str(64), WO_NameAt(65), WO_Int(66), WO_Int(67), WO_Str(68),
         WO_Bool(69), WO_NameAt(70), WO_NameAt(71), WO_Float(72),
         (ESignType)WO_Int(73), WO_Bool(74), WO_Float(75), WO_Int(76), WO_Int(77),
-        WO_Int(78), WO_Float(79), WO_Int(80));
+        WO_Int(78), WO_Float(79), WO_Int(80),
+        WO_Str(81), WO_Str(82), WO_Str(83), WO_Str(84));
 }
 
 function WO_ApplyUpdate2()
@@ -286,6 +287,14 @@ function WO_PumpInbound(maxMessages : int)
                 WO_ApplyPlayerPosition();
                 break;
 
+            case 18:
+                WO_ApplyPlayerVfxSpawn();
+                break;
+
+            case 19:
+                WO_ApplyPlayerVfxImpact();
+                break;
+
 
 
             default:
@@ -366,6 +375,31 @@ function WO_ApplyPlayerPosition()
     theGame.r_getMultiplayerClient().onTeleportResult(
         WO_Int(0), WO_Str(1), WO_Int(2),
         WO_Float(3), WO_Float(4), WO_Float(5));
+}
+
+function WO_ApplyPlayerVfxSpawn()
+{
+    if(WO_FieldCount() < 10)
+    {
+        return;
+    }
+
+    theGame.r_getMultiplayerClient().onRemotePlayerVfxSpawn(
+        WO_PlayerId(), WO_Int(0), WO_Int(1), WO_ToName(WO_Str(2)),
+        WO_Float(3), WO_Float(4), WO_Float(5),
+        WO_Float(6), WO_Float(7), WO_Float(8), WO_Float(9));
+}
+
+function WO_ApplyPlayerVfxImpact()
+{
+    if(WO_FieldCount() < 8)
+    {
+        return;
+    }
+
+    theGame.r_getMultiplayerClient().onRemotePlayerVfxImpact(
+        WO_PlayerId(), WO_Int(0), WO_Int(1), WO_ToName(WO_Str(2)),
+        WO_Float(3), WO_Float(4), WO_Float(5), WO_Int(6) != 0, WO_Int(7));
 }
 
 function WO_ApplyParty()

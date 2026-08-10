@@ -363,6 +363,10 @@ static std::atomic<unsigned long long> g_udpPacketsRecv{ 0 };
 static std::atomic<unsigned long long> g_tcpPacketsRecv{ 0 };
 static std::atomic<unsigned long long> g_outboundNanos{ 0 };
 static std::atomic<unsigned long long> g_outboundCalls{ 0 };
+static std::atomic<unsigned long long> g_vfxSpawnOutbound{ 0 };
+static std::atomic<unsigned long long> g_vfxImpactOutbound{ 0 };
+static std::atomic<unsigned long long> g_vfxSpawnInbound{ 0 };
+static std::atomic<unsigned long long> g_vfxImpactInbound{ 0 };
 
 static bool IsRealtimePacket(const std::string& opcode)
 {
@@ -650,6 +654,23 @@ static void ProcessOutbound(const std::string& payload)
 		SendCombined(payload, "UPDATE3", g_update3Sequence);
 	else if (tag == "wo4")
 		SendCombined(payload, "UPDATE4", g_update4Sequence);
+	else if (tag == "wo_vfxspawn" || tag == "wo_vfximpact")
+	{
+		ParsedHalves values = ParseValuesSplitHalf(payload);
+		std::vector<std::string> fields = std::move(values.first);
+		fields.insert(fields.end(), values.second.begin(), values.second.end());
+
+		if (!fields.empty())
+		{
+			const bool spawn = tag == "wo_vfxspawn";
+			if (spawn)
+				g_vfxSpawnOutbound.fetch_add(1);
+			else
+				g_vfxImpactOutbound.fetch_add(1);
+			SendPacket(BuildPacket(spawn ? "PVFXS" : "PVFXI", BuildLocalPacketId(), fields),
+				spawn ? "PVFXS" : "PVFXI");
+		}
+	}
 }
 
 struct RemotePlayerChunks
@@ -1267,6 +1288,7 @@ static void HandleServerPacket(const std::string& msg)
 		|| opcode == "NPCDEAD" || opcode == "NPCHITF" || opcode == "NPCACKF" || opcode == "TSYNCR" || opcode == "NPCKILL"
 		|| opcode == "NPCGIVE" || opcode == "NPCDROP" || opcode == "NPCGONE" || opcode == "PSTATEF"
 		|| opcode == "NPCSCALE" || opcode == "NPCREG" || opcode == "NPCEVTF";
+	const bool isPlayerVfxOpcode = opcode == "PVFXS" || opcode == "PVFXI";
 
 	const bool isSaveOpcode = opcode == "SAVEBEG" || opcode == "SAVECHK" || opcode == "SAVEEND"
 		|| opcode == "SAVENACK" || opcode == "SAVEACK" || opcode == "SAVENEED";
@@ -1283,6 +1305,7 @@ static void HandleServerPacket(const std::string& msg)
 	}
 
 	if (!isSaveOpcode
+		&& !isPlayerVfxOpcode
 		&& opcode != "PVIS"
 		&& opcode != "PARTY"
 		&& opcode != "PINVITE"
@@ -1361,6 +1384,17 @@ static void HandleServerPacket(const std::string& msg)
 	if (opcode == "TPPOS")
 	{
 		QueueInbound(InboundOpcode::PlayerPosition, playerId, 0, playerUsername, std::move(fields));
+		return;
+	}
+
+	if (isPlayerVfxOpcode)
+	{
+		if (opcode == "PVFXS")
+			g_vfxSpawnInbound.fetch_add(1);
+		else
+			g_vfxImpactInbound.fetch_add(1);
+		QueueInbound(opcode == "PVFXS" ? InboundOpcode::PlayerVfxSpawn : InboundOpcode::PlayerVfxImpact,
+			playerId, 0, playerUsername, std::move(fields));
 		return;
 	}
 
@@ -1831,6 +1865,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
 				+ " tcpOut=" + std::to_string(g_tcpPacketsSent.load())
 				+ " udpIn=" + std::to_string(g_udpPacketsRecv.load())
 				+ " tcpIn=" + std::to_string(g_tcpPacketsRecv.load())
+				+ " vfxOut=" + std::to_string(g_vfxSpawnOutbound.load()) + "/" + std::to_string(g_vfxImpactOutbound.load())
+				+ " vfxIn=" + std::to_string(g_vfxSpawnInbound.load()) + "/" + std::to_string(g_vfxImpactInbound.load())
 				+ " | outboundParse calls=" + std::to_string(calls)
 				+ " totalUs=" + std::to_string(g_outboundNanos.load() / 1000)
 				+ " avgUs=" + std::to_string(calls ? (g_outboundNanos.load() / 1000) / calls : 0);
