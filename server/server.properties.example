@@ -2,3 +2,4 @@ port=40000
 whitelist=false
 svgEnabled=false
 svgPort=40001
+consoleLogs=false

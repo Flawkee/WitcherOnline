@@ -16,6 +16,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
 import java.security.CodeSource;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
@@ -218,6 +220,9 @@ public class WitcherServer
     private static volatile DatagramSocket udpSocket = null;
     private static volatile TcpTransport tcpTransport = null;
     private static volatile UdpBatcher udpBatcher = null;
+    private static volatile Path logFilePath = null;
+    private static volatile boolean consoleLogs = false;
+    private static final ThreadLocal<Boolean> consoleCommandOutput = ThreadLocal.withInitial(() -> false);
 
     private static final AtomicInteger nextPlayerId = new AtomicInteger(1);
 
@@ -226,6 +231,8 @@ public class WitcherServer
         Properties serverProperties = loadServerProperties();
         int port = choosePort(args, serverProperties);
         whitelistEnabled.set(readBoolean(serverProperties, "whitelist", false));
+        consoleLogs = readBoolean(serverProperties, "consoleLogs", false);
+        prepareLogFile();
         loadBannedIps();
         loadWhitelistIps();
         NpcScaling.load();
@@ -292,17 +299,17 @@ public class WitcherServer
             statusServer = startStatusServer(svgPort);
         }
 
-        dbgNotime("Launching Witcher Online for The Witcher 3: Wild Hunt...\n");
-        dbgNotime("Author: rejuvenate7 - Github: https://github.com/rejuvenate7\n");
-        dbg("Starting Witcher Online server on *:%d (UDP+TCP required)\n", port);
+        printConsole("Launching Witcher Online for The Witcher 3: Wild Hunt...\n");
+        printConsole("Author: rejuvenate7 - Github: https://github.com/rejuvenate7\n");
+        printConsole("[" + LocalTime.now().format(LOG_TIME) + " INFO]: Starting Witcher Online server on *:%d (UDP+TCP required)\n", port);
 
         if (svgEnabled)
         {
-            dbg("Starting Witcher Online status SVG server on *:%d\n", svgPort);
-            dbg("Status SVG: http://127.0.0.1:%d/status.svg\n", svgPort);
+            printConsole("[" + LocalTime.now().format(LOG_TIME) + " INFO]: Starting Witcher Online status SVG server on *:%d\n", svgPort);
+            printConsole("[" + LocalTime.now().format(LOG_TIME) + " INFO]: Status SVG: http://127.0.0.1:%d/status.svg\n", svgPort);
         }
 
-        dbg("For help, type \"help\" or \"?\"\n");
+        printConsole("[" + LocalTime.now().format(LOG_TIME) + " INFO]: For help, type \"help\" or \"?\"\n");
 
         final DatagramSocket activeSocket = socket;
         Thread recvThread = startThread("udp-recv", () -> receiveLoop(activeSocket));
@@ -5724,10 +5731,50 @@ public class WitcherServer
 
     private static void handleConsoleCommand(DatagramSocket socket, String line)
     {
-        if (line.isEmpty())
+        consoleCommandOutput.set(true);
+
+        try
         {
-            return;
-        }
+            if (line.isEmpty())
+            {
+                return;
+            }
+
+            if (line.equals("consolelogs") || line.startsWith("consolelogs "))
+            {
+                String option = trimCommandArg(line, "consolelogs").toLowerCase(Locale.ROOT);
+
+                if (option.equals("on"))
+                {
+                    if (persistServerBooleanProperty("consoleLogs", true))
+                    {
+                        consoleLogs = true;
+                        dbg("Runtime log echo is now enabled and saved to server.properties.\n\n");
+                    }
+                    else
+                    {
+                        dbg("Could not save console log output to server.properties.\n\n");
+                    }
+                    return;
+                }
+
+                if (option.equals("off"))
+                {
+                    if (persistServerBooleanProperty("consoleLogs", false))
+                    {
+                        consoleLogs = false;
+                        dbg("Runtime log echo is now disabled and saved to server.properties.\n\n");
+                    }
+                    else
+                    {
+                        dbg("Could not save console log output to server.properties.\n\n");
+                    }
+                    return;
+                }
+
+                dbg("Usage: consolelogs on|off\n\n");
+                return;
+            }
 
         if (line.equals("list"))
         {
@@ -6148,6 +6195,7 @@ public class WitcherServer
             dbg("unban <ip>                - remove IP from ban list\n");
             dbg("whitelist on|off|<ip>     - toggle whitelist or add IP to whitelist\n");
             dbg("whitelist remove <ip>     - remove IP from whitelist\n");
+            dbg("consolelogs on|off         - toggle runtime log echo in this console\n");
             dbg("list                      - list connected players\n");
             dbg("announce <message>        - display a server message to all connected players\n");
             dbg("stats                     - show broadcast/server health counters\n");
@@ -6178,7 +6226,12 @@ public class WitcherServer
             return;
         }
 
-        dbg("Unknown command: %s (type 'help')\n\n", line);
+            dbg("Unknown command: %s (type 'help')\n\n", line);
+        }
+        finally
+        {
+            consoleCommandOutput.remove();
+        }
     }
 
     private static void handleScalingCommand(String arg)
@@ -6587,6 +6640,46 @@ public class WitcherServer
         return properties;
     }
 
+    private static boolean persistServerBooleanProperty(String key, boolean value)
+    {
+        Path path = serverPropertiesPath();
+
+        try
+        {
+            List<String> lines = Files.exists(path)
+                    ? new ArrayList<>(Files.readAllLines(path, StandardCharsets.UTF_8))
+                    : new ArrayList<>();
+            String prefix = key + "=";
+            boolean replaced = false;
+
+            for (int i = 0; i < lines.size(); i++)
+            {
+                String trimmed = lines.get(i).trim();
+
+                if (!trimmed.startsWith("#") && !trimmed.startsWith("!") && trimmed.startsWith(prefix))
+                {
+                    lines.set(i, prefix + value);
+                    replaced = true;
+                    break;
+                }
+            }
+
+            if (!replaced)
+            {
+                lines.add(prefix + value);
+            }
+
+            Files.write(path, lines, StandardCharsets.UTF_8,
+                    StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE);
+            return true;
+        }
+        catch (IOException e)
+        {
+            System.err.println("Failed to save server property " + key + ": " + e.getMessage());
+            return false;
+        }
+    }
+
     private static int choosePort(String[] args, Properties properties)
     {
         if (args.length >= 1)
@@ -6641,6 +6734,28 @@ public class WitcherServer
     private static Path serverPropertiesPath()
     {
         return appDir().resolve("server.properties");
+    }
+
+    private static void prepareLogFile()
+    {
+        Path current = appDir().resolve("WitcherServer.log");
+        Path previous = current.resolveSibling("WitcherServer.log.1");
+
+        try
+        {
+            if (Files.exists(current))
+            {
+                Files.move(current, previous, StandardCopyOption.REPLACE_EXISTING);
+            }
+
+            Files.writeString(current, "", StandardCharsets.UTF_8,
+                    StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE);
+            logFilePath = current;
+        }
+        catch (IOException e)
+        {
+            System.err.println("Failed to prepare server log " + current + ": " + e.getMessage());
+        }
     }
 
     private static Path bannedPlayersPath()
@@ -6880,6 +6995,7 @@ public class WitcherServer
             new java.util.concurrent.atomic.AtomicInteger();
     private static final AtomicLong logDropped = new AtomicLong();
     private static final int LOG_QUEUE_LIMIT = 8192;
+    private static final AtomicBoolean logWriteFailureReported = new AtomicBoolean(false);
 
     private static void enqueueLog(String line)
     {
@@ -6917,15 +7033,26 @@ public class WitcherServer
 
                 if (batch.length() > 0)
                 {
-                    System.out.print(batch);
-                    System.out.flush();
+                    writeLogBatch(batch.toString());
+
+                    if (consoleLogs)
+                    {
+                        System.out.print(batch);
+                        System.out.flush();
+                    }
                 }
 
                 long dropped = logDropped.getAndSet(0);
 
                 if (dropped > 0)
                 {
-                    System.out.print("[log] dropped " + dropped + " lines under pressure\n");
+                    String droppedLine = "[log] dropped " + dropped + " lines under pressure\n";
+                    writeLogBatch(droppedLine);
+
+                    if (consoleLogs)
+                    {
+                        System.out.print(droppedLine);
+                    }
                 }
 
                 try
@@ -6944,14 +7071,61 @@ public class WitcherServer
         thread.start();
     }
 
+    private static void writeLogBatch(String batch)
+    {
+        Path path = logFilePath;
+
+        if (path == null || batch.isEmpty())
+        {
+            return;
+        }
+
+        try
+        {
+            Files.writeString(path, batch, StandardCharsets.UTF_8,
+                    StandardOpenOption.CREATE, StandardOpenOption.APPEND, StandardOpenOption.WRITE);
+        }
+        catch (IOException e)
+        {
+            if (logWriteFailureReported.compareAndSet(false, true))
+            {
+                System.err.println("Failed to write server log " + path + ": " + e.getMessage());
+            }
+        }
+    }
+
     private static void dbgNotime(String format, Object... args)
     {
-        enqueueLog(String.format(format, args));
+        String line = String.format(format, args);
+
+        if (Boolean.TRUE.equals(consoleCommandOutput.get()))
+        {
+            System.out.print(line);
+            System.out.flush();
+            return;
+        }
+
+        enqueueLog(line);
+    }
+
+    private static void printConsole(String format, Object... args)
+    {
+        System.out.print(String.format(format, args));
+        System.out.flush();
     }
 
     static void dbg(String format, Object... args)
     {
-        enqueueLog("[" + LocalTime.now().format(LOG_TIME) + " INFO]: " + String.format(format, args));
+        String line = "[" + LocalTime.now().format(LOG_TIME) + " INFO]: " + String.format(format, args);
+
+        if (Boolean.TRUE.equals(consoleCommandOutput.get()))
+        {
+            System.out.print(line);
+            System.out.flush();
+            return;
+        }
+
+        enqueueLog(line);
     }
 
     private static String trim(String s)
