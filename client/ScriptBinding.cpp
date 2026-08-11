@@ -18,6 +18,8 @@
 extern void ResetInboundDeltaCaches();
 extern void SendPartyRequest(const char* opcode, const std::string& argument);
 extern void SendPartyRequest2(const char* opcode, const std::string& first, const std::string& second);
+extern void SendPartyRequest3(const char* opcode, const std::string& first, const std::string& second, const std::string& third);
+extern void SendPartyRequest4(const char* opcode, const std::string& first, const std::string& second, const std::string& third, const std::string& fourth);
 extern void SendPartyScaling(int stepMilli, int maxMilli);
 extern void SendSaveChunk(const char* opcode, const std::vector<std::string>& fields);
 #include "SaveTransfer.h"
@@ -1593,6 +1595,65 @@ namespace w3mp {
 			SendPartyRequest2("PRESP", NarrowPayload(text), approved ? "1" : "0");
 	}
 
+	static void WO_DuelRequest(void* context, void* frame, void* result)
+	{
+		RedString text;
+		const int size = ReadStringParameter(frame, text);
+		const bool safe = ReadBoolParameter(frame);
+		const int healthUnits = ReadIntParameter(frame);
+
+		AdvanceFrame(frame);
+
+		if (size > 0)
+			SendPartyRequest3("DUELREQ", NarrowPayload(text), safe ? "1" : "0", std::to_string(healthUnits));
+	}
+
+	static void WO_DuelRespond(void* context, void* frame, void* result)
+	{
+		RedString text;
+		const int size = ReadStringParameter(frame, text);
+		const bool approved = ReadBoolParameter(frame);
+		const bool safe = ReadBoolParameter(frame);
+		const int healthUnits = ReadIntParameter(frame);
+
+		AdvanceFrame(frame);
+
+		if (size > 0)
+			SendPartyRequest4("DUELRESP", NarrowPayload(text), approved ? "1" : "0", safe ? "1" : "0", std::to_string(healthUnits));
+	}
+
+	static void WO_DuelHit(void* context, void* frame, void* result)
+	{
+		const int targetId = ReadIntParameter(frame);
+		const int damageUnits = ReadIntParameter(frame);
+
+		AdvanceFrame(frame);
+
+		if (targetId > 0 && damageUnits > 0)
+			SendPartyRequest2("DUELHIT", std::to_string(targetId), std::to_string(damageUnits));
+	}
+
+	static void WO_DuelHeal(void* context, void* frame, void* result)
+	{
+		const int healthUnits = ReadIntParameter(frame);
+
+		AdvanceFrame(frame);
+
+		if (healthUnits > 0)
+			SendPartyRequest("DUELHEAL", std::to_string(healthUnits));
+	}
+
+	static void WO_DuelCancel(void* context, void* frame, void* result)
+	{
+		RedString text;
+		const int size = ReadStringParameter(frame, text);
+
+		AdvanceFrame(frame);
+
+		if (size > 0)
+			SendPartyRequest("DUELSAFE", NarrowPayload(text));
+	}
+
 	static void WO_SaveSend(void* context, void* frame, void* result)
 	{
 		RedString path;
@@ -2914,6 +2975,11 @@ namespace w3mp {
 		RegisterOne(L"WO_TeleportRequest", reinterpret_cast<void*>(&WO_TeleportRequest), "WO_TeleportRequest");
 		RegisterOne(L"WO_PartyLeave", reinterpret_cast<void*>(&WO_PartyLeave), "WO_PartyLeave");
 		RegisterOne(L"WO_PartyRespond", reinterpret_cast<void*>(&WO_PartyRespond), "WO_PartyRespond");
+		RegisterOne(L"WO_DuelRequest", reinterpret_cast<void*>(&WO_DuelRequest), "WO_DuelRequest");
+		RegisterOne(L"WO_DuelRespond", reinterpret_cast<void*>(&WO_DuelRespond), "WO_DuelRespond");
+		RegisterOne(L"WO_DuelHit", reinterpret_cast<void*>(&WO_DuelHit), "WO_DuelHit");
+		RegisterOne(L"WO_DuelHeal", reinterpret_cast<void*>(&WO_DuelHeal), "WO_DuelHeal");
+		RegisterOne(L"WO_DuelCancel", reinterpret_cast<void*>(&WO_DuelCancel), "WO_DuelCancel");
 		RegisterOne(L"WO_PartyCoopMode", reinterpret_cast<void*>(&WO_PartyCoopMode), "WO_PartyCoopMode");
 		RegisterOne(L"WO_ToName", reinterpret_cast<void*>(&WO_ToName), "WO_ToName");
 		RegisterOne(L"WO_SaveSend", reinterpret_cast<void*>(&WO_SaveSend), "WO_SaveSend");

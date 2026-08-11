@@ -1,0 +1,477 @@
+<?xml version='1.0' encoding='utf-8'?>
+<redxml>
+	<definitions>
+		<abilities>
+			<ability name="wo_master_quality">
+				<quality type="add" min="2" max="2" />
+			</ability>
+			<ability name="wo_relic_quality">
+				<quality type="add" min="4" max="4" />
+			</ability>
+			<ability name="wo_magic_quality">
+				<quality type="add" min="3" max="3" />
+			</ability>
+		</abilities>
+		<items>
+			<item name="wo_timed_gwent" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/round_start.png" localisation_key_name="item_name_wo_timed_gwent" localisation_key_description="item_desc_wo_timed">
+				<tags>TimedGwent, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_notime_gwent" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/your_turn.png" localisation_key_name="item_name_wo_notime_gwent" localisation_key_description="item_desc_wo_normal">
+				<tags>NormalGwent, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote1" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote1" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote2" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote2" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote3" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote3" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote4" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote4" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote5" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote5" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote6" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote6" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote7" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote7" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote8" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote8" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote9" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote9" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote10" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote10" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote11" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote11" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote12" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote12" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote13" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote13" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote14" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote14" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote15" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote15" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote16" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote16" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote17" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote17" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote18" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote18" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote19" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote19" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote20" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote20" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote21" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote21" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote22" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote22" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote23" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote23" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote24" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote24" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote25" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote25" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote26" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote26" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote27" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote27" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote28" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote28" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote29" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote29" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote30" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote30" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote31" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote31" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote32" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote32" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote33" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote33" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote34" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote34" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote35" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote35" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote36" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote36" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote37" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote37" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote38" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote38" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote39" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote39" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote40" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote40" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote41" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote41" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote42" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote42" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote43" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote43" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote44" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote44" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote45" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote45" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote46" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote46" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote47" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote47" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote48" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote48" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote49" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote49" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote50" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote50" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote51" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote51" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote52" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote52" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote53" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote53" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote54" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote54" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote55" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote55" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_emote56" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/gwint/message_icons/opponents_turn.png" localisation_key_name="item_name_wo_emote56" localisation_key_description="item_desc_wo_emote">
+				<tags>Emote, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_magic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_chat1" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/inventory/potions/witcheronline_scroll.png" localisation_key_name="item_name_wo_chat1" localisation_key_description="item_desc_wo_emote">
+				<tags>Chat, mod_nosale</tags>
+			</item>
+			<item name="wo_chat2" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/inventory/potions/witcheronline_scroll.png" localisation_key_name="item_name_wo_chat2" localisation_key_description="item_desc_wo_emote">
+				<tags>Chat, mod_nosale</tags>
+			</item>
+			<item name="wo_chat3" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/inventory/potions/witcheronline_scroll.png" localisation_key_name="item_name_wo_chat3" localisation_key_description="item_desc_wo_emote">
+				<tags>Chat, mod_nosale</tags>
+			</item>
+			<item name="wo_chat4" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/inventory/potions/witcheronline_scroll.png" localisation_key_name="item_name_wo_chat4" localisation_key_description="item_desc_wo_emote">
+				<tags>Chat, mod_nosale</tags>
+			</item>
+			<item name="wo_chat5" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/inventory/potions/witcheronline_scroll.png" localisation_key_name="item_name_wo_chat5" localisation_key_description="item_desc_wo_emote">
+				<tags>Chat, mod_nosale</tags>
+			</item>
+			<item name="wo_chat6" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/inventory/potions/witcheronline_scroll.png" localisation_key_name="item_name_wo_chat6" localisation_key_description="item_desc_wo_emote">
+				<tags>Chat, mod_nosale</tags>
+			</item>
+			<item name="wo_chat7" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/inventory/potions/witcheronline_scroll.png" localisation_key_name="item_name_wo_chat7" localisation_key_description="item_desc_wo_emote">
+				<tags>Chat, mod_nosale</tags>
+			</item>
+			<item name="wo_chat8" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/inventory/potions/witcheronline_scroll.png" localisation_key_name="item_name_wo_chat8" localisation_key_description="item_desc_wo_emote">
+				<tags>Chat, mod_nosale</tags>
+			</item>
+			<item name="wo_chat9" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/inventory/potions/witcheronline_scroll.png" localisation_key_name="item_name_wo_chat9" localisation_key_description="item_desc_wo_emote">
+				<tags>Chat, mod_nosale</tags>
+			</item>
+			<item name="wo_chat10" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/inventory/potions/witcheronline_scroll.png" localisation_key_name="item_name_wo_chat10" localisation_key_description="item_desc_wo_emote">
+				<tags>Chat, mod_nosale</tags>
+			</item>
+			<item name="wo_chat11" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/inventory/potions/witcheronline_scroll.png" localisation_key_name="item_name_wo_chat11" localisation_key_description="item_desc_wo_emote">
+				<tags>Chat, mod_nosale</tags>
+			</item>
+			<item name="wo_chat12" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/inventory/potions/witcheronline_scroll.png" localisation_key_name="item_name_wo_chat12" localisation_key_description="item_desc_wo_emote">
+				<tags>Chat, mod_nosale</tags>
+			</item>
+			<item name="wo_chat13" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/inventory/potions/witcheronline_scroll.png" localisation_key_name="item_name_wo_chat13" localisation_key_description="item_desc_wo_emote">
+				<tags>Chat, mod_nosale</tags>
+			</item>
+			<item name="wo_morph1" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/inventory/potions/nr_chameleon-potion-64x64.png" localisation_key_name="item_name_wo_morph1" localisation_key_description="item_desc_wo_emote">
+				<tags>Morph, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_master_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_morph2" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/inventory/potions/nr_chameleon-potion-64x64.png" localisation_key_name="item_name_wo_morph2" localisation_key_description="item_desc_wo_emote">
+				<tags>Morph, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_master_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_morph3" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/inventory/potions/nr_chameleon-potion-64x64.png" localisation_key_name="item_name_wo_morph3" localisation_key_description="item_desc_wo_emote">
+				<tags>Morph, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_master_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_morph4" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/inventory/potions/nr_chameleon-potion-64x64.png" localisation_key_name="item_name_wo_morph4" localisation_key_description="item_desc_wo_emote">
+				<tags>Morph, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_master_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_inviteGwent" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/inventory/potions/witcheronline_gwent.png" localisation_key_name="wo_menu_play_gwent" localisation_key_description="item_desc_wo_inviteGwent">
+				<tags>PlayerMenu, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_master_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_inviteDuel" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/inventory/potions/witcheronline_duel.png" localisation_key_name="wo_menu_duel" localisation_key_description="wo_menu_duel_desc">
+				<tags>PlayerMenu, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_master_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_joinParty" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/inventory/potions/witcheronline_mug.png" localisation_key_name="wo_menu_join_party" localisation_key_description="item_desc_wo_joinParty">
+				<tags>PlayerMenu, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_master_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_leaveParty" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/inventory/potions/witcheronline_mug.png" localisation_key_name="wo_menu_leave_party" localisation_key_description="item_desc_wo_leaveParty">
+				<tags>PlayerMenu, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_relic_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_ride" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/inventory/potions/witcheronline_ride.png" localisation_key_name="wo_menu_ride" localisation_key_description="item_desc_wo_ride">
+				<tags>PlayerMenu, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_master_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_rideHorse" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/inventory/potions/witcheronline_ride.png" localisation_key_name="wo_menu_ride_horse" localisation_key_description="item_desc_wo_ride">
+				<tags>PlayerMenu, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_master_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_rideBoat" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/inventory/potions/witcheronline_boat.png" localisation_key_name="wo_menu_ride_boat" localisation_key_description="item_desc_wo_ride">
+				<tags>PlayerMenu, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_master_quality</a>
+				</base_abilities>
+			</item>
+			<item name="wo_trade" category="potion" price="1000" grid_size="1" ability_slots="0" stackable="1000" icon_path="icons/inventory/potions/witcheronline_trade.png" localisation_key_name="wo_menu_trade" localisation_key_description="item_desc_wo_trade">
+				<tags>PlayerMenu, mod_nosale</tags>
+				<base_abilities>
+					<a>wo_master_quality</a>
+				</base_abilities>
+			</item>
+		</items>
+	</definitions>
+</redxml>

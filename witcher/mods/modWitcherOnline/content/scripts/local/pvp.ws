@@ -1,134 +1,480 @@
-enum r_EPvpMode
+class r_DuelController
 {
-    PVP_Off     = 0,
-    PVP_Neutral = 1,
-    PVP_Enabled = 2
-}
+    private var opponentId : int;
+    private var opponentName : string;
+    private var active : bool;
+    private var countdownUntil : float;
+    private var countdownSafetyAt : float;
+    private var opponentHealth : int;
+    private var localHealth : int;
+    private var pendingDamage : int;
+    private var pendingHealing : float;
+    private var lastDamageSentAt : float;
+    private var lastHealingSentAt : float;
+    private var cancelSent : bool;
+    private var vitalityHudModule : CHudModule;
+    private var vitalityHudFunction : CScriptedFlashFunction;
 
-class r_PvpPolicy
-{
-    private var masterEnabled : bool;
-    private var forcedMode    : r_EPvpMode;
-    private var forced        : bool;
-    private var passiveMode   : int;
-
-    default masterEnabled = false;
-    default forcedMode = PVP_Neutral;
-    default forced = false;
-    default passiveMode = 2;
-
-    public function getPassiveMode() : int
+    default opponentId = 0;
+    default opponentName = "";
+    default active = false;
+    default countdownUntil = -1.0;
+    default countdownSafetyAt = -1.0;
+    default opponentHealth = 100000;
+    default localHealth = 100000;
+    default pendingDamage = 0;
+    default pendingHealing = 0.0;
+    default lastDamageSentAt = -1.0;
+    default lastHealingSentAt = -1.0;
+    default cancelSent = false;
+    public function hasOpponent(remote : r_RemotePlayer) : bool
     {
-        return passiveMode;
+        return remote && opponentId > 0 && remote.serverPlayerId == opponentId;
     }
 
-    public function setPassiveMode(value : int)
+    public function isActiveWith(remote : r_RemotePlayer) : bool
     {
-        passiveMode = value;
+        return active && hasOpponent(remote);
     }
 
-    public function setMasterEnabled(value : bool)
+    public function isActive() : bool
     {
-        masterEnabled = value;
+        return active;
     }
 
-    public function isMasterEnabled() : bool
+    public function getOpponentName() : string
     {
-        return masterEnabled;
+        return opponentName;
     }
 
-    public function setForcedMode(mode : r_EPvpMode)
+    public function canRequest() : bool
     {
-        forcedMode = mode;
-        forced = true;
-    }
-
-    public function clearForcedMode()
-    {
-        forced = false;
-    }
-
-    public function isForced() : bool
-    {
-        return forced;
-    }
-
-    public function describe() : string
-    {
-        return "master=" + masterEnabled + " forced=" + forced + " forcedMode=" + (int)forcedMode;
-    }
-
-    public function resolve(remote : r_RemotePlayer) : r_EPvpMode
-    {
-        if(forced)
+        if(!thePlayer || !WO_Connected() || !theGame.r_getMultiplayerClient().getInGame())
         {
-            return forcedMode;
+            return false;
         }
 
-        if(!remote)
+        if(!thePlayer.IsAlive() || thePlayer.IsInCombat() || theGame.IsDialogOrCutscenePlaying()
+            || theGame.IsCurrentlyPlayingNonGameplayScene() || theGame.GetGuiManager().IsAnyMenu())
         {
-            return PVP_Neutral;
+            return false;
         }
 
-        if(!masterEnabled)
-        {
-            return PVP_Neutral;
-        }
-
-        if(isPartyMember(remote))
-        {
-            return PVP_Neutral;
-        }
-
-        if(hasDuelConsent(remote))
-        {
-            return PVP_Enabled;
-        }
-
-        if(bothInPvpZone(remote))
-        {
-            return PVP_Enabled;
-        }
-
-        if(bothPvpFlagged(remote))
-        {
-            return PVP_Enabled;
-        }
-
-        return PVP_Neutral;
+        return true;
     }
 
-    private function isPartyMember(remote : r_RemotePlayer) : bool
+    public function canContinue() : bool
     {
-        var party : array<r_RemotePlayer>;
-        var i : int;
-
-        party = theGame.r_getMultiplayerClient().getPartyMembers();
-
-        for(i = 0; i < party.Size(); i += 1)
+        if(!thePlayer || !thePlayer.IsAlive() || theGame.IsDialogOrCutscenePlaying()
+            || theGame.IsCurrentlyPlayingNonGameplayScene() || theGame.GetGuiManager().IsAnyMenu())
         {
-            if(party[i] == remote)
+            return false;
+        }
+
+        return true;
+    }
+
+    public function canAccept() : bool
+    {
+        if(!thePlayer || !WO_Connected())
+        {
+            return false;
+        }
+
+        if(!thePlayer.IsAlive() || thePlayer.IsInCombat() || theGame.IsDialogOrCutscenePlaying()
+            || theGame.IsCurrentlyPlayingNonGameplayScene())
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    public function localHealthUnits() : int
+    {
+        var value : int;
+
+        if(!thePlayer)
+        {
+            return 100000;
+        }
+
+        value = (int)(thePlayer.GetHealthPercents() * 100000.0);
+        return wo_clampDuelHealth(value);
+    }
+
+    public function beginCountdown(playerName : string)
+    {
+        opponentName = playerName;
+        active = false;
+        countdownUntil = theGame.GetEngineTimeAsSeconds() + 5.0;
+        countdownSafetyAt = theGame.GetEngineTimeAsSeconds() + 1.0;
+        opponentHealth = 100000;
+        localHealth = localHealthUnits();
+        pendingDamage = 0;
+        pendingHealing = 0.0;
+        lastDamageSentAt = -1.0;
+        lastHealingSentAt = -1.0;
+        cancelSent = false;
+        GetWitcherPlayer().DisplayHudMessage(StrReplace(GetLocStringById(2111114327), "%s", opponentName));
+    }
+
+    public function begin(playerName : string)
+    {
+        opponentName = playerName;
+        active = true;
+        countdownUntil = -1.0;
+        countdownSafetyAt = -1.0;
+        pendingDamage = 0;
+        pendingHealing = 0.0;
+        lastDamageSentAt = -1.0;
+        lastHealingSentAt = -1.0;
+        cancelSent = false;
+        vitalityHudModule = NULL;
+        vitalityHudFunction = NULL;
+        thePlayer.SetHealthPerc(1.0);
+        thePlayer.SetImmortalityMode(AIM_Immortal, AIC_IsAttackableByPlayer, true);
+        refreshGhosts();
+    }
+
+    public function setHealth(firstId : int, firstHealth : int, secondId : int, secondHealth : int)
+    {
+        applyHealth(firstId, firstHealth);
+        applyHealth(secondId, secondHealth);
+
+        if(active && (firstHealth <= 0 || secondHealth <= 0))
+        {
+            finish();
+        }
+    }
+
+    private function applyHealth(playerId : int, health : int)
+    {
+        var remote : r_RemotePlayer;
+        var value : float;
+
+        if(playerId == theGame.r_getMultiplayerClient().getServerId())
+        {
+            localHealth = wo_clampDuelHealth(health);
+            applyLocalHealthHud();
+            return;
+        }
+
+        value = MaxF(0.05, wo_clampDuelHealth(health) / 100000.0);
+
+        remote = theGame.r_getMultiplayerClient().getPlayerByServerId(playerId);
+
+        if(remote && remote.ghost)
+        {
+            if(playerId == opponentId)
             {
-                return true;
+                opponentHealth = wo_clampDuelHealth(health);
+            }
+
+            remote.ghost.SetHealthPerc(value);
+        }
+    }
+
+    public function restoreGhostHealth(remote : r_RemotePlayer)
+    {
+        if(isActiveWith(remote) && remote.ghost)
+        {
+            remote.ghost.SetHealthPerc(MaxF(0.05, opponentHealth / 100000.0));
+        }
+    }
+
+    public function noteDamage(remote : r_RemotePlayer, damage : float, maximum : float)
+    {
+        var units : int;
+        var now : float;
+
+        if(!isActiveWith(remote) || damage <= 0.0 || maximum <= 0.0)
+        {
+            return;
+        }
+
+        units = wo_clampDuelHealth((int)((damage / maximum) * 100000.0));
+
+        if(units < 1)
+        {
+            units = 1;
+        }
+
+        pendingDamage = wo_clampDuelHealth(pendingDamage + units);
+        now = theGame.GetEngineTimeAsSeconds();
+
+        if(lastDamageSentAt < 0.0 || (now - lastDamageSentAt) >= 0.05)
+        {
+            WO_DuelHit(opponentId, pendingDamage);
+            pendingDamage = 0;
+            lastDamageSentAt = now;
+        }
+    }
+
+    public function noteHealing(amount : float, maximum : float)
+    {
+        if(!active || amount <= 0.0 || maximum <= 0.0 || localHealth >= 100000)
+        {
+            return;
+        }
+
+        pendingHealing += (amount / maximum) * 100000.0;
+    }
+
+    public function update()
+    {
+        var now : float;
+        var healing : int;
+        var remote : r_RemotePlayer;
+
+        now = theGame.GetEngineTimeAsSeconds();
+
+        if(countdownUntil > 0.0)
+        {
+            if(now >= countdownSafetyAt && (thePlayer.IsInCombat() || !canContinue()) && !cancelSent)
+            {
+                cancelSent = true;
+                WO_DuelCancel(opponentName);
             }
         }
 
-        return false;
+        if(!active)
+        {
+            return;
+        }
+
+        thePlayer.SetImmortalityMode(AIM_Immortal, AIC_IsAttackableByPlayer, true);
+
+        if(thePlayer.GetHealth() < thePlayer.GetMaxHealth())
+        {
+            thePlayer.ForceSetStat(BCS_Vitality, thePlayer.GetMaxHealth());
+        }
+
+        applyLocalHealthHud();
+
+        remote = theGame.r_getMultiplayerClient().getPlayerByServerId(opponentId);
+
+        if(remote && remote.ghost)
+        {
+            remote.ghost.SetHealthPerc(MaxF(0.05, opponentHealth / 100000.0));
+        }
+
+        if(!canContinue())
+        {
+            if(!cancelSent)
+            {
+                cancelSent = true;
+                WO_DuelCancel(opponentName);
+            }
+
+            return;
+        }
+
+        if(pendingDamage > 0 && (now - lastDamageSentAt) >= 0.05)
+        {
+            WO_DuelHit(opponentId, pendingDamage);
+            pendingDamage = 0;
+            lastDamageSentAt = now;
+        }
+
+        if(pendingHealing >= 1.0 && (now - lastHealingSentAt) >= 0.10)
+        {
+            healing = (int)pendingHealing;
+            pendingHealing -= healing;
+            WO_DuelHeal(healing);
+            lastHealingSentAt = now;
+        }
     }
 
-    private function hasDuelConsent(remote : r_RemotePlayer) : bool
+    public function finish()
     {
-        return false;
+        var remote : r_RemotePlayer;
+        var wasActive : bool;
+
+        wasActive = active;
+        pendingDamage = 0;
+        pendingHealing = 0.0;
+        lastDamageSentAt = -1.0;
+        lastHealingSentAt = -1.0;
+        active = false;
+        countdownUntil = -1.0;
+        countdownSafetyAt = -1.0;
+        opponentHealth = 100000;
+        localHealth = 100000;
+        cancelSent = false;
+
+        if(thePlayer && wasActive)
+        {
+            thePlayer.SetHealthPerc(1.0);
+            thePlayer.SetImmortalityMode(AIM_None, AIC_IsAttackableByPlayer, true);
+            applyLocalHealthHud();
+        }
+
+        remote = theGame.r_getMultiplayerClient().getPlayerByServerId(opponentId);
+
+        if(remote && remote.ghost && wasActive)
+        {
+            remote.ghost.SetHealthPerc(1.0);
+        }
+
+        opponentId = 0;
+        opponentName = "";
+        refreshGhosts();
+        vitalityHudModule = NULL;
+        vitalityHudFunction = NULL;
     }
 
-    private function bothInPvpZone(remote : r_RemotePlayer) : bool
+    public function setOpponentId(id : int)
     {
-        return false;
+        opponentId = id;
     }
 
-    private function bothPvpFlagged(remote : r_RemotePlayer) : bool
+    private function applyLocalHealthHud()
     {
-        return false;
+        var hud : CR4ScriptedHud;
+        var module : CHudModule;
+        var flashModule : CScriptedFlashSprite;
+        var wolfHead : CR4HudModuleWolfHead;
+
+        hud = (CR4ScriptedHud)theGame.GetHud();
+
+        if(!hud)
+        {
+            return;
+        }
+
+        module = hud.GetHudModule("WolfHeadModule");
+
+        if(!module)
+        {
+            return;
+        }
+
+        flashModule = module.GetModuleFlash();
+
+        if(!flashModule)
+        {
+            return;
+        }
+
+        if(module != vitalityHudModule || !vitalityHudFunction)
+        {
+            vitalityHudModule = module;
+            vitalityHudFunction = flashModule.GetMemberFlashFunction("setVitality");
+        }
+
+        if(vitalityHudFunction)
+        {
+            vitalityHudFunction.InvokeSelfOneArg(FlashArgNumber(localHealth / 100000.0));
+        }
+
+        if(active)
+        {
+            wolfHead = (CR4HudModuleWolfHead)module;
+
+            if(wolfHead)
+            {
+                wolfHead.SetAlwaysDisplayed(true);
+            }
+        }
+    }
+
+    public function applyGhost(remote : r_RemotePlayer, force : bool)
+    {
+        var ghost : CActor;
+        var npc : CNewNPC;
+
+        if(!remote || !remote.ghost)
+        {
+            return;
+        }
+
+        ghost = remote.ghost;
+        npc = (CNewNPC)ghost;
+        ghost.SetGameplayVisibility(true);
+        ghost.EnableStaticCollisions(true);
+        ghost.EnableCharacterCollisions(false);
+        if(isActiveWith(remote))
+        {
+            if(npc)
+            {
+                npc.SetLevel(thePlayer.GetLevel());
+            }
+
+            ghost.SetImmortalityMode(AIM_Immortal, AIC_IsAttackableByPlayer, true);
+            ghost.SetCanPlayHitAnim(true);
+            ghost.SetAttackableByPlayerPersistent(true);
+            ghost.SetAttackableByPlayerRuntime(true);
+            ghost.SetTemporaryAttitudeGroup('hostile_to_player', AGP_Default);
+            thePlayer.SetAttitude(ghost, AIA_Hostile);
+            ghost.SetAttitude(thePlayer, AIA_Hostile);
+
+            if(npc && remote.duelAiForceId < 0)
+            {
+                remote.duelAiForceId = wo_idleDuelAi(npc);
+            }
+
+            return;
+        }
+
+        if(remote.duelAiForceId >= 0)
+        {
+            ghost.CancelAIBehavior(remote.duelAiForceId);
+            remote.duelAiForceId = -1;
+        }
+
+        if(npc)
+        {
+            npc.SetLevel(1);
+        }
+
+        ghost.SetImmortalityMode(AIM_Invulnerable, AIC_IsAttackableByPlayer, true);
+        ghost.SetCanPlayHitAnim(false);
+        ghost.SetAttackableByPlayerPersistent(false);
+        ghost.SetAttackableByPlayerRuntime(false);
+        ghost.SetTemporaryAttitudeGroup('friendly_to_player', AGP_Default);
+        thePlayer.SetAttitude(ghost, AIA_Neutral);
+        ghost.SetAttitude(thePlayer, AIA_Neutral);
+    }
+
+    public function refreshGhosts()
+    {
+        var players : array<r_RemotePlayer>;
+        var i : int;
+
+        players = theGame.r_getMultiplayerClient().getPlayers();
+
+        for(i = 0; i < players.Size(); i += 1)
+        {
+            applyGhost(players[i], true);
+        }
+    }
+}
+
+function wo_clampDuelHealth(value : int) : int
+{
+    if(value < 0)
+    {
+        return 0;
+    }
+
+    if(value > 100000)
+    {
+        return 100000;
+    }
+
+    return value;
+}
+
+function wo_reportDuelDamage(victim : CActor, damage : float, maximum : float)
+{
+    var remote : r_RemotePlayer;
+
+    remote = theGame.r_getMultiplayerClient().findRemoteByActor(victim);
+
+    if(remote)
+    {
+        theGame.r_getMultiplayerClient().getDuelController().noteDamage(remote, damage, maximum);
     }
 }
 
@@ -153,9 +499,9 @@ function wo_releaseNpcTarget(npc : CNewNPC)
     npc.SignalGameplayEvent('UnforceTarget');
 }
 
-function wo_idleReplicaAi(npc : CNewNPC) : int
+function wo_idleDuelAi(npc : CNewNPC) : int
 {
-    var idle : CAIMonsterIdleDefault;
+    var idle : CAIIdleTree;
     var forceId : int;
 
     if(!npc)
@@ -163,132 +509,8 @@ function wo_idleReplicaAi(npc : CNewNPC) : int
         return -1;
     }
 
-    idle = new CAIMonsterIdleDefault in npc;
-    idle.Init();
-
-    forceId = npc.ForceAIBehavior(idle, BTAP_AboveEmergency2, 'WO_Replica');
-
-    if(forceId < 0)
-    {
-        WO_Note("[npc_spawn] idle AI force failed app=" + NameToString(npc.GetAppearance()));
-    }
+    idle = new CAIIdleTree in npc;
+    forceId = npc.ForceAIBehavior(idle, BTAP_AboveEmergency2, 'WO_Duel');
 
     return forceId;
-}
-
-function wo_setGhostAttackable(ghost : CActor, attackable : bool)
-{
-    if(!ghost)
-    {
-        return;
-    }
-
-    ghost.SetAttackableByPlayerPersistent(attackable);
-    ghost.SetAttackableByPlayerRuntime(attackable);
-}
-
-function wo_ghostProtectionIntact(ghost : CActor, mode : r_EPvpMode) : bool
-{
-    if(!ghost)
-    {
-        return true;
-    }
-
-    if(mode == PVP_Enabled)
-    {
-        return ghost.IsAttackableByPlayer();
-    }
-
-    return ghost.IsInvulnerable() && !ghost.IsAttackableByPlayer();
-}
-
-function wo_applyGhostHostility(ghost : CActor, mode : r_EPvpMode)
-{
-    if(!ghost)
-    {
-        return;
-    }
-
-    if(mode == PVP_Enabled)
-    {
-        ghost.SetGameplayVisibility(true);
-        ghost.EnableStaticCollisions(true);
-        ghost.EnableCharacterCollisions(false);
-        ghost.SetTemporaryAttitudeGroup('player', AGP_Default);
-        ghost.SetImmortalityMode(AIM_None, AIC_Default, true);
-        wo_setGhostAttackable(ghost, true);
-        ghost.SetAttitude(thePlayer, AIA_Hostile);
-        return;
-    }
-
-    if(mode == PVP_Neutral)
-    {
-        ghost.SetGameplayVisibility(true);
-        ghost.EnableStaticCollisions(true);
-        ghost.EnableCharacterCollisions(false);
-        ghost.SetTemporaryAttitudeGroup('player', AGP_Default);
-        ghost.SetImmortalityMode(AIM_Invulnerable, AIC_Default, true);
-        wo_setGhostAttackable(ghost, false);
-        ghost.SetAttitude(thePlayer, AIA_Neutral);
-        return;
-    }
-
-    ghost.SetGameplayVisibility(false);
-    ghost.EnableCollisions(false);
-    ghost.EnableCharacterCollisions(false);
-    ghost.SetImmortalityMode(AIM_Invulnerable, AIC_Default, true);
-    wo_setGhostAttackable(ghost, false);
-    ghost.SetTemporaryAttitudeGroup('friendly_to_player', AGP_Default);
-    ghost.SetAttitude(thePlayer, AIA_Friendly);
-}
-
-exec function wo_pvp(enable : bool)
-{
-    var policy : r_PvpPolicy;
-
-    policy = theGame.r_getMultiplayerClient().getPvpPolicy();
-
-    if(enable)
-    {
-        policy.setForcedMode(PVP_Enabled);
-    }
-    else
-    {
-        policy.clearForcedMode();
-    }
-
-    theGame.r_getMultiplayerClient().refreshGhostHostility();
-    WO_Note("pvp " + policy.describe());
-}
-
-exec function wo_ghost_mode(mode : int)
-{
-    var policy : r_PvpPolicy;
-
-    policy = theGame.r_getMultiplayerClient().getPvpPolicy();
-
-    if(mode < 0)
-    {
-        policy.clearForcedMode();
-    }
-    else
-    {
-        policy.setForcedMode((r_EPvpMode)mode);
-    }
-
-    theGame.r_getMultiplayerClient().refreshGhostHostility();
-    WO_Note("ghost mode " + policy.describe());
-}
-
-exec function wo_npc_passive_mode(value : int)
-{
-    theGame.r_getMultiplayerClient().getPvpPolicy().setPassiveMode(value);
-    WO_Note("npc passive mode=" + value + " (1=forget+combatoff 2=+friendly 3=forget only 4=combatoff only)");
-}
-
-exec function wo_pvp_master(enable : bool)
-{
-    theGame.r_getMultiplayerClient().getPvpPolicy().setMasterEnabled(enable);
-    theGame.r_getMultiplayerClient().refreshGhostHostility();
-    WO_Note("pvp master=" + enable);
 }

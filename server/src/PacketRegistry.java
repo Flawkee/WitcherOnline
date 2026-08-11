@@ -108,6 +108,12 @@ public final class PacketRegistry
         register(92, "PVFXS", Route.RELIABLE, true, true);
         register(93, "PVFXI", Route.RELIABLE, true, true);
         register(94, "ANNOUNCE", Route.RELIABLE, false, true);
+        register(95, "DUELREQ", Route.RELIABLE, true, false);
+        register(96, "DUELRESP", Route.RELIABLE, true, false);
+        register(97, "DUELHIT", Route.RELIABLE, true, false);
+        register(98, "DUELSAFE", Route.RELIABLE, true, false);
+        register(99, "DUEL", Route.RELIABLE, false, true);
+        register(100, "DUELHEAL", Route.RELIABLE, true, false);
     }
 
     private PacketRegistry()

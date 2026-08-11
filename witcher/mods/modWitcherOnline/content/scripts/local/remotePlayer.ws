@@ -25,35 +25,9 @@ struct r_GwentGame
 
 statemachine class r_RemotePlayer
 {
-    public var pvpApplied     : r_EPvpMode;
-    public var pvpEverApplied : bool;
-    public var pvpGhost       : CActor;
     public var stuckSince     : float;
 
     default stuckSince = 0.0;
-
-    default pvpApplied = PVP_Off;
-    default pvpEverApplied = false;
-
-    public function applyPvpMode(mode : r_EPvpMode, force : bool)
-    {
-        if(!ghost)
-        {
-            return;
-        }
-
-        if(!force && pvpEverApplied && pvpApplied == mode && pvpGhost == ghost
-            && wo_ghostProtectionIntact(ghost, mode))
-        {
-            return;
-        }
-
-        wo_applyGhostHostility(ghost, mode);
-
-        pvpApplied = mode;
-        pvpEverApplied = true;
-        pvpGhost = ghost;
-    }
 
     public var serverPlayerId      : int;
     public var lastMovementSequence : int;
@@ -71,6 +45,7 @@ statemachine class r_RemotePlayer
     public var speed     : float;
     public var area     : EAreaName;
     public var ghost     : CActor;
+    public var duelAiForceId : int;
     public var inGame : bool;
     public var heldItem : string;
     public var heldSecondaryItem : string;
@@ -96,6 +71,7 @@ statemachine class r_RemotePlayer
 
     default signEndPrevTime = -1.0;
     default signEventPrevSeq = -1;
+    default duelAiForceId = -1;
 
     public var signVfxEnabled : bool;
     private var lastSignVfxAt : float;
@@ -528,6 +504,27 @@ statemachine class r_RemotePlayer
             return;
 
         animQueue.PushBack(req);
+    }
+
+    public function playDuelHitReaction(swordHit : bool)
+    {
+        var anim : r_Anim;
+
+        if(!ghost)
+        {
+            return;
+        }
+
+        if(swordHit)
+        {
+            anim = theGame.r_getMultiplayerClient().getRandSwordHitAnim();
+        }
+        else
+        {
+            anim = theGame.r_getMultiplayerClient().getRandFistHitAnim();
+        }
+
+        queueAnim(anim.anim, anim.duration, 0.1, 0, 'hit', true);
     }
 
     private function playAnimFromQueue()
@@ -1200,9 +1197,7 @@ statemachine class r_RemotePlayer
         ghost.AddTag('MPEntity');
         ghost.SetCanPlayHitAnim(false);
 
-        pvpApplied = PVP_Off;
-        pvpEverApplied = false;
-        applyPvpMode(theGame.r_getMultiplayerClient().getPvpPolicy().resolve(this), true);
+        theGame.r_getMultiplayerClient().getDuelController().applyGhost(this, true);
 
         if(!ghost.HasAbility('IsNotScaredOfMonsters')) ghost.AddAbility('IsNotScaredOfMonsters', true); 
 
@@ -1334,6 +1329,7 @@ statemachine class r_RemotePlayer
             destroyPin();
             ghost.Destroy();
             ghost = NULL;
+            duelAiForceId = -1;
         }
 
         if(boat)
@@ -6691,7 +6687,7 @@ state WO_UpdateCPC in r_RemotePlayer
     {
         ((CActor)parent.ghost).SignalGameplayEventParamInt( 'RidingManagerDismountHorse', DT_instant | DT_fromScript );
 
-        parent.applyPvpMode(theGame.r_getMultiplayerClient().getPvpPolicy().resolve(parent), true);
+        theGame.r_getMultiplayerClient().getDuelController().applyGhost(parent, true);
     }
 
     latent function spawnBoat()

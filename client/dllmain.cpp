@@ -939,6 +939,25 @@ void SendPartyRequest2(const char* opcode, const std::string& first, const std::
 	SendPacket(BuildPacket(opcode, BuildLocalPacketId(), fields), opcode);
 }
 
+void SendPartyRequest3(const char* opcode, const std::string& first, const std::string& second, const std::string& third)
+{
+	std::vector<std::string> fields;
+	fields.push_back(first.empty() ? "-" : first);
+	fields.push_back(second.empty() ? "-" : second);
+	fields.push_back(third.empty() ? "-" : third);
+	SendPacket(BuildPacket(opcode, BuildLocalPacketId(), fields), opcode);
+}
+
+void SendPartyRequest4(const char* opcode, const std::string& first, const std::string& second, const std::string& third, const std::string& fourth)
+{
+	std::vector<std::string> fields;
+	fields.push_back(first.empty() ? "-" : first);
+	fields.push_back(second.empty() ? "-" : second);
+	fields.push_back(third.empty() ? "-" : third);
+	fields.push_back(fourth.empty() ? "-" : fourth);
+	SendPacket(BuildPacket(opcode, BuildLocalPacketId(), fields), opcode);
+}
+
 void SendPartyScaling(int stepMilli, int maxMilli)
 {
 	std::vector<std::string> fields;
@@ -1295,6 +1314,16 @@ static void HandleServerPacket(const std::string& msg)
 		return;
 	}
 
+	if (opcode == "DUEL")
+	{
+		if (parts.size() < 4 || parts[1] != "0" || parts[2] != "Server")
+			return;
+
+		std::vector<std::string> fields(parts.begin() + 3, parts.end());
+		QueueInbound(InboundOpcode::DuelState, 0, 0, "Server", std::move(fields));
+		return;
+	}
+
 	const bool isNetOpcode = opcode == "NPCNEW" || opcode == "NPCMOV" || opcode == "NPCFAST" || opcode == "NPCEND"
 		|| opcode == "NPCDEAD" || opcode == "NPCHITF" || opcode == "NPCACKF" || opcode == "TSYNCR" || opcode == "NPCKILL"
 		|| opcode == "NPCGIVE" || opcode == "NPCDROP" || opcode == "NPCGONE" || opcode == "PSTATEF"
@@ -1320,6 +1349,7 @@ static void HandleServerPacket(const std::string& msg)
 		&& opcode != "PVIS"
 		&& opcode != "PARTY"
 		&& opcode != "PINVITE"
+		&& opcode != "DUEL"
 		&& opcode != "SCENE"
 		&& opcode != "QITEM"
 		&& opcode != "TPPOS"

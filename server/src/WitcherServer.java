@@ -50,8 +50,19 @@ public class WitcherServer
             new java.util.concurrent.atomic.AtomicInteger(1);
     private static final long PARTY_RESEND_NANOS = 2_000_000_000L;
     private static final long PARTY_REQUEST_TIMEOUT_NANOS = 60_000_000_000L;
+    private static final long DUEL_REQUEST_TIMEOUT_NANOS = 60_000_000_000L;
+    private static final long DUEL_COUNTDOWN_NANOS = 5_000_000_000L;
+    private static final long DUEL_MAX_DURATION_NANOS = 180_000_000_000L;
+    private static final long DUEL_HEALTH_BROADCAST_NANOS = 100_000_000L;
+    private static final double DUEL_RADIUS = 60.0;
+    private static final double DUEL_RADIUS_SQUARED = DUEL_RADIUS * DUEL_RADIUS;
+    private static final double DUEL_DAMAGE_MULTIPLIER = 0.25;
+    private static final int DUEL_HEALTH_UNITS = 100_000;
 
     private static final Map<String, PartyRequest> partyRequests = new ConcurrentHashMap<>();
+    private static final Object DUEL_LOCK = new Object();
+    private static final Map<String, DuelRequest> duelRequests = new ConcurrentHashMap<>();
+    private static final Map<Integer, DuelSession> duelsByPlayer = new ConcurrentHashMap<>();
 
     private static final class PartyRequest
     {
@@ -160,6 +171,65 @@ public class WitcherServer
     static long serverMs()
     {
         return (System.nanoTime() - SERVER_START_NANOS) / 1_000_000L;
+    }
+
+    private static final class DuelRequest
+    {
+        final String requesterKey;
+        final String targetKey;
+        final int requesterHealth;
+        final long expiresAtNanos;
+
+        DuelRequest(String requesterKey, String targetKey, int requesterHealth, long expiresAtNanos)
+        {
+            this.requesterKey = requesterKey;
+            this.targetKey = targetKey;
+            this.requesterHealth = requesterHealth;
+            this.expiresAtNanos = expiresAtNanos;
+        }
+    }
+
+    private static final class DuelSession
+    {
+        final int firstId;
+        final int secondId;
+        final String firstName;
+        final String secondName;
+        int firstHealth;
+        int secondHealth;
+        double firstDamageCarry;
+        double secondDamageCarry;
+        long nextHealthBroadcastNanos;
+        boolean healthDirty;
+        final long startAtNanos;
+        long endsAtNanos;
+        boolean active;
+
+        DuelSession(PlayerSession first, PlayerSession second, int firstHealth, int secondHealth, long startAtNanos)
+        {
+            this.firstId = first.playerId;
+            this.secondId = second.playerId;
+            this.firstName = first.username;
+            this.secondName = second.username;
+            this.firstHealth = firstHealth;
+            this.secondHealth = secondHealth;
+            this.startAtNanos = startAtNanos;
+        }
+
+        boolean includes(int playerId)
+        {
+            return playerId == firstId || playerId == secondId;
+        }
+
+        int opponentId(int playerId)
+        {
+            return playerId == firstId ? secondId : firstId;
+        }
+
+        String opponentName(int playerId)
+        {
+            return playerId == firstId ? secondName : firstName;
+        }
     }
 
     private static List<PlayerSession> activeSessions()
@@ -1096,6 +1166,36 @@ public class WitcherServer
 
     private static void handleNpcMessage(String opcode, PlayerSession session, List<String> fields, long now)
     {
+        if ("DUELREQ".equals(opcode))
+        {
+            handleDuelRequest(session, fields, now);
+            return;
+        }
+
+        if ("DUELRESP".equals(opcode))
+        {
+            handleDuelResponse(session, fields, now);
+            return;
+        }
+
+        if ("DUELHIT".equals(opcode))
+        {
+            handleDuelHit(session, fields, now);
+            return;
+        }
+
+        if ("DUELHEAL".equals(opcode))
+        {
+            handleDuelHeal(session, fields);
+            return;
+        }
+
+        if ("DUELSAFE".equals(opcode))
+        {
+            handleDuelCancel(session, fields);
+            return;
+        }
+
         if (fields.isEmpty())
         {
             return;
@@ -1735,6 +1835,16 @@ public class WitcherServer
 
                 if (nowPaused)
                 {
+                    synchronized (DUEL_LOCK)
+                    {
+                        DuelSession duel = duelsByPlayer.get(session.playerId);
+
+                        if (duel != null)
+                        {
+                            endDuel(duel, "CANCELLED", 0);
+                        }
+                    }
+
                     int cleared = NpcRegistry.clearTargetsForPlayer(session.playerId);
 
                     if (cleared > 0)
@@ -3527,6 +3637,460 @@ public class WitcherServer
         }
     }
 
+    private static void handleDuelRequest(PlayerSession actor, List<String> fields, long now)
+    {
+        if (fields.size() < 3)
+        {
+            return;
+        }
+
+        String actorKey = normalizeUsernameKey(actor.username);
+        String targetKey = normalizeUsernameKey(fields.get(0));
+        Integer safe = parseIntegerOrNull(fields.get(1));
+        Integer health = parseIntegerOrNull(fields.get(2));
+
+        synchronized (DUEL_LOCK)
+        {
+            purgeExpiredDuels(now);
+
+            if (targetKey.isEmpty() || targetKey.equals(actorKey))
+            {
+                queueDuel(actor, "FAIL", "self");
+                return;
+            }
+
+            PlayerSession target = players.get(targetKey);
+
+            if (target == null || !target.transportReady())
+            {
+                queueDuel(actor, "FAIL", "offline", fields.get(0));
+                return;
+            }
+
+            if (safe == null || safe == 0 || !duelPairReady(actor, target))
+            {
+                queueDuel(actor, "FAIL", "unsafe", target.username);
+                return;
+            }
+
+            if (!duelInRange(actor, target))
+            {
+                queueDuel(actor, "FAIL", "far", target.username);
+                return;
+            }
+
+            if (duelsByPlayer.containsKey(actor.playerId) || duelsByPlayer.containsKey(target.playerId))
+            {
+                queueDuel(actor, "FAIL", "busy", target.username);
+                return;
+            }
+
+            String key = duelRequestKey(actorKey, targetKey);
+
+            if (duelRequests.containsKey(key))
+            {
+                queueDuel(actor, "FAIL", "pending", target.username);
+                return;
+            }
+
+            duelRequests.put(key, new DuelRequest(actorKey, targetKey,
+                    clampDuelHealth(health == null ? DUEL_HEALTH_UNITS : health),
+                    now + DUEL_REQUEST_TIMEOUT_NANOS));
+            queueDuel(target, "INVITE", actor.username);
+            queueDuel(actor, "SENT", target.username);
+            dbg("DUEL request %s -> %s (expires in %ds)\n", actorKey, targetKey,
+                    DUEL_REQUEST_TIMEOUT_NANOS / 1_000_000_000L);
+        }
+    }
+
+    private static void handleDuelResponse(PlayerSession actor, List<String> fields, long now)
+    {
+        if (fields.size() < 4)
+        {
+            return;
+        }
+
+        String actorKey = normalizeUsernameKey(actor.username);
+        String requesterKey = normalizeUsernameKey(fields.get(0));
+        Integer approved = parseIntegerOrNull(fields.get(1));
+        Integer safe = parseIntegerOrNull(fields.get(2));
+        Integer health = parseIntegerOrNull(fields.get(3));
+
+        synchronized (DUEL_LOCK)
+        {
+            purgeExpiredDuels(now);
+            DuelRequest request = duelRequests.remove(duelRequestKey(requesterKey, actorKey));
+
+            if (request == null)
+            {
+                queueDuel(actor, "FAIL", "none", fields.get(0));
+                return;
+            }
+
+            PlayerSession requester = players.get(requesterKey);
+            queueDuel(actor, "RESOLVED", requester == null ? fields.get(0) : requester.username);
+
+            if (requester == null || !requester.transportReady())
+            {
+                queueDuel(actor, "FAIL", "offline", fields.get(0));
+                return;
+            }
+
+            if (approved == null || approved == 0)
+            {
+                queueDuel(requester, "REJECTED", actor.username);
+                dbg("DUEL request %s -> %s REJECTED\n", requesterKey, actorKey);
+                return;
+            }
+
+            if (safe == null || safe == 0 || !duelPairReady(requester, actor))
+            {
+                queueDuel(requester, "CANCELLED", actor.username, "unsafe");
+                queueDuel(actor, "CANCELLED", requester.username, "unsafe");
+                return;
+            }
+
+            if (!duelInRange(requester, actor))
+            {
+                queueDuel(requester, "CANCELLED", actor.username, "far");
+                queueDuel(actor, "CANCELLED", requester.username, "far");
+                return;
+            }
+
+            if (duelsByPlayer.containsKey(requester.playerId) || duelsByPlayer.containsKey(actor.playerId))
+            {
+                queueDuel(requester, "FAIL", "busy", actor.username);
+                queueDuel(actor, "FAIL", "busy", requester.username);
+                return;
+            }
+
+            DuelSession duel = new DuelSession(requester, actor, request.requesterHealth,
+                    clampDuelHealth(health == null ? DUEL_HEALTH_UNITS : health), now + DUEL_COUNTDOWN_NANOS);
+            duelsByPlayer.put(requester.playerId, duel);
+            duelsByPlayer.put(actor.playerId, duel);
+            queueDuel(requester, "COUNTDOWN", actor.username, "5");
+            queueDuel(actor, "COUNTDOWN", requester.username, "5");
+            dbg("DUEL countdown %s <-> %s\n", requesterKey, actorKey);
+        }
+    }
+
+    private static void handleDuelHit(PlayerSession actor, List<String> fields, long now)
+    {
+        if (fields.size() < 2)
+        {
+            return;
+        }
+
+        Integer targetId = parseIntegerOrNull(fields.get(0));
+        Integer damage = parseIntegerOrNull(fields.get(1));
+
+        if (targetId == null || damage == null || damage <= 0)
+        {
+            return;
+        }
+
+        synchronized (DUEL_LOCK)
+        {
+            DuelSession duel = duelsByPlayer.get(actor.playerId);
+
+            if (duel == null || !duel.active || duel.opponentId(actor.playerId) != targetId || !duelIsValid(duel))
+            {
+                return;
+            }
+
+            int raw = Math.min(DUEL_HEALTH_UNITS, damage);
+            double scaled;
+            int applied;
+
+            if (targetId == duel.firstId)
+            {
+                scaled = raw * DUEL_DAMAGE_MULTIPLIER + duel.firstDamageCarry;
+                applied = (int) scaled;
+                duel.firstDamageCarry = scaled - applied;
+
+                if (applied <= 0)
+                {
+                    return;
+                }
+
+                duel.firstHealth = Math.max(0, duel.firstHealth - applied);
+            }
+            else
+            {
+                scaled = raw * DUEL_DAMAGE_MULTIPLIER + duel.secondDamageCarry;
+                applied = (int) scaled;
+                duel.secondDamageCarry = scaled - applied;
+
+                if (applied <= 0)
+                {
+                    return;
+                }
+
+                duel.secondHealth = Math.max(0, duel.secondHealth - applied);
+            }
+
+            duel.healthDirty = true;
+            publishDuelHealth(duel, now, false);
+
+            if ((targetId == duel.firstId && duel.firstHealth == 0)
+                    || (targetId == duel.secondId && duel.secondHealth == 0))
+            {
+                publishDuelHealth(duel, now, true);
+                endDuel(duel, "WIN", actor.playerId);
+            }
+        }
+    }
+
+    private static void handleDuelHeal(PlayerSession actor, List<String> fields)
+    {
+        if (fields.isEmpty())
+        {
+            return;
+        }
+
+        Integer healing = parseIntegerOrNull(fields.get(0));
+
+        if (healing == null || healing <= 0)
+        {
+            return;
+        }
+
+        synchronized (DUEL_LOCK)
+        {
+            DuelSession duel = duelsByPlayer.get(actor.playerId);
+
+            if (duel == null || !duel.active || !duelIsValid(duel))
+            {
+                return;
+            }
+
+            int applied = Math.min(DUEL_HEALTH_UNITS, healing);
+            int previous;
+
+            if (actor.playerId == duel.firstId)
+            {
+                previous = duel.firstHealth;
+                duel.firstHealth = Math.min(DUEL_HEALTH_UNITS, duel.firstHealth + applied);
+
+                if (duel.firstHealth == previous)
+                {
+                    return;
+                }
+            }
+            else
+            {
+                previous = duel.secondHealth;
+                duel.secondHealth = Math.min(DUEL_HEALTH_UNITS, duel.secondHealth + applied);
+
+                if (duel.secondHealth == previous)
+                {
+                    return;
+                }
+            }
+
+            duel.healthDirty = true;
+            publishDuelHealth(duel, System.nanoTime(), false);
+        }
+    }
+
+    private static void handleDuelCancel(PlayerSession actor, List<String> fields)
+    {
+        synchronized (DUEL_LOCK)
+        {
+            DuelSession duel = duelsByPlayer.get(actor.playerId);
+
+            if (duel != null)
+            {
+                endDuel(duel, "CANCELLED", 0);
+            }
+        }
+    }
+
+    private static int clampDuelHealth(int value)
+    {
+        return Math.max(0, Math.min(DUEL_HEALTH_UNITS, value));
+    }
+
+    private static boolean duelPairReady(PlayerSession first, PlayerSession second)
+    {
+        return first != null && second != null && first.transportReady() && second.transportReady()
+                && !first.paused && !second.paused && first.hasPosition && second.hasPosition;
+    }
+
+    private static boolean duelInRange(PlayerSession first, PlayerSession second)
+    {
+        return duelDistanceSquared(first, second) <= DUEL_RADIUS_SQUARED;
+    }
+
+    private static double duelDistanceSquared(PlayerSession first, PlayerSession second)
+    {
+        if (first == second)
+        {
+            return 0.0;
+        }
+        if (!first.hasPosition || !second.hasPosition)
+        {
+            return Double.MAX_VALUE;
+        }
+        double dx = first.posX - second.posX;
+        double dy = first.posY - second.posY;
+        double dz = first.posZ - second.posZ;
+        return dx * dx + dy * dy + dz * dz;
+    }
+
+    private static boolean duelIsValid(DuelSession duel)
+    {
+        PlayerSession first = playersById.get(duel.firstId);
+        PlayerSession second = playersById.get(duel.secondId);
+        return duelPairReady(first, second) && duelInRange(first, second);
+    }
+
+    private static String duelRequestKey(String requesterKey, String targetKey)
+    {
+        return requesterKey + ">" + targetKey;
+    }
+
+    private static void queueDuel(PlayerSession session, String kind, String... values)
+    {
+        if (session == null)
+        {
+            return;
+        }
+
+        List<String> fields = new ArrayList<>();
+        fields.add(kind);
+        Collections.addAll(fields, values);
+        queueOutbound(session, "DUEL", fields);
+    }
+
+    private static void sendDuelHealth(DuelSession duel)
+    {
+        PlayerSession first = playersById.get(duel.firstId);
+        PlayerSession second = playersById.get(duel.secondId);
+        String firstId = Integer.toString(duel.firstId);
+        String secondId = Integer.toString(duel.secondId);
+        String firstHealth = Integer.toString(duel.firstHealth);
+        String secondHealth = Integer.toString(duel.secondHealth);
+        queueDuel(first, "HEALTH", firstId, firstHealth, secondId, secondHealth);
+        queueDuel(second, "HEALTH", firstId, firstHealth, secondId, secondHealth);
+    }
+
+    private static void publishDuelHealth(DuelSession duel, long now, boolean force)
+    {
+        if (!force && (!duel.healthDirty || now < duel.nextHealthBroadcastNanos))
+        {
+            return;
+        }
+
+        sendDuelHealth(duel);
+        duel.healthDirty = false;
+        duel.nextHealthBroadcastNanos = now + DUEL_HEALTH_BROADCAST_NANOS;
+    }
+
+    private static void endDuel(DuelSession duel, String reason, int winnerId)
+    {
+        if (duelsByPlayer.remove(duel.firstId, duel) | duelsByPlayer.remove(duel.secondId, duel))
+        {
+            PlayerSession first = playersById.get(duel.firstId);
+            PlayerSession second = playersById.get(duel.secondId);
+            String winner = winnerId == duel.firstId ? duel.firstName : winnerId == duel.secondId ? duel.secondName : "";
+            String loser = winnerId == duel.firstId ? duel.secondName : winnerId == duel.secondId ? duel.firstName : "";
+            queueDuel(first, "END", reason, winner, loser);
+            queueDuel(second, "END", reason, winner, loser);
+
+            if (winnerId != 0)
+            {
+                for (PlayerSession session : activeSessions())
+                {
+                    queueDuel(session, "ANNOUNCE", winner, loser);
+                }
+            }
+
+            dbg("DUEL ended %s <-> %s reason=%s winner=%s\n", duel.firstName, duel.secondName, reason,
+                    winner.isEmpty() ? "none" : winner);
+        }
+    }
+
+    private static void purgeExpiredDuels(long now)
+    {
+        for (DuelRequest request : new ArrayList<>(duelRequests.values()))
+        {
+            if (now < request.expiresAtNanos || !duelRequests.remove(duelRequestKey(request.requesterKey, request.targetKey), request))
+            {
+                continue;
+            }
+
+            PlayerSession requester = players.get(request.requesterKey);
+            PlayerSession target = players.get(request.targetKey);
+            queueDuel(requester, "EXPIRED", target == null ? request.targetKey : target.username);
+            queueDuel(target, "EXPIREDIN", requester == null ? request.requesterKey : requester.username);
+            dbg("DUEL request %s -> %s EXPIRED\n", request.requesterKey, request.targetKey);
+        }
+    }
+
+    private static void tickDuels(long now)
+    {
+        synchronized (DUEL_LOCK)
+        {
+            purgeExpiredDuels(now);
+
+            for (DuelSession duel : new HashSet<>(duelsByPlayer.values()))
+            {
+                if (!duelIsValid(duel))
+                {
+                    endDuel(duel, "CANCELLED", 0);
+                    continue;
+                }
+
+                if (!duel.active && now >= duel.startAtNanos)
+                {
+                    duel.active = true;
+                    duel.endsAtNanos = now + DUEL_MAX_DURATION_NANOS;
+                    PlayerSession first = playersById.get(duel.firstId);
+                    PlayerSession second = playersById.get(duel.secondId);
+                    queueDuel(first, "START", duel.secondName);
+                    queueDuel(second, "START", duel.firstName);
+                    sendDuelHealth(duel);
+                    duel.nextHealthBroadcastNanos = now + DUEL_HEALTH_BROADCAST_NANOS;
+                    dbg("DUEL started %s <-> %s\n", duel.firstName, duel.secondName);
+                }
+                else if (duel.active && now >= duel.endsAtNanos)
+                {
+                    endDuel(duel, "TIME", 0);
+                }
+                else if (duel.active)
+                {
+                    publishDuelHealth(duel, now, false);
+                }
+            }
+        }
+    }
+
+    private static void dropDuelStateFor(String usernameKey)
+    {
+        synchronized (DUEL_LOCK)
+        {
+            for (DuelRequest request : new ArrayList<>(duelRequests.values()))
+            {
+                if (request.requesterKey.equals(usernameKey) || request.targetKey.equals(usernameKey))
+                {
+                    duelRequests.remove(duelRequestKey(request.requesterKey, request.targetKey), request);
+                }
+            }
+
+            PlayerSession session = players.get(usernameKey);
+
+            if (session != null)
+            {
+                DuelSession duel = duelsByPlayer.get(session.playerId);
+                if (duel != null)
+                {
+                    endDuel(duel, "DISCONNECTED", 0);
+                }
+            }
+        }
+    }
+
     private static void partyRequest(PlayerSession actor, String targetName)
     {
         String actorKey = normalizeUsernameKey(actor.username);
@@ -5284,7 +5848,9 @@ public class WitcherServer
 
     private static void sendNpcPacket(DatagramSocket socket, PlayerSession session, String opcode, List<String> fields)
     {
-        String packetText = buildTypedPacket(opcode, session.playerId, session.username, fields);
+        String packetText = "DUEL".equals(opcode)
+                ? buildTypedPacket(opcode, 0, "Server", fields)
+                : buildTypedPacket(opcode, session.playerId, session.username, fields);
         if (sendToSession(session, packetText, opcode, opcode))
         {
             totalNpcPacketsSent.incrementAndGet();
@@ -5430,6 +5996,7 @@ public class WitcherServer
             {
                 List<PlayerSession> sessions = activeSessions();
                 long tickNanos = System.nanoTime();
+                tickDuels(tickNanos);
 
                 if (BotManager.count() > 0 && !sessions.isEmpty())
                 {
@@ -6350,6 +6917,8 @@ public class WitcherServer
     {
         String usernameKey = normalizeUsernameKey(victim.username);
 
+        dropDuelStateFor(victim);
+
         PlayerSession removed = players.remove(usernameKey);
         reservedUsernames.remove(usernameKey);
 
@@ -7213,6 +7782,8 @@ public class WitcherServer
 
     private static boolean reserveTimedOutPlayer(String usernameKey, PlayerSession session, long now)
     {
+        dropDuelStateFor(session);
+
         if (!players.remove(usernameKey, session))
         {
             return false;
@@ -7244,6 +7815,43 @@ public class WitcherServer
                 ip);
 
         return true;
+    }
+
+    private static void dropDuelStateFor(PlayerSession session)
+    {
+        if (session == null)
+        {
+            return;
+        }
+
+        String usernameKey = normalizeUsernameKey(session.username);
+
+        synchronized (DUEL_LOCK)
+        {
+            for (DuelRequest request : new ArrayList<>(duelRequests.values()))
+            {
+                if (request.requesterKey.equals(usernameKey) || request.targetKey.equals(usernameKey))
+                {
+                    if (duelRequests.remove(duelRequestKey(request.requesterKey, request.targetKey), request))
+                    {
+                        if (request.requesterKey.equals(usernameKey))
+                        {
+                            queueDuel(players.get(request.targetKey), "EXPIREDIN", session.username);
+                        }
+                        else
+                        {
+                            queueDuel(players.get(request.requesterKey), "EXPIRED", session.username);
+                        }
+                    }
+                }
+            }
+
+            DuelSession duel = duelsByPlayer.get(session.playerId);
+            if (duel != null)
+            {
+                endDuel(duel, "DISCONNECTED", 0);
+            }
+        }
     }
 
     private static PlayerSession findPlayerById(int playerId)

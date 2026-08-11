@@ -23,6 +23,11 @@ import function WO_PartyJoin(target : string);
 import function WO_TeleportRequest(target : string);
 import function WO_PartyLeave();
 import function WO_PartyRespond(target : string, approved : bool);
+import function WO_DuelRequest(target : string, safe : bool, healthUnits : int);
+import function WO_DuelRespond(target : string, approved : bool, safe : bool, healthUnits : int);
+import function WO_DuelHit(targetId : int, damageUnits : int);
+import function WO_DuelHeal(healthUnits : int);
+import function WO_DuelCancel(target : string);
 import function WO_PartyCoopMode(enabled : bool);
 import function WO_ToName(text : string) : name;
 import function WO_SaveSend(filePath : string) : bool;
@@ -299,6 +304,10 @@ function WO_PumpInbound(maxMessages : int)
                 WO_ApplyServerAnnouncement();
                 break;
 
+            case 21:
+                WO_ApplyDuel();
+                break;
+
 
 
             default:
@@ -367,6 +376,11 @@ function WO_ApplySceneStart()
         WO_Float(10), WO_Float(11), WO_Float(12),
         WO_Float(13), WO_Int(14), WO_Int(15),
         WO_Int(16), WO_Str(17), WO_Int(18));
+}
+
+function WO_ApplyDuel()
+{
+    theGame.r_getMultiplayerClient().onDuelEvent(WO_Str(0), WO_Str(1), WO_Str(2), WO_Str(3), WO_Str(4));
 }
 
 function WO_ApplyPlayerPosition()

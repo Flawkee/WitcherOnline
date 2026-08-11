@@ -749,7 +749,13 @@ function OnCallSelectItem(itemId : SItemUniqueId)
         
         emoteId = StringToInt(StrReplace(itemName, "wo_emote", "")) - 1;
 
-        if(itemName == 'wo_chat1')
+        if(m_DataObject.wo_isPlayerMenu && m_selectedItemCategory == 0 && itemName == 'wo_inviteDuel')
+        {
+            ClosePopup();
+            theGame.r_getMultiplayerClient().duelRequest(m_DataObject.wo_playerMenuPlayer.username);
+            return true;
+        }
+        else if(itemName == 'wo_chat1')
         {
             mpghosts_chat("Hello");
         }
@@ -989,7 +995,6 @@ function OnConfigUI()
             m_tradeInventory.Initialize( m_DataObject.targetInventory );
             m_tradeInventory.ignorePosition = true;
             m_tradeInventory.SetFilterType( IFT_None );
-
             m_fxSetCategory.InvokeSelfOneArg( FlashArgString(m_DataObject.wo_playerMenuPlayer.username) );
 
             l_flashObject = m_flashValueStorage.CreateTempFlashObject();

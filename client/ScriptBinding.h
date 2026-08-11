@@ -26,7 +26,8 @@ namespace w3mp {
 		PlayerPosition = 17,
 		PlayerVfxSpawn = 18,
 		PlayerVfxImpact = 19,
-		ServerAnnouncement = 20
+		ServerAnnouncement = 20,
+		DuelState = 21
 	};
 
 	enum class ClientStatus

@@ -244,12 +244,15 @@ statemachine class r_MultiplayerClient
     private var coopOffered : bool;
     private var confirmPopupOpen : bool;
     private var pendingInvites : array<string>;
+    private var pendingDuelInvites : array<string>;
     private var pendingCoopLeader : string;
     private var activeConfirmKind : int;
     private var activeConfirmSubject : string;
     private var nextConfirmPopupAt : float;
+    private var confirmPopupRequestedAt : float;
 
     default coopMode = false;
+    default confirmPopupRequestedAt = -1.0;
     default coopPending = false;
     default coopLeader = false;
     default partyDialogReady = false;
@@ -3224,6 +3227,7 @@ statemachine class r_MultiplayerClient
         confirmPopupOpen = true;
         activeConfirmKind = kind;
         activeConfirmSubject = subject;
+        confirmPopupRequestedAt = theGame.GetEngineTimeAsSeconds();
 
         theGame.RequestMenu('PopupMenu', data);
 
@@ -3240,6 +3244,7 @@ statemachine class r_MultiplayerClient
         confirmPopupOpen = false;
         activeConfirmKind = 0;
         activeConfirmSubject = "";
+        confirmPopupRequestedAt = -1.0;
         nextConfirmPopupAt = theGame.GetEngineTimeAsSeconds() + 0.2;
 
         theGame.CloseMenu('PopupMenu');
@@ -3270,6 +3275,7 @@ statemachine class r_MultiplayerClient
         confirmPopupOpen = false;
         activeConfirmKind = 0;
         activeConfirmSubject = "";
+        confirmPopupRequestedAt = -1.0;
         nextConfirmPopupAt = theGame.GetEngineTimeAsSeconds() + 0.2;
     }
 
@@ -3306,11 +3312,77 @@ statemachine class r_MultiplayerClient
         }
     }
 
+    private function addPendingDuelInvite(requester : string)
+    {
+        var i : int;
+
+        if(requester == "")
+        {
+            return;
+        }
+
+        for(i = 0; i < pendingDuelInvites.Size(); i += 1)
+        {
+            if(StrLower(pendingDuelInvites[i]) == StrLower(requester))
+            {
+                return;
+            }
+        }
+
+        pendingDuelInvites.PushBack(requester);
+    }
+
+    private function removePendingDuelInvite(requester : string)
+    {
+        var i : int;
+
+        for(i = pendingDuelInvites.Size() - 1; i >= 0; i -= 1)
+        {
+            if(StrLower(pendingDuelInvites[i]) == StrLower(requester))
+            {
+                pendingDuelInvites.Erase(i);
+            }
+        }
+    }
+
+    private function hasPendingDuelInvite(requester : string) : bool
+    {
+        var i : int;
+
+        for(i = 0; i < pendingDuelInvites.Size(); i += 1)
+        {
+            if(StrLower(pendingDuelInvites[i]) == StrLower(requester))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     public function updateConfirmationQueue()
     {
         var body : string;
+        var rootMenu : CR4Menu;
+        var now : float;
 
-        if(confirmPopupOpen || theGame.GetEngineTimeAsSeconds() < nextConfirmPopupAt
+        now = theGame.GetEngineTimeAsSeconds();
+
+        if(confirmPopupOpen && confirmPopupRequestedAt > 0.0 && now - confirmPopupRequestedAt >= 0.75)
+        {
+            rootMenu = theGame.GetGuiManager().GetRootMenu();
+
+            if(!rootMenu || rootMenu.GetMenuName() != 'PopupMenu')
+            {
+                confirmPopupOpen = false;
+                activeConfirmKind = 0;
+                activeConfirmSubject = "";
+                confirmPopupRequestedAt = -1.0;
+                nextConfirmPopupAt = now;
+            }
+        }
+
+        if(confirmPopupOpen || now < nextConfirmPopupAt
             || theGame.GetGuiManager().IsAnyMenu())
         {
             return;
@@ -3323,6 +3395,13 @@ statemachine class r_MultiplayerClient
             return;
         }
 
+        if(pendingDuelInvites.Size() > 0)
+        {
+            body = StrReplace(GetLocStringById(2111114325), "%s", pendingDuelInvites[0]);
+            showConfirmPopup(4, pendingDuelInvites[0], GetLocStringById(2111114324), body);
+            return;
+        }
+
         if(pendingCoopLeader != "")
         {
             body = StrReplace(GetLocStringById(2111114287), "%s", pendingCoopLeader);
@@ -3332,10 +3411,7 @@ statemachine class r_MultiplayerClient
 
     public function onConfirmPopupResult(kind : int, subject : string, approved : bool)
     {
-        confirmPopupOpen = false;
-        activeConfirmKind = 0;
-        activeConfirmSubject = "";
-        nextConfirmPopupAt = theGame.GetEngineTimeAsSeconds() + 0.2;
+        closeConfirmPopup();
 
         if(kind == 1)
         {
@@ -3360,6 +3436,12 @@ statemachine class r_MultiplayerClient
             {
                 suppressFailedSceneJoin();
             }
+            return;
+        }
+
+        if(kind == 4)
+        {
+            respondToDuelInvite(subject, approved);
         }
     }
 
@@ -3579,6 +3661,203 @@ statemachine class r_MultiplayerClient
     public function isPartyLeaderName(playerName : string) : bool
     {
         return inParty && playerName != "" && joinedParty == playerName;
+    }
+
+    public function duelRequest(playerName : string)
+    {
+        var controller : r_DuelController;
+
+        controller = getDuelController();
+
+        if(playerName == "" || StrLower(playerName) == StrLower(username))
+        {
+            notice(GetLocStringById(2111114330));
+            return;
+        }
+
+        if(hasPendingDuelInvite(playerName))
+        {
+            respondToDuelInvite(playerName, true);
+            return;
+        }
+
+        if(!controller.canRequest())
+        {
+            notice(GetLocStringById(2111114331));
+            return;
+        }
+
+        WO_DuelRequest(playerName, true, controller.localHealthUnits());
+    }
+
+    public function onDuelEvent(kind : string, first : string, second : string, third : string, fourth : string)
+    {
+        var controller : r_DuelController;
+        var remote : r_RemotePlayer;
+        var firstId : int;
+        var secondId : int;
+
+        controller = getDuelController();
+
+        if(kind == "INVITE")
+        {
+            addPendingDuelInvite(first);
+            updateConfirmationQueue();
+            return;
+        }
+
+        if(kind == "SENT")
+        {
+            notice(StrReplace(GetLocStringById(2111114326), "%s", first));
+            return;
+        }
+
+        if(kind == "REJECTED")
+        {
+            notice(StrReplace(GetLocStringById(2111114329), "%s", first));
+            return;
+        }
+
+        if(kind == "EXPIRED")
+        {
+            notice(StrReplace(GetLocStringById(2111114332), "%s", first));
+            return;
+        }
+
+        if(kind == "EXPIREDIN")
+        {
+            removePendingDuelInvite(first);
+            closeConfirmationKind(4, first);
+            notice(StrReplace(GetLocStringById(2111114333), "%s", first));
+            return;
+        }
+
+        if(kind == "RESOLVED")
+        {
+            removePendingDuelInvite(first);
+            closeConfirmationKind(4, first);
+            return;
+        }
+
+        if(kind == "COUNTDOWN")
+        {
+            controller.beginCountdown(first);
+            return;
+        }
+
+        if(kind == "START")
+        {
+            remote = findRemoteByUsername(first);
+
+            if(remote)
+            {
+                controller.setOpponentId(remote.serverPlayerId);
+            }
+
+            controller.begin(first);
+            GetWitcherPlayer().DisplayHudMessage(StrReplace(GetLocStringById(2111114334), "%s", first));
+            return;
+        }
+
+        if(kind == "HEALTH")
+        {
+            firstId = StringToInt(first, 0);
+            secondId = StringToInt(third, 0);
+            controller.setHealth(firstId, StringToInt(second, 100000), secondId, StringToInt(fourth, 100000));
+            return;
+        }
+
+        if(kind == "END")
+        {
+            if(first == "WIN")
+            {
+                if(second == username)
+                {
+                    notice(GetLocStringById(2111114335));
+                }
+                else
+                {
+                    notice(GetLocStringById(2111114336));
+                }
+            }
+            else if(first == "TIME")
+            {
+                notice(GetLocStringById(2111114337));
+            }
+            else if(first == "DISCONNECTED")
+            {
+                notice(GetLocStringById(2111114338));
+            }
+            else
+            {
+                notice(GetLocStringById(2111114339));
+            }
+
+            controller.finish();
+
+            if(first == "WIN")
+            {
+                if(second == username)
+                {
+                    mpghosts_emote(7);
+                }
+                else if(third == username)
+                {
+                    mpghosts_emote(22);
+                }
+            }
+
+            return;
+        }
+
+        if(kind == "ANNOUNCE")
+        {
+            notice(StrReplace(StrReplace(GetLocStringById(2111114340), "%s", first), "%t", second));
+            return;
+        }
+
+        if(kind == "CANCELLED")
+        {
+            notice(second == "far" ? GetLocStringById(2111114339) : GetLocStringById(2111114331));
+            controller.finish();
+            return;
+        }
+
+        if(kind == "FAIL")
+        {
+            if(first == "far")
+            {
+                notice(StrReplace(GetLocStringById(2111114341), "%s", second));
+            }
+            else if(first == "busy")
+            {
+                notice(StrReplace(GetLocStringById(2111114342), "%s", second));
+            }
+            else if(first == "offline")
+            {
+                notice(StrReplace(GetLocStringById(2111114281), "%s", second));
+            }
+            else if(first == "none")
+            {
+                notice(StrReplace(GetLocStringById(2111114343), "%s", second));
+            }
+            else
+            {
+                notice(GetLocStringById(2111114331));
+            }
+        }
+    }
+
+    public function respondToDuelInvite(requester : string, approved : bool)
+    {
+        closeConfirmationKind(4, requester);
+        removePendingDuelInvite(requester);
+        WO_DuelRespond(requester, approved, getDuelController().canAccept(), getDuelController().localHealthUnits());
+
+        if(!approved)
+        {
+            notice(StrReplace(GetLocStringById(2111114328), "%s", requester));
+        }
     }
 
     private function isCoopRosterName(playerName : string) : bool
@@ -4804,6 +5083,7 @@ statemachine class r_MultiplayerClient
         }
 
         inventory.AddAnItem('wo_inviteGwent', 1);
+        inventory.AddAnItem('wo_inviteDuel', 1);
 
         if(player.isSailing)
         {
@@ -6057,16 +6337,16 @@ statemachine class r_MultiplayerClient
         return entityClassifier;
     }
 
-    private var pvpPolicy : r_PvpPolicy;
+    private var duelController : r_DuelController;
 
-    public function getPvpPolicy() : r_PvpPolicy
+    public function getDuelController() : r_DuelController
     {
-        if(!pvpPolicy)
+        if(!duelController)
         {
-            pvpPolicy = new r_PvpPolicy in this;
+            duelController = new r_DuelController in this;
         }
 
-        return pvpPolicy;
+        return duelController;
     }
 
     public function resolveTargetActor(targetPlayerId : int) : CActor
@@ -6137,17 +6417,24 @@ statemachine class r_MultiplayerClient
         return NULL;
     }
 
-    public function refreshGhostHostility()
+    public function findRemoteByUsername(playerName : string) : r_RemotePlayer
     {
         var i : int;
 
+        if(playerName == "")
+        {
+            return NULL;
+        }
+
         for(i = 0; i < players.Size(); i += 1)
         {
-            if(players[i])
+            if(players[i] && StrLower(players[i].username) == StrLower(playerName))
             {
-                players[i].applyPvpMode(getPvpPolicy().resolve(players[i]), true);
+                return players[i];
             }
         }
+
+        return NULL;
     }
 
     private var ghostRebuildWasDead : bool;
@@ -6228,35 +6515,6 @@ statemachine class r_MultiplayerClient
         }
 
         WO_Note("[ghost] rebuild triggered (respawn or area change), ghosts=" + players.Size());
-    }
-
-    public function updateGhostHostility()
-    {
-        var mode : r_EPvpMode;
-        var intact : bool;
-        var i : int;
-
-        for(i = 0; i < players.Size(); i += 1)
-        {
-            if(!players[i] || !players[i].ghost)
-            {
-                continue;
-            }
-
-            mode = getPvpPolicy().resolve(players[i]);
-            intact = wo_ghostProtectionIntact(players[i].ghost, mode);
-
-            if(!intact && players[i].pvpEverApplied)
-            {
-                WO_Note("[pvp] protection lost player=" + players[i].serverPlayerId
-                    + " mode=" + (int)mode
-                    + " invulnerable=" + players[i].ghost.IsInvulnerable()
-                    + " attackable=" + players[i].ghost.IsAttackableByPlayer()
-                    + " -> reapplying");
-            }
-
-            players[i].applyPvpMode(mode, false);
-        }
     }
 
     private var npcSync : r_NpcSync;
@@ -10056,7 +10314,7 @@ state WO_Tick in r_MultiplayerClient
             parent.updateSceneJoin();
             parent.updateEntityClassifier();
             parent.updateGhostRebuild();
-            parent.updateGhostHostility();
+            parent.getDuelController().update();
             parent.updateNpcSync();
             parent.updateBenchmark();
             MP_SU_moveMinimapPins();
@@ -10155,9 +10413,14 @@ function mpghosts_playSound(sound : name)
     theSound.SoundEvent(sound);
 }
 
-exec function duel(val : string)
+exec function gwent(val : string)
 {
     theGame.r_getMultiplayerClient().gwentRequest(val);
+}
+
+exec function duel(val : string)
+{
+    theGame.r_getMultiplayerClient().duelRequest(val);
 }
 
 exec function endgwent()

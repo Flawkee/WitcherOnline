@@ -324,3 +324,25 @@
 2111114321||wo_teleport_location_unavailable|%s's whereabouts cannot be found just now.
 2111114322||option_MPGhosts_PartyNpcScaleStep|Party Enemy HP Step (Leader)
 2111114323||option_MPGhosts_PartyNpcScaleMax|Party Enemy HP Cap (Leader)
+2111114324||wo_duel_prompt_title|A Duel Is Offered
+2111114325||wo_duel_prompt_body|%s challenges you to a duel. Accept?
+2111114326||wo_duel_request_sent|Duel request sent to %s.
+2111114327||wo_duel_countdown|Duel with %s begins in 5 seconds.
+2111114328||wo_duel_request_declined_self|You declined %s's duel request.
+2111114329||wo_duel_request_declined|%s declined your duel request.
+2111114330||wo_duel_cannot_self|You cannot challenge yourself to a duel.
+2111114331||wo_duel_unavailable|You cannot duel while occupied.
+2111114332||wo_duel_request_expired|Your duel request to %s expired.
+2111114333||wo_duel_request_expired_in|The duel request from %s expired.
+2111114334||wo_duel_started|Your duel with %s has begun.
+2111114335||wo_duel_victory|You won the duel.
+2111114336||wo_duel_defeat|You lost the duel.
+2111114337||wo_duel_time_limit|The duel ended as time ran out.
+2111114338||wo_duel_disconnected|The duel ended because a duelist disconnected.
+2111114339||wo_duel_out_of_range|The duel ended because the duelists moved too far apart.
+2111114340||wo_duel_announce|%s defeated %t in a duel.
+2111114341||wo_duel_too_far|Draw nearer to %s before challenging them.
+2111114342||wo_duel_busy|%s is already bound to another duel.
+2111114343||wo_duel_request_none|No pending duel request from %s.
+2111114344||wo_menu_duel|Duel
+2111114345||wo_menu_duel_desc|Challenge this player to a one-on-one duel.
